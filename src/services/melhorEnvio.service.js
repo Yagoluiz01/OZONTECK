@@ -58,7 +58,7 @@ export function buildMelhorEnvioAuthorizeUrl() {
     redirect_uri: redirectUri,
     response_type: "code",
     scope:
-      "shipping-calculate shipping-checkout shipping-generate shipping-tracking"
+  "shipping-calculate shipping-checkout shipping-generate shipping-print shipping-tracking"
   });
 
   return `${authBase}?${params.toString()}`;
