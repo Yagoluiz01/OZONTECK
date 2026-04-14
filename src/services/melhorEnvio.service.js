@@ -80,13 +80,16 @@ export async function exchangeMelhorEnvioCodeForToken(code) {
     code: String(code || "").trim()
   });
 
-  console.log("MELHOR ENVIO TOKEN EXCHANGE:", {
-    tokenUrl,
-    clientId,
-    redirectUri,
-    hasClientSecret: Boolean(clientSecret),
-    codePreview: String(code || "").slice(0, 10)
-  });
+  console.log(
+  "MELHOR ENVIO TOKEN EXCHANGE: " +
+    JSON.stringify({
+      tokenUrl,
+      clientId,
+      redirectUri,
+      hasClientSecret: Boolean(clientSecret),
+      codePreview: String(code || "").slice(0, 10)
+    })
+);
 
   const response = await fetch(tokenUrl, {
     method: "POST",
@@ -100,12 +103,13 @@ export async function exchangeMelhorEnvioCodeForToken(code) {
   const data = await response.json().catch(() => null);
 
   if (!response.ok || !data?.access_token) {
-    throw new Error(
-      data?.message ||
-        data?.error_description ||
-        data?.error ||
-        "Erro ao trocar code por token no Melhor Envio"
-    );
+    console.error(
+  "MELHOR ENVIO TOKEN EXCHANGE ERROR: " +
+    JSON.stringify({
+      status: response.status,
+      data
+    })
+);
   }
 
   return data;
