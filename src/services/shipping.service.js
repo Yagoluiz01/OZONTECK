@@ -392,8 +392,15 @@ export async function generateAutomaticShippingLabel(order, items = []) {
     });
   } catch (error) {
     console.error("ERRO MELHOR ENVIO LABEL:", {
-      message: error.message
-    });
+  message: error.message,
+  orderId: order?.id,
+  orderNumber: order?.order_number,
+  shippingServiceCode: order?.shipping_service_code,
+  shippingCarrier: order?.shipping_carrier,
+  shippingCity: order?.shipping_city,
+  shippingState: order?.shipping_state,
+  shippingCep: order?.shipping_cep
+});
 
     return buildFallbackResult(
       order,
