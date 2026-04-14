@@ -2,7 +2,7 @@ import express from "express";
 import crypto from "crypto";
 import { env } from "../config/env.js";
 import { calculateShippingWithMelhorEnvio } from "../services/melhorEnvio.service.js";
-
+import { generateAutomaticShippingLabel } from "../services/shipping.service.js";
 const router = express.Router();
 
 function slugify(text) {
@@ -808,40 +808,6 @@ async function quoteShippingWithMelhorEnvio({ zipCode, items }) {
   };
 }
 
-async function generateAutomaticShippingLabel(order, items) {
-  if (!order?.id) {
-    throw new Error("Pedido inválido para gerar etiqueta");
-  }
-
-  if (!items?.length) {
-    throw new Error("Pedido sem itens para gerar etiqueta");
-  }
-
-  if (!order.shipping_cep || !order.shipping_address || !order.shipping_number) {
-    throw new Error("Endereço incompleto para gerar etiqueta");
-  }
-
-  const trackingCode = `OZT${Date.now()}`;
-  const shipmentId = `SHIP-${order.order_number || order.id}`;
-  const publicBaseUrl = String(env.apiBaseUrl || "http://localhost:5000").replace(/\/+$/, "");
-  const labelUrl = `${publicBaseUrl}/labels/label-test.pdf`;
-  const labelPdfUrl = `${publicBaseUrl}/labels/label-test.pdf`;
-
-  return {
-    success: true,
-    shipmentId,
-    trackingCode,
-    labelUrl,
-    labelPdfUrl,
-    raw: {
-      mode: "fake_label_local_pdf",
-      orderNumber: order.order_number,
-      orderId: order.id,
-      itemCount: items.length,
-      generatedAt: new Date().toISOString()
-    }
-  };
-}
 
 async function saveGeneratedLabel(orderId, labelData) {
   return updateOrderById(orderId, {
