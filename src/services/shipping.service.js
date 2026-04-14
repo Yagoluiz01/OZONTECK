@@ -1,15 +1,23 @@
 import { env } from "../config/env.js";
-
-function normalizeBoolean(value) {
-  return String(value || "").trim().toLowerCase() === "true";
-}
+import {
+  getMelhorEnvioAccessToken,
+  buildMelhorEnvioHeaders,
+  getMelhorEnvioConfig
+} from "./melhorEnvio.service.js";
 
 function onlyDigits(value) {
   return String(value || "").replace(/\D/g, "");
 }
 
+function toNumber(value, fallback = 0) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
 function getApiBaseUrl() {
-  const configured = String(env.apiBaseUrl || "").trim();
+  const configured = String(
+    process.env.API_BASE_URL || env.apiBaseUrl || ""
+  ).trim();
 
   if (configured) {
     return configured.replace(/\/+$/, "");
@@ -38,80 +46,318 @@ function buildFallbackResult(order, error = "") {
     raw: {
       fallback: true,
       orderId: order?.id || null,
-      reason: String(error || "Frenet indisponível").trim(),
-      generatedAt: new Date().toISOString(),
-    },
+      reason: String(error || "Melhor Envio indisponível").trim(),
+      generatedAt: new Date().toISOString()
+    }
   };
 }
 
-function normalizeShippingLabelResponse(data) {
-  if (!data || typeof data !== "object") return null;
+function getStoreOriginZipCode() {
+  return onlyDigits(
+    process.env.STORE_ORIGIN_ZIP_CODE ||
+      process.env.FRENET_ORIGIN_ZIP_CODE ||
+      env.frenetOriginZipCode ||
+      ""
+  );
+}
 
-  const labelUrl =
-    data.ShippingLabelUrl ||
-    data.shippingLabelUrl ||
-    data.labelUrl ||
-    data.LabelUrl ||
-    "";
+function buildMelhorEnvioProducts(items = []) {
+  return items.map((item, index) => {
+    const quantity = Math.max(1, toNumber(item?.quantity, 1) || 1);
 
-  const trackingCode =
-    data.TrackingNumber ||
-    data.trackingNumber ||
-    data.trackingCode ||
-    data.TrackingCode ||
-    "";
+    const width = Math.max(
+      1,
+      toNumber(item?.width || item?.width_cm || item?.product?.widthCm, 1)
+    );
 
-  const carrier =
-    data.Carrier ||
-    data.carrier ||
-    data.ShippingCompany ||
-    data.shippingCompany ||
-    "";
+    const height = Math.max(
+      1,
+      toNumber(item?.height || item?.height_cm || item?.product?.heightCm, 1)
+    );
 
-  const shipmentId =
-    data.ShipmentId ||
-    data.shipmentId ||
-    data.ShippingShipmentId ||
-    data.shippingShipmentId ||
-    "";
+    const length = Math.max(
+      1,
+      toNumber(item?.length || item?.length_cm || item?.product?.lengthCm, 1)
+    );
 
-  if (!String(labelUrl || "").trim()) {
-    return null;
+    const weight = Math.max(
+      0.001,
+      toNumber(item?.weight || item?.weight_kg || item?.product?.weightKg, 0.3)
+    );
+
+    const insuranceValue = Math.max(
+      0,
+      toNumber(item?.unit_price || item?.price || item?.product?.price, 0)
+    );
+
+    return {
+      id: String(item?.product_id || item?.sku || item?.id || `item-${index + 1}`),
+      width,
+      height,
+      length,
+      weight,
+      insurance_value: insuranceValue,
+      quantity
+    };
+  });
+}
+
+function normalizeAddressForMelhorEnvio(order) {
+  const postalCode = onlyDigits(order?.shipping_cep);
+  const street = String(order?.shipping_address || "").trim();
+  const number = String(order?.shipping_number || "").trim();
+  const complement = String(order?.shipping_complement || "").trim();
+  const district = String(order?.shipping_neighborhood || "").trim();
+  const city = String(order?.shipping_city || "").trim();
+  const stateAbbr = String(order?.shipping_state || "").trim().toUpperCase();
+
+  return {
+    postal_code: postalCode,
+    address: street,
+    number,
+    complement,
+    district,
+    city,
+    state_abbr: stateAbbr
+  };
+}
+
+function buildCartPayload(order, items = []) {
+  const originZipCode = getStoreOriginZipCode();
+
+  if (!originZipCode || originZipCode.length < 8) {
+    throw new Error("CEP de origem da loja não configurado");
+  }
+
+  const destination = normalizeAddressForMelhorEnvio(order);
+
+  if (
+    !destination.postal_code ||
+    !destination.address ||
+    !destination.number ||
+    !destination.city ||
+    !destination.state_abbr
+  ) {
+    throw new Error("Endereço do pedido incompleto para gerar etiqueta");
+  }
+
+  const products = buildMelhorEnvioProducts(items);
+
+  if (!products.length) {
+    throw new Error("Pedido sem itens para gerar etiqueta");
   }
 
   return {
-    labelUrl: String(labelUrl).trim(),
-    trackingCode: String(trackingCode || "").trim(),
-    carrier: String(carrier || "").trim(),
-    shipmentId: String(shipmentId || "").trim(),
-    raw: data,
+    service: String(order?.shipping_service_code || "").trim() || undefined,
+    from: {
+      name: "OZONTECK",
+      phone: String(order?.store_phone || "").trim() || undefined,
+      email: String(order?.store_email || "").trim() || undefined,
+      document: String(order?.store_document || "").trim() || undefined,
+      company_document: String(order?.store_company_document || "").trim() || undefined,
+      state_register: String(order?.store_state_register || "").trim() || undefined,
+      address: process.env.STORE_ORIGIN_ADDRESS || undefined,
+      complement: process.env.STORE_ORIGIN_COMPLEMENT || undefined,
+      number: process.env.STORE_ORIGIN_NUMBER || undefined,
+      district: process.env.STORE_ORIGIN_DISTRICT || undefined,
+      city: process.env.STORE_ORIGIN_CITY || undefined,
+      country_id: "BR",
+      postal_code: originZipCode,
+      note: "Remetente OZONTECK"
+    },
+    to: {
+      name: String(order?.customer_name || "").trim(),
+      phone: String(order?.customer_phone || "").trim(),
+      email: String(order?.customer_email || "").trim(),
+      document: String(order?.customer_cpf || "").trim() || undefined,
+      company_document: undefined,
+      state_register: undefined,
+      address: destination.address,
+      complement: destination.complement || undefined,
+      number: destination.number,
+      district: destination.district || undefined,
+      city: destination.city,
+      country_id: "BR",
+      postal_code: destination.postal_code,
+      state_abbr: destination.state_abbr,
+      note: `Pedido ${String(order?.order_number || order?.id || "").trim()}`
+    },
+    products,
+    options: {
+      receipt: false,
+      own_hand: false,
+      collect: false,
+      reverse: false,
+      non_commercial: true
+    }
   };
 }
 
-function buildFrenetPayload(order, items = []) {
+async function createMelhorEnvioCart(order, items = []) {
+  const accessToken = await getMelhorEnvioAccessToken();
+  const { baseUrl } = getMelhorEnvioConfig();
+
+  const payload = buildCartPayload(order, items);
+
+  const response = await fetch(`${baseUrl}/me/cart`, {
+    method: "POST",
+    headers: buildMelhorEnvioHeaders(accessToken),
+    body: JSON.stringify(payload)
+  });
+
+  const data = await response.json().catch(() => null);
+
+  if (!response.ok) {
+    throw new Error(
+      data?.message ||
+        data?.error ||
+        data?.details ||
+        "Erro ao inserir frete no carrinho do Melhor Envio"
+    );
+  }
+
   return {
-    SellerCEP: onlyDigits(env.frenetOriginZipCode),
-    RecipientCEP: onlyDigits(order?.shipping_cep),
-    ShipmentInvoiceValue: Number(order?.total_amount || 0),
-    ShippingServiceCode: String(order?.shipping_service_code || "1").trim(),
-    RecipientName: String(order?.customer_name || "").trim(),
-    RecipientEmail: String(order?.customer_email || "").trim(),
-    RecipientPhone: String(order?.customer_phone || "").trim(),
-    RecipientAddress: String(order?.shipping_address || "").trim(),
-    RecipientAddressNumber: String(order?.shipping_number || "").trim(),
-    RecipientAddressComplement: String(order?.shipping_complement || "").trim(),
-    RecipientNeighborhood: String(order?.shipping_neighborhood || "").trim(),
-    RecipientCity: String(order?.shipping_city || "").trim(),
-    RecipientState: String(order?.shipping_state || "").trim(),
-    Items: (items || []).map((item) => ({
-      SKU: String(item?.sku || item?.product_id || item?.id || "").trim(),
-      Description: String(item?.product_name || item?.name || "Produto").trim(),
-      Quantity: Number(item?.quantity || 1),
-      Weight: Number(item?.weight || 1),
-      Length: Number(item?.length || 10),
-      Height: Number(item?.height || 10),
-      Width: Number(item?.width || 10),
-    })),
+    payload,
+    data
+  };
+}
+
+function extractCartIds(cartResponse) {
+  const list = Array.isArray(cartResponse)
+    ? cartResponse
+    : Array.isArray(cartResponse?.data)
+      ? cartResponse.data
+      : cartResponse?.id
+        ? [cartResponse]
+        : [];
+
+  const ids = list
+    .map((item) => Number(item?.id || 0))
+    .filter((id) => Number.isFinite(id) && id > 0);
+
+  return ids;
+}
+
+async function checkoutMelhorEnvioCart(cartIds = []) {
+  if (!cartIds.length) {
+    throw new Error("Nenhum item válido no carrinho do Melhor Envio");
+  }
+
+  const accessToken = await getMelhorEnvioAccessToken();
+  const { baseUrl } = getMelhorEnvioConfig();
+
+  const response = await fetch(`${baseUrl}/me/shipment/checkout`, {
+    method: "POST",
+    headers: buildMelhorEnvioHeaders(accessToken),
+    body: JSON.stringify({
+      orders: cartIds
+    })
+  });
+
+  const data = await response.json().catch(() => null);
+
+  if (!response.ok) {
+    throw new Error(
+      data?.message ||
+        data?.error ||
+        data?.details ||
+        "Erro ao comprar etiqueta no Melhor Envio"
+    );
+  }
+
+  return data;
+}
+
+async function getMelhorEnvioShipmentLabel(cartId) {
+  const accessToken = await getMelhorEnvioAccessToken();
+  const { baseUrl } = getMelhorEnvioConfig();
+
+  const response = await fetch(`${baseUrl}/me/shipment/print`, {
+    method: "POST",
+    headers: buildMelhorEnvioHeaders(accessToken),
+    body: JSON.stringify({
+      mode: "private",
+      orders: [cartId]
+    })
+  });
+
+  const data = await response.json().catch(() => null);
+
+  if (!response.ok) {
+    throw new Error(
+      data?.message ||
+        data?.error ||
+        "Erro ao gerar PDF da etiqueta no Melhor Envio"
+    );
+  }
+
+  return data;
+}
+
+function normalizeMelhorEnvioLabelResult({
+  order,
+  cartData,
+  checkoutData,
+  printData
+}) {
+  const cartList = Array.isArray(cartData)
+    ? cartData
+    : Array.isArray(cartData?.data)
+      ? cartData.data
+      : cartData?.id
+        ? [cartData]
+        : [];
+
+  const firstCart = cartList[0] || {};
+
+  const trackingCode = String(
+    firstCart?.tracking ||
+      firstCart?.tracking_code ||
+      checkoutData?.tracking ||
+      checkoutData?.tracking_code ||
+      ""
+  ).trim();
+
+  const carrier = String(
+    firstCart?.company?.name ||
+      firstCart?.company_name ||
+      firstCart?.agency ||
+      "Melhor Envio"
+  ).trim();
+
+  const shipmentId = String(
+    firstCart?.id ||
+      checkoutData?.id ||
+      order?.shipping_shipment_id ||
+      ""
+  ).trim();
+
+  const labelUrl = String(
+    printData?.url ||
+      printData?.link ||
+      printData?.path ||
+      ""
+  ).trim();
+
+  if (!labelUrl) {
+    throw new Error("Melhor Envio não retornou URL do PDF");
+  }
+
+  return {
+    success: true,
+    mode: "melhor_envio",
+    labelStatus: "generated",
+    labelUrl,
+    labelPdfUrl: labelUrl,
+    trackingCode,
+    carrier,
+    shipmentId,
+    error: "",
+    raw: {
+      cartData,
+      checkoutData,
+      printData
+    }
   };
 }
 
@@ -129,83 +375,29 @@ export async function generateAutomaticShippingLabel(order, items = []) {
       return buildFallbackResult(order, "Endereço incompleto para gerar etiqueta");
     }
 
-    const frenetToken = String(env.frenetToken || "").trim();
-    const frenetLabelUrl = String(env.frenetLabelUrl || "").trim();
-    const frenetSandbox = normalizeBoolean(env.frenetSandbox);
+    if (!String(order?.shipping_service_code || "").trim()) {
+      return buildFallbackResult(order, "Pedido sem serviço de frete selecionado");
+    }
 
-    console.log("FRENET DEBUG", {
-      hasToken: Boolean(frenetToken),
-      labelUrl: frenetLabelUrl || "(vazia)",
-      sandbox: frenetSandbox,
-      orderId: order.id,
-      orderNumber: order.order_number || "",
+    const cartResult = await createMelhorEnvioCart(order, items);
+    const cartIds = extractCartIds(cartResult.data);
+    const checkoutData = await checkoutMelhorEnvioCart(cartIds);
+    const printData = await getMelhorEnvioShipmentLabel(cartIds[0]);
+
+    return normalizeMelhorEnvioLabelResult({
+      order,
+      cartData: cartResult.data,
+      checkoutData,
+      printData
     });
-
-    if (!frenetToken) {
-      return buildFallbackResult(order, "FRENET_TOKEN ausente");
-    }
-
-    if (!frenetLabelUrl) {
-      return buildFallbackResult(order, "FRENET_LABEL_URL ausente");
-    }
-
-    if (frenetSandbox) {
-      return buildFallbackResult(order, "FRENET_SANDBOX=true");
-    }
-
-    const payload = buildFrenetPayload(order, items);
-
-    console.log("FRENET LABEL PAYLOAD:", JSON.stringify(payload, null, 2));
-
-    const response = await fetch(frenetLabelUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        token: frenetToken,
-      },
-      body: JSON.stringify(payload),
-    });
-
-    const text = await response.text();
-    let data = null;
-
-    try {
-      data = text ? JSON.parse(text) : null;
-    } catch {
-      data = { raw: text };
-    }
-
-    const normalized = normalizeShippingLabelResponse(data);
-
-    if (!response.ok || !normalized) {
-      return buildFallbackResult(
-        order,
-        !response.ok
-          ? `Frenet ${response.status}: ${JSON.stringify(data)}`
-          : "Resposta da Frenet sem URL de etiqueta"
-      );
-    }
-
-    return {
-      success: true,
-      mode: "frenet",
-      labelStatus: "generated",
-      labelUrl: normalized.labelUrl,
-      labelPdfUrl: normalized.labelUrl,
-      trackingCode: normalized.trackingCode || "",
-      carrier: normalized.carrier || "",
-      shipmentId: normalized.shipmentId || "",
-      error: "",
-      raw: normalized.raw,
-    };
   } catch (error) {
-    console.error("ERRO FRENET LABEL:", {
-      message: error.message,
+    console.error("ERRO MELHOR ENVIO LABEL:", {
+      message: error.message
     });
 
     return buildFallbackResult(
       order,
-      error.message || "Erro ao gerar etiqueta"
+      error.message || "Erro ao gerar etiqueta automática"
     );
   }
 }
