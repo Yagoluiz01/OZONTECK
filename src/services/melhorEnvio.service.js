@@ -117,7 +117,10 @@ export async function saveMelhorEnvioTokens(tokenData) {
     updated_at: new Date().toISOString()
   };
 
-  const response = await fetch(`${env.supabaseUrl}/rest/v1/shipping_integrations`, {
+  const url = new URL(`${env.supabaseUrl}/rest/v1/shipping_integrations`);
+  url.searchParams.set("on_conflict", "provider");
+
+  const response = await fetch(url.toString(), {
     method: "POST",
     headers: {
       ...getSupabaseHeaders(),
@@ -135,26 +138,6 @@ export async function saveMelhorEnvioTokens(tokenData) {
   }
 
   return Array.isArray(data) ? data[0] : data;
-}
-
-export async function getMelhorEnvioTokenRecord() {
-  const url = new URL(`${env.supabaseUrl}/rest/v1/shipping_integrations`);
-  url.searchParams.set("provider", "eq.melhor_envio");
-  url.searchParams.set("select", "*");
-  url.searchParams.set("limit", "1");
-
-  const response = await fetch(url.toString(), {
-    method: "GET",
-    headers: getSupabaseHeaders()
-  });
-
-  const data = await response.json().catch(() => []);
-
-  if (!response.ok) {
-    throw new Error("Erro ao consultar token do Melhor Envio");
-  }
-
-  return Array.isArray(data) ? data[0] || null : null;
 }
 
 export async function getMelhorEnvioAccessToken() {
