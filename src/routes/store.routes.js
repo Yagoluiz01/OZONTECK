@@ -1,6 +1,7 @@
 import express from "express";
 import crypto from "crypto";
 import { env } from "../config/env.js";
+import { calculateShippingWithMelhorEnvio } from "../services/melhorEnvio.service.js";
 
 const router = express.Router();
 
@@ -290,16 +291,11 @@ async function quoteShippingWithFrenet({ zipCode, items, subtotal }) {
 
   if (!response.ok) {
     throw new Error(
-      data?.message ||
-        data?.error ||
-        "Erro ao consultar frete na Frenet"
+      data?.message || data?.error || "Erro ao consultar frete na Frenet"
     );
   }
 
   const quotes = mapFrenetQuotes(data);
-
-  console.log("FRENET RAW RESPONSE:", data);
-  console.log("FRENET MAPPED QUOTES:", quotes);
 
   return {
     quotes,
@@ -627,10 +623,7 @@ async function updateOrderById(orderId, payload) {
 
 async function updateOrderByExternalReference(externalReference, payload) {
   const url = new URL(`${env.supabaseUrl}/rest/v1/orders`);
-  url.searchParams.set(
-    "payment_external_reference",
-    `eq.${externalReference}`
-  );
+  url.searchParams.set("payment_external_reference", `eq.${externalReference}`);
   url.searchParams.set("select", "*");
 
   const response = await fetch(url.toString(), {
@@ -701,6 +694,118 @@ async function findOrderItems(orderId) {
   }
 
   return Array.isArray(data) ? data : [];
+}
+
+function getShippingProvider() {
+  return String(process.env.SHIPPING_PROVIDER || "").trim().toLowerCase();
+}
+
+function getStoreOriginZipCode() {
+  return onlyDigits(
+    process.env.STORE_ORIGIN_ZIP_CODE ||
+      env.frenetOriginZipCode ||
+      process.env.FRENET_ORIGIN_ZIP_CODE ||
+      ""
+  );
+}
+
+function normalizeMelhorEnvioProducts(items = []) {
+  return items.map((item, index) => {
+    const product = item.product || {};
+    const quantity = Number(item.quantity || 1) || 1;
+
+    const width = Math.max(1, Number(product.widthCm || 0) || 1);
+    const height = Math.max(1, Number(product.heightCm || 0) || 1);
+    const length = Math.max(1, Number(product.lengthCm || 0) || 1);
+    const weight = Math.max(0.001, Number(product.weightKg || 0) || 0.3);
+    const insuranceValue = Math.max(
+      0,
+      Number(product.price || item.unitPrice || 0) || 0
+    );
+
+    return {
+      id: String(product.id || product.sku || `item-${index + 1}`),
+      width,
+      height,
+      length,
+      weight,
+      insurance_value: insuranceValue,
+      quantity
+    };
+  });
+}
+
+function mapMelhorEnvioQuotes(services = []) {
+  return services
+    .filter((service) => !service?.error)
+    .map((service) => {
+      const companyName = String(
+        service?.company?.name ||
+          service?.company?.company_name ||
+          "Transportadora"
+      ).trim();
+
+      const serviceName = String(service?.name || "Serviço").trim();
+      const serviceCode = String(service?.id || "").trim();
+      const price = Number(service?.price || 0) || 0;
+
+      const deliveryTime =
+        Number(
+          service?.delivery_time ||
+            service?.custom_delivery_time ||
+            service?.packages?.[0]?.delivery_time ||
+            0
+        ) || 0;
+
+      return {
+        carrier: companyName,
+        serviceCode,
+        serviceName,
+        price,
+        deliveryTime,
+        raw: service
+      };
+    })
+    .filter((item) => item.price > 0);
+}
+
+async function quoteShippingWithMelhorEnvio({ zipCode, items }) {
+  const originZipCode = getStoreOriginZipCode();
+  const destinationZipCode = onlyDigits(zipCode);
+
+  if (!originZipCode || originZipCode.length < 8) {
+    throw new Error("CEP de origem da loja não configurado");
+  }
+
+  if (!destinationZipCode || destinationZipCode.length < 8) {
+    throw new Error("CEP de destino inválido");
+  }
+
+  const products = normalizeMelhorEnvioProducts(items);
+
+  const payload = {
+    from: {
+      postal_code: originZipCode
+    },
+    to: {
+      postal_code: destinationZipCode
+    },
+    products,
+    options: {
+      receipt: false,
+      own_hand: false,
+      collect: false
+    }
+  };
+
+  const rawServices = await calculateShippingWithMelhorEnvio(payload);
+  const quotes = mapMelhorEnvioQuotes(rawServices);
+
+  return {
+    quotes,
+    raw: rawServices,
+    payload
+  };
 }
 
 async function generateAutomaticShippingLabel(order, items) {
@@ -834,11 +939,6 @@ router.get("/products/:ref", async (req, res) => {
   }
 });
 
-/**
- * ROTA TEMPORÁRIA PARA TESTE DO FRONTEND DE FRETE
- * Mantém opções fixas para provar que o carrinho renderiza.
- * Depois trocamos para a Frenet real.
- */
 router.post("/shipping/quote", async (req, res) => {
   try {
     const body = req.body || {};
@@ -859,26 +959,67 @@ router.post("/shipping/quote", async (req, res) => {
       });
     }
 
+    const productsMap = await fetchProductsMap();
+
+    const normalizedItems = items.map((item) => {
+      const ref = String(
+        item.id || item.slug || item.sku || item.nome || ""
+      ).trim();
+
+      const normalizedRef = slugify(ref);
+      const quantity = Math.max(
+        1,
+        Number(item.quantity || item.quantidade || 1) || 1
+      );
+
+      const product = productsMap.get(ref) || productsMap.get(normalizedRef);
+
+      if (!product) {
+        throw new Error(
+          `Produto inválido no pedido: ${ref || "sem referência"}`
+        );
+      }
+
+      return {
+        product,
+        quantity,
+        unitPrice: Number(product.price || 0),
+        totalPrice: Number(product.price || 0) * quantity
+      };
+    });
+
+    const subtotal = normalizedItems.reduce(
+      (acc, item) => acc + item.totalPrice,
+      0
+    );
+
+    const provider = getShippingProvider();
+
+    if (provider === "melhor_envio") {
+      const result = await quoteShippingWithMelhorEnvio({
+        zipCode,
+        items: normalizedItems
+      });
+
+      return res.status(200).json({
+        success: true,
+        provider: "melhor_envio",
+        quotes: result.quotes,
+        raw: result.raw
+      });
+    }
+
+    const result = await quoteShippingWithFrenet({
+      zipCode,
+      items: normalizedItems,
+      subtotal
+    });
+
     return res.status(200).json({
       success: true,
-      quotes: [
-        {
-          carrier: "Correios",
-          serviceCode: "04014",
-          serviceName: "SEDEX",
-          price: 28.9,
-          deliveryTime: 3,
-          raw: null
-        },
-        {
-          carrier: "Correios",
-          serviceCode: "04510",
-          serviceName: "PAC",
-          price: 18.5,
-          deliveryTime: 6,
-          raw: null
-        }
-      ]
+      provider: "frenet",
+      quotes: result.quotes,
+      raw: result.raw
     });
   } catch (error) {
     console.error("ERRO AO COTAR FRETE:", error);
@@ -1223,9 +1364,15 @@ router.post("/payments/mercado-pago/webhook", async (req, res) => {
 
         if (updatedOrder?.shipping_label_status !== "generated") {
           const orderItems = await findOrderItems(updatedOrder.id);
-          const generatedLabel = await generateAutomaticShippingLabel(updatedOrder, orderItems);
+          const generatedLabel = await generateAutomaticShippingLabel(
+            updatedOrder,
+            orderItems
+          );
 
-          const savedLabel = await saveGeneratedLabel(updatedOrder.id, generatedLabel);
+          const savedLabel = await saveGeneratedLabel(
+            updatedOrder.id,
+            generatedLabel
+          );
 
           if (!savedLabel.ok) {
             throw new Error("Erro ao salvar dados da etiqueta no pedido");
@@ -1342,7 +1489,10 @@ router.post("/payments/simulate/:orderNumber", async (req, res) => {
         try {
           if (updatedOrder.shipping_label_status !== "generated") {
             const orderItems = await findOrderItems(updatedOrder.id);
-            const generatedLabel = await generateAutomaticShippingLabel(updatedOrder, orderItems);
+            const generatedLabel = await generateAutomaticShippingLabel(
+              updatedOrder,
+              orderItems
+            );
             await saveGeneratedLabel(updatedOrder.id, generatedLabel);
           }
         } catch (labelError) {
@@ -1406,11 +1556,17 @@ router.post("/payments/simulate/:orderNumber", async (req, res) => {
       try {
         if (updatedOrder.shipping_label_status !== "generated") {
           const orderItems = await findOrderItems(updatedOrder.id);
-          const generatedLabel = await generateAutomaticShippingLabel(updatedOrder, orderItems);
+          const generatedLabel = await generateAutomaticShippingLabel(
+            updatedOrder,
+            orderItems
+          );
           await saveGeneratedLabel(updatedOrder.id, generatedLabel);
         }
       } catch (labelError) {
-        console.error("ERRO AO GERAR ETIQUETA NO FALLBACK DA SIMULAÇÃO:", labelError);
+        console.error(
+          "ERRO AO GERAR ETIQUETA NO FALLBACK DA SIMULAÇÃO:",
+          labelError
+        );
         await saveLabelError(
           updatedOrder.id,
           labelError.message || "Erro ao gerar etiqueta na simulação"
