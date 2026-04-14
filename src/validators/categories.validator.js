@@ -1,0 +1,1 @@
+// categories.validator.js

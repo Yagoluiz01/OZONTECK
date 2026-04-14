@@ -1,0 +1,1 @@
+// coupon-types.js
