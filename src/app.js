@@ -14,6 +14,7 @@ import customersRoutes from "./routes/customers.routes.js";
 import settingsRoutes from "./routes/settings.routes.js";
 import trackingRoutes from "./routes/tracking.routes.js";
 import storeRoutes from "./routes/store.routes.js";
+import shippingRoutes from "./routes/shipping.routes.js";
 
 const app = express();
 
@@ -70,7 +71,7 @@ app.use("/api/categories", categoriesRoutes);
 app.use("/api/orders", ordersRoutes);
 app.use("/api/customers", customersRoutes);
 app.use("/api/settings", settingsRoutes);
-
+app.use("/api/shipping", shippingRoutes);
 app.use((req, res) => {
   return res.status(404).json({
     success: false,
