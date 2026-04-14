@@ -109,13 +109,15 @@ export async function saveMelhorEnvioTokens(tokenData) {
     ? new Date(Date.now() + expiresIn * 1000).toISOString()
     : null;
 
-  const payload = {
-    provider: "melhor_envio",
-    access_token: String(tokenData.access_token || "").trim(),
-    refresh_token: String(tokenData.refresh_token || "").trim(),
-    expires_at: expiresAt,
-    updated_at: new Date().toISOString()
-  };
+  const payload = [
+    {
+      provider: "melhor_envio",
+      access_token: String(tokenData.access_token || "").trim(),
+      refresh_token: String(tokenData.refresh_token || "").trim(),
+      expires_at: expiresAt,
+      updated_at: new Date().toISOString()
+    }
+  ];
 
   const url = new URL(`${env.supabaseUrl}/rest/v1/shipping_integrations`);
   url.searchParams.set("on_conflict", "provider");
@@ -138,17 +140,6 @@ export async function saveMelhorEnvioTokens(tokenData) {
   }
 
   return Array.isArray(data) ? data[0] : data;
-}
-
-export async function getMelhorEnvioAccessToken() {
-  const record = await getMelhorEnvioTokenRecord();
-  const accessToken = String(record?.access_token || "").trim();
-
-  if (!accessToken) {
-    throw new Error("Melhor Envio não está conectado");
-  }
-
-  return accessToken;
 }
 
 export function buildMelhorEnvioHeaders(accessToken) {
