@@ -58,7 +58,7 @@ export function buildMelhorEnvioAuthorizeUrl() {
     redirect_uri: redirectUri,
     response_type: "code",
     scope:
-  "shipping-calculate shipping-checkout shipping-generate shipping-tracking"
+      "shipping-calculate shipping-checkout shipping-generate shipping-tracking"
   });
 
   return `${authBase}?${params.toString()}`;
@@ -72,21 +72,29 @@ export async function exchangeMelhorEnvioCodeForToken(code) {
     ? "https://sandbox.melhorenvio.com.br/oauth/token"
     : "https://melhorenvio.com.br/oauth/token";
 
-  const body = {
+  const body = new URLSearchParams({
     grant_type: "authorization_code",
     client_id: clientId,
     client_secret: clientSecret,
     redirect_uri: redirectUri,
-    code
-  };
+    code: String(code || "").trim()
+  });
+
+  console.log("MELHOR ENVIO TOKEN EXCHANGE:", {
+    tokenUrl,
+    clientId,
+    redirectUri,
+    hasClientSecret: Boolean(clientSecret),
+    codePreview: String(code || "").slice(0, 10)
+  });
 
   const response = await fetch(tokenUrl, {
     method: "POST",
     headers: {
-      "Content-Type": "application/json",
-      Accept: "application/json"
+      Accept: "application/json",
+      "Content-Type": "application/x-www-form-urlencoded"
     },
-    body: JSON.stringify(body)
+    body: body.toString()
   });
 
   const data = await response.json().catch(() => null);
@@ -140,6 +148,37 @@ export async function saveMelhorEnvioTokens(tokenData) {
   }
 
   return Array.isArray(data) ? data[0] : data;
+}
+
+export async function getMelhorEnvioTokenRecord() {
+  const url = new URL(`${env.supabaseUrl}/rest/v1/shipping_integrations`);
+  url.searchParams.set("provider", "eq.melhor_envio");
+  url.searchParams.set("select", "*");
+  url.searchParams.set("limit", "1");
+
+  const response = await fetch(url.toString(), {
+    method: "GET",
+    headers: getSupabaseHeaders()
+  });
+
+  const data = await response.json().catch(() => []);
+
+  if (!response.ok) {
+    throw new Error("Erro ao consultar token do Melhor Envio");
+  }
+
+  return Array.isArray(data) ? data[0] || null : null;
+}
+
+export async function getMelhorEnvioAccessToken() {
+  const record = await getMelhorEnvioTokenRecord();
+  const accessToken = String(record?.access_token || "").trim();
+
+  if (!accessToken) {
+    throw new Error("Melhor Envio não está conectado");
+  }
+
+  return accessToken;
 }
 
 export function buildMelhorEnvioHeaders(accessToken) {
