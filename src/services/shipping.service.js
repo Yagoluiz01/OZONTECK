@@ -102,6 +102,87 @@ function buildMelhorEnvioProducts(items = []) {
   });
 }
 
+function buildMelhorEnvioVolumes(order, items = []) {
+  const raw = order?.shipping_quote_raw || {};
+  const packages = Array.isArray(raw?.packages) ? raw.packages : [];
+
+  if (packages.length) {
+    return packages.map((pkg, index) => ({
+      id: String(pkg?.id || `volume-${index + 1}`),
+      format: String(pkg?.format || "box"),
+      width: Math.max(1, toNumber(pkg?.width || pkg?.dimensions?.width, 1)),
+      height: Math.max(1, toNumber(pkg?.height || pkg?.dimensions?.height, 1)),
+      length: Math.max(1, toNumber(pkg?.length || pkg?.dimensions?.length, 1)),
+      weight: Math.max(0.001, toNumber(pkg?.weight, 0.3)),
+      insurance_value: Math.max(0, toNumber(pkg?.insurance_value, 0)),
+      products: Array.isArray(pkg?.products) && pkg.products.length
+        ? pkg.products.map((p) => ({
+            id: String(p?.id || p?.product_id || p?.sku || "produto"),
+            quantity: Math.max(1, toNumber(p?.quantity, 1))
+          }))
+        : items.map((item, itemIndex) => ({
+            id: String(item?.product_id || item?.sku || item?.id || `item-${itemIndex + 1}`),
+            quantity: Math.max(1, toNumber(item?.quantity, 1))
+          }))
+    }));
+  }
+
+  const totalInsurance = items.reduce(
+    (sum, item) =>
+      sum +
+      Math.max(
+        0,
+        toNumber(item?.unit_price || item?.price || item?.product?.price, 0)
+      ) *
+        Math.max(1, toNumber(item?.quantity, 1)),
+    0
+  );
+
+  return [
+    {
+      id: "volume-1",
+      format: "box",
+      width: Math.max(
+        1,
+        items.reduce(
+          (max, item) =>
+            Math.max(max, toNumber(item?.width || item?.width_cm || item?.product?.widthCm, 1)),
+          1
+        )
+      ),
+      height: Math.max(
+        1,
+        items.reduce(
+          (sum, item) =>
+            sum + Math.max(1, toNumber(item?.height || item?.height_cm || item?.product?.heightCm, 1)),
+          0
+        )
+      ),
+      length: Math.max(
+        1,
+        items.reduce(
+          (max, item) =>
+            Math.max(max, toNumber(item?.length || item?.length_cm || item?.product?.lengthCm, 1)),
+          1
+        )
+      ),
+      weight: Math.max(
+        0.001,
+        items.reduce(
+          (sum, item) =>
+            sum + Math.max(0.001, toNumber(item?.weight || item?.weight_kg || item?.product?.weightKg, 0.3)),
+          0
+        )
+      ),
+      insurance_value: totalInsurance,
+      products: items.map((item, index) => ({
+        id: String(item?.product_id || item?.sku || item?.id || `item-${index + 1}`),
+        quantity: Math.max(1, toNumber(item?.quantity, 1))
+      }))
+    }
+  ];
+}
+
 function normalizeAddressForMelhorEnvio(order) {
   const postalCode = onlyDigits(order?.shipping_cep);
   const street = String(order?.shipping_address || "").trim();
@@ -142,25 +223,34 @@ function buildCartPayload(order, items = []) {
   }
 
   const products = buildMelhorEnvioProducts(items);
+  const volumes = buildMelhorEnvioVolumes(order, items);
 
   if (!products.length) {
     throw new Error("Pedido sem itens para gerar etiqueta");
   }
 
+  if (!volumes.length) {
+    throw new Error("Pedido sem volumes para gerar etiqueta");
+  }
+
   return {
-    service: String(order?.shipping_service_code || "").trim() || undefined,
+    service: Number(order?.shipping_service_code),
     from: {
-      name: "OZONTECK",
-      phone: String(order?.store_phone || "").trim() || undefined,
-      email: String(order?.store_email || "").trim() || undefined,
-      document: String(order?.store_document || "").trim() || undefined,
-      company_document: String(order?.store_company_document || "").trim() || undefined,
-      state_register: String(order?.store_state_register || "").trim() || undefined,
-      address: process.env.STORE_ORIGIN_ADDRESS || undefined,
-      complement: process.env.STORE_ORIGIN_COMPLEMENT || undefined,
-      number: process.env.STORE_ORIGIN_NUMBER || undefined,
-      district: process.env.STORE_ORIGIN_DISTRICT || undefined,
-      city: process.env.STORE_ORIGIN_CITY || undefined,
+      name: String(process.env.STORE_ORIGIN_NAME || "OZONTECK").trim(),
+      phone: String(process.env.STORE_ORIGIN_PHONE || order?.store_phone || "").trim() || undefined,
+      email: String(process.env.STORE_ORIGIN_EMAIL || order?.store_email || "").trim() || undefined,
+      document: String(process.env.STORE_ORIGIN_DOCUMENT || order?.store_document || "").trim() || undefined,
+      company_document: String(
+        process.env.STORE_ORIGIN_COMPANY_DOCUMENT || order?.store_company_document || ""
+      ).trim() || undefined,
+      state_register: String(
+        process.env.STORE_ORIGIN_STATE_REGISTER || order?.store_state_register || ""
+      ).trim() || undefined,
+      address: String(process.env.STORE_ORIGIN_ADDRESS || "").trim() || undefined,
+      complement: String(process.env.STORE_ORIGIN_COMPLEMENT || "").trim() || undefined,
+      number: String(process.env.STORE_ORIGIN_NUMBER || "").trim() || undefined,
+      district: String(process.env.STORE_ORIGIN_DISTRICT || "").trim() || undefined,
+      city: String(process.env.STORE_ORIGIN_CITY || "").trim() || undefined,
       country_id: "BR",
       postal_code: originZipCode,
       note: "Remetente OZONTECK"
@@ -183,6 +273,7 @@ function buildCartPayload(order, items = []) {
       note: `Pedido ${String(order?.order_number || order?.id || "").trim()}`
     },
     products,
+    volumes,
     options: {
       receipt: false,
       own_hand: false,
@@ -199,6 +290,8 @@ async function createMelhorEnvioCart(order, items = []) {
 
   const payload = buildCartPayload(order, items);
 
+  console.log("MELHOR ENVIO CART PAYLOAD: " + JSON.stringify(payload));
+
   const response = await fetch(`${baseUrl}/me/cart`, {
     method: "POST",
     headers: buildMelhorEnvioHeaders(accessToken),
@@ -207,7 +300,7 @@ async function createMelhorEnvioCart(order, items = []) {
 
   const data = await response.json().catch(() => null);
 
-    if (!response.ok) {
+  if (!response.ok) {
     console.error(
       "MELHOR ENVIO CART ERROR: " +
         JSON.stringify({
@@ -224,6 +317,7 @@ async function createMelhorEnvioCart(order, items = []) {
         "Erro ao inserir frete no carrinho do Melhor Envio"
     );
   }
+
   return {
     payload,
     data
@@ -265,6 +359,15 @@ async function checkoutMelhorEnvioCart(cartIds = []) {
   const data = await response.json().catch(() => null);
 
   if (!response.ok) {
+    console.error(
+      "MELHOR ENVIO CHECKOUT ERROR: " +
+        JSON.stringify({
+          status: response.status,
+          data,
+          cartIds
+        })
+    );
+
     throw new Error(
       data?.message ||
         data?.error ||
@@ -292,6 +395,15 @@ async function getMelhorEnvioShipmentLabel(cartId) {
   const data = await response.json().catch(() => null);
 
   if (!response.ok) {
+    console.error(
+      "MELHOR ENVIO PRINT ERROR: " +
+        JSON.stringify({
+          status: response.status,
+          data,
+          cartId
+        })
+    );
+
     throw new Error(
       data?.message ||
         data?.error ||
@@ -387,17 +499,18 @@ export async function generateAutomaticShippingLabel(order, items = []) {
       return buildFallbackResult(order, "Pedido sem serviço de frete selecionado");
     }
 
-    console.log("MELHOR ENVIO STEP: create cart");
-const cartResult = await createMelhorEnvioCart(order, items);
+    console.log("MELHOR ENVIO STEP: criar carrinho");
+    const cartResult = await createMelhorEnvioCart(order, items);
 
-const cartIds = extractCartIds(cartResult.data);
-console.log("MELHOR ENVIO STEP: cart ids", cartIds);
+    const cartIds = extractCartIds(cartResult.data);
+    console.log("MELHOR ENVIO STEP: cart ids " + JSON.stringify(cartIds));
 
-console.log("MELHOR ENVIO STEP: checkout");
-const checkoutData = await checkoutMelhorEnvioCart(cartIds);
+    console.log("MELHOR ENVIO STEP: checkout");
+    const checkoutData = await checkoutMelhorEnvioCart(cartIds);
 
-console.log("MELHOR ENVIO STEP: print");
-const printData = await getMelhorEnvioShipmentLabel(cartIds[0]);
+    console.log("MELHOR ENVIO STEP: print");
+    const printData = await getMelhorEnvioShipmentLabel(cartIds[0]);
+
     return normalizeMelhorEnvioLabelResult({
       order,
       cartData: cartResult.data,
@@ -405,16 +518,19 @@ const printData = await getMelhorEnvioShipmentLabel(cartIds[0]);
       printData
     });
   } catch (error) {
-    console.error("ERRO MELHOR ENVIO LABEL:", {
-  message: error.message,
-  orderId: order?.id,
-  orderNumber: order?.order_number,
-  shippingServiceCode: order?.shipping_service_code,
-  shippingCarrier: order?.shipping_carrier,
-  shippingCity: order?.shipping_city,
-  shippingState: order?.shipping_state,
-  shippingCep: order?.shipping_cep
-});
+    console.error(
+      "ERRO MELHOR ENVIO LABEL: " +
+        JSON.stringify({
+          message: error.message,
+          orderId: order?.id,
+          orderNumber: order?.order_number,
+          shippingServiceCode: order?.shipping_service_code,
+          shippingCarrier: order?.shipping_carrier,
+          shippingCity: order?.shipping_city,
+          shippingState: order?.shipping_state,
+          shippingCep: order?.shipping_cep
+        })
+    );
 
     return buildFallbackResult(
       order,
