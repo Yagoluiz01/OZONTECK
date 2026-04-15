@@ -379,11 +379,17 @@ export async function generateAutomaticShippingLabel(order, items = []) {
       return buildFallbackResult(order, "Pedido sem serviço de frete selecionado");
     }
 
-    const cartResult = await createMelhorEnvioCart(order, items);
-    const cartIds = extractCartIds(cartResult.data);
-    const checkoutData = await checkoutMelhorEnvioCart(cartIds);
-    const printData = await getMelhorEnvioShipmentLabel(cartIds[0]);
+    console.log("MELHOR ENVIO STEP: create cart");
+const cartResult = await createMelhorEnvioCart(order, items);
 
+const cartIds = extractCartIds(cartResult.data);
+console.log("MELHOR ENVIO STEP: cart ids", cartIds);
+
+console.log("MELHOR ENVIO STEP: checkout");
+const checkoutData = await checkoutMelhorEnvioCart(cartIds);
+
+console.log("MELHOR ENVIO STEP: print");
+const printData = await getMelhorEnvioShipmentLabel(cartIds[0]);
     return normalizeMelhorEnvioLabelResult({
       order,
       cartData: cartResult.data,
