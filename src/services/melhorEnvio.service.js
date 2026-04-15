@@ -154,24 +154,25 @@ export async function saveMelhorEnvioTokens(tokenData) {
   return Array.isArray(data) ? data[0] : data;
 }
 
-export async function getMelhorEnvioTokenRecord() {
-  const url = new URL(`${env.supabaseUrl}/rest/v1/shipping_integrations`);
-  url.searchParams.set("provider", "eq.melhor_envio");
-  url.searchParams.set("select", "*");
-  url.searchParams.set("limit", "1");
+export async function getMelhorEnvioAccessToken() {
+  const record = await getMelhorEnvioTokenRecord();
+  const accessToken = String(record?.access_token || "").trim();
 
-  const response = await fetch(url.toString(), {
-    method: "GET",
-    headers: getSupabaseHeaders()
-  });
+  console.log(
+    "MELHOR ENVIO ACCESS TOKEN CHECK: " +
+      JSON.stringify({
+        hasRecord: Boolean(record),
+        provider: record?.provider || null,
+        hasAccessToken: Boolean(accessToken),
+        expiresAt: record?.expires_at || null
+      })
+  );
 
-  const data = await response.json().catch(() => []);
-
-  if (!response.ok) {
-    throw new Error("Erro ao consultar token do Melhor Envio");
+  if (!accessToken) {
+    throw new Error("Melhor Envio não está conectado");
   }
 
-  return Array.isArray(data) ? data[0] || null : null;
+  return accessToken;
 }
 
 export async function getMelhorEnvioAccessToken() {
