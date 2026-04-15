@@ -81,15 +81,15 @@ export async function exchangeMelhorEnvioCodeForToken(code) {
   });
 
   console.log(
-  "MELHOR ENVIO TOKEN EXCHANGE: " +
-    JSON.stringify({
-      tokenUrl,
-      clientId,
-      redirectUri,
-      hasClientSecret: Boolean(clientSecret),
-      codePreview: String(code || "").slice(0, 10)
-    })
-);
+    "MELHOR ENVIO TOKEN EXCHANGE: " +
+      JSON.stringify({
+        tokenUrl,
+        clientId,
+        redirectUri,
+        hasClientSecret: Boolean(clientSecret),
+        codePreview: String(code || "").slice(0, 10)
+      })
+  );
 
   const response = await fetch(tokenUrl, {
     method: "POST",
@@ -104,12 +104,19 @@ export async function exchangeMelhorEnvioCodeForToken(code) {
 
   if (!response.ok || !data?.access_token) {
     console.error(
-  "MELHOR ENVIO TOKEN EXCHANGE ERROR: " +
-    JSON.stringify({
-      status: response.status,
-      data
-    })
-);
+      "MELHOR ENVIO TOKEN EXCHANGE ERROR: " +
+        JSON.stringify({
+          status: response.status,
+          data
+        })
+    );
+
+    throw new Error(
+      data?.message ||
+        data?.error_description ||
+        data?.error ||
+        "Erro ao trocar code por token no Melhor Envio"
+    );
   }
 
   return data;
@@ -145,6 +152,14 @@ export async function saveMelhorEnvioTokens(tokenData) {
 
   const data = await response.json().catch(() => null);
 
+  console.log(
+    "MELHOR ENVIO TOKEN SAVE RESULT: " +
+      JSON.stringify({
+        status: response.status,
+        saved: Array.isArray(data) ? data.length : 0
+      })
+  );
+
   if (!response.ok) {
     throw new Error(
       data?.message || data?.error || "Erro ao salvar token do Melhor Envio"
@@ -152,6 +167,48 @@ export async function saveMelhorEnvioTokens(tokenData) {
   }
 
   return Array.isArray(data) ? data[0] : data;
+}
+
+export async function getMelhorEnvioTokenRecord() {
+  const url = new URL(`${env.supabaseUrl}/rest/v1/shipping_integrations`);
+  url.searchParams.set("provider", "eq.melhor_envio");
+  url.searchParams.set("select", "*");
+  url.searchParams.set("limit", "1");
+
+  console.log(
+    "MELHOR ENVIO TOKEN QUERY: " +
+      JSON.stringify({
+        url: url.toString(),
+        hasSupabaseUrl: Boolean(env.supabaseUrl),
+        hasServiceRoleKey: Boolean(env.supabaseServiceRoleKey)
+      })
+  );
+
+  const response = await fetch(url.toString(), {
+    method: "GET",
+    headers: getSupabaseHeaders()
+  });
+
+  const data = await response.json().catch(() => []);
+
+  console.log(
+    "MELHOR ENVIO TOKEN QUERY RESULT: " +
+      JSON.stringify({
+        status: response.status,
+        found: Array.isArray(data) ? data.length : 0,
+        firstProvider: Array.isArray(data) && data[0] ? data[0].provider : null,
+        hasAccessToken:
+          Array.isArray(data) && data[0]
+            ? Boolean(String(data[0].access_token || "").trim())
+            : false
+      })
+  );
+
+  if (!response.ok) {
+    throw new Error("Erro ao consultar token do Melhor Envio");
+  }
+
+  return Array.isArray(data) ? data[0] || null : null;
 }
 
 export async function getMelhorEnvioAccessToken() {
@@ -167,17 +224,6 @@ export async function getMelhorEnvioAccessToken() {
         expiresAt: record?.expires_at || null
       })
   );
-
-  if (!accessToken) {
-    throw new Error("Melhor Envio não está conectado");
-  }
-
-  return accessToken;
-}
-
-export async function getMelhorEnvioAccessToken() {
-  const record = await getMelhorEnvioTokenRecord();
-  const accessToken = String(record?.access_token || "").trim();
 
   if (!accessToken) {
     throw new Error("Melhor Envio não está conectado");
