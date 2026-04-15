@@ -207,7 +207,16 @@ async function createMelhorEnvioCart(order, items = []) {
 
   const data = await response.json().catch(() => null);
 
-  if (!response.ok) {
+    if (!response.ok) {
+    console.error(
+      "MELHOR ENVIO CART ERROR: " +
+        JSON.stringify({
+          status: response.status,
+          data,
+          payload
+        })
+    );
+
     throw new Error(
       data?.message ||
         data?.error ||
@@ -215,7 +224,6 @@ async function createMelhorEnvioCart(order, items = []) {
         "Erro ao inserir frete no carrinho do Melhor Envio"
     );
   }
-
   return {
     payload,
     data
