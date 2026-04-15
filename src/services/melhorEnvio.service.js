@@ -123,20 +123,51 @@ export async function exchangeMelhorEnvioCodeForToken(code) {
 }
 
 export async function saveMelhorEnvioTokens(tokenData) {
-  const expiresIn = Number(tokenData?.expires_in || 0);
+  console.log(
+    "MELHOR ENVIO TOKEN RAW: " +
+      JSON.stringify({
+        keys: tokenData ? Object.keys(tokenData) : [],
+        tokenData
+      })
+  );
+
+  const accessToken = String(
+    tokenData?.access_token || tokenData?.token || tokenData?.accessToken || ""
+  ).trim();
+
+  const refreshToken = String(
+    tokenData?.refresh_token || tokenData?.refreshToken || ""
+  ).trim();
+
+  const expiresIn = Number(tokenData?.expires_in || tokenData?.expiresIn || 0);
+
   const expiresAt = expiresIn
     ? new Date(Date.now() + expiresIn * 1000).toISOString()
     : null;
 
+  if (!accessToken) {
+    throw new Error("Token do Melhor Envio veio vazio ao salvar integração");
+  }
+
   const payload = [
     {
       provider: "melhor_envio",
-      access_token: String(tokenData.access_token || "").trim(),
-      refresh_token: String(tokenData.refresh_token || "").trim(),
+      access_token: accessToken,
+      refresh_token: refreshToken,
       expires_at: expiresAt,
       updated_at: new Date().toISOString()
     }
   ];
+
+  console.log(
+    "MELHOR ENVIO TOKEN SAVE PAYLOAD: " +
+      JSON.stringify({
+        provider: payload[0].provider,
+        hasAccessToken: Boolean(payload[0].access_token),
+        hasRefreshToken: Boolean(payload[0].refresh_token),
+        expiresAt: payload[0].expires_at
+      })
+  );
 
   const url = new URL(`${env.supabaseUrl}/rest/v1/shipping_integrations`);
   url.searchParams.set("on_conflict", "provider");
@@ -156,7 +187,7 @@ export async function saveMelhorEnvioTokens(tokenData) {
     "MELHOR ENVIO TOKEN SAVE RESULT: " +
       JSON.stringify({
         status: response.status,
-        saved: Array.isArray(data) ? data.length : 0
+        data
       })
   );
 
