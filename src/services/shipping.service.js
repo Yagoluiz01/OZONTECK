@@ -14,6 +14,10 @@ function toNumber(value, fallback = 0) {
   return Number.isFinite(n) ? n : fallback;
 }
 
+function roundMoney(value) {
+  return Math.round((toNumber(value, 0) + Number.EPSILON) * 100) / 100;
+}
+
 function getApiBaseUrl() {
   const configured = String(
     process.env.API_BASE_URL || env.apiBaseUrl || ""
@@ -26,28 +30,40 @@ function getApiBaseUrl() {
   return "http://localhost:5000";
 }
 
-function buildFallbackLabelUrl() {
-  return `${getApiBaseUrl()}/labels/label-test.pdf`;
+function isNonCommercialShipment(order) {
+  const explicit =
+    process.env.MELHOR_ENVIO_NON_COMMERCIAL ??
+    order?.shipping_non_commercial ??
+    order?.non_commercial;
+
+  if (explicit === undefined || explicit === null || explicit === "") {
+    return false;
+  }
+
+  const normalized = String(explicit).trim().toLowerCase();
+  return ["1", "true", "yes", "on", "sim"].includes(normalized);
 }
 
-function buildFallbackResult(order, error = "") {
-  const fallbackUrl = buildFallbackLabelUrl();
+function buildFailureResult(order, error = "", extra = {}) {
+  const message = String(error || "Erro ao gerar etiqueta automática").trim();
 
   return {
-    success: true,
-    mode: "fallback",
-    labelStatus: "fallback",
-    labelUrl: fallbackUrl,
-    labelPdfUrl: fallbackUrl,
+    success: false,
+    mode: "melhor_envio_error",
+    labelStatus: extra?.labelStatus || "error",
+    labelUrl: "",
+    labelPdfUrl: "",
     trackingCode: "",
-    carrier: "LOCAL",
+    carrier: String(order?.shipping_carrier || "Melhor Envio").trim(),
     shipmentId: "",
-    error: String(error || "").trim(),
+    error: message,
     raw: {
-      fallback: true,
+      fallback: false,
       orderId: order?.id || null,
-      reason: String(error || "Melhor Envio indisponível").trim(),
-      generatedAt: new Date().toISOString()
+      orderNumber: order?.order_number || null,
+      reason: message,
+      generatedAt: new Date().toISOString(),
+      ...extra
     }
   };
 }
@@ -61,9 +77,31 @@ function getStoreOriginZipCode() {
   );
 }
 
+function getItemUnitDeclaredValue(item) {
+  return roundMoney(
+    item?.unit_price ??
+      item?.price ??
+      item?.product?.price ??
+      item?.declared_value ??
+      0
+  );
+}
+
+function getItemQuantity(item) {
+  return Math.max(1, toNumber(item?.quantity, 1) || 1);
+}
+
+function getOrderDeclaredValue(items = []) {
+  return roundMoney(
+    items.reduce((sum, item) => {
+      return sum + getItemUnitDeclaredValue(item) * getItemQuantity(item);
+    }, 0)
+  );
+}
+
 function buildMelhorEnvioProducts(items = []) {
   return items.map((item, index) => {
-    const quantity = Math.max(1, toNumber(item?.quantity, 1) || 1);
+    const quantity = getItemQuantity(item);
 
     const width = Math.max(
       1,
@@ -85,10 +123,7 @@ function buildMelhorEnvioProducts(items = []) {
       toNumber(item?.weight || item?.weight_kg || item?.product?.weightKg, 0.3)
     );
 
-    const insuranceValue = Math.max(
-      0,
-      toNumber(item?.unit_price || item?.price || item?.product?.price, 0)
-    );
+    const insuranceValue = getItemUnitDeclaredValue(item);
 
     return {
       id: String(item?.product_id || item?.sku || item?.id || `item-${index + 1}`),
@@ -105,6 +140,7 @@ function buildMelhorEnvioProducts(items = []) {
 function buildMelhorEnvioVolumes(order, items = []) {
   const raw = order?.shipping_quote_raw || {};
   const packages = Array.isArray(raw?.packages) ? raw.packages : [];
+  const totalDeclaredValue = getOrderDeclaredValue(items);
 
   if (packages.length) {
     return packages.map((pkg, index) => ({
@@ -114,29 +150,26 @@ function buildMelhorEnvioVolumes(order, items = []) {
       height: Math.max(1, toNumber(pkg?.height || pkg?.dimensions?.height, 1)),
       length: Math.max(1, toNumber(pkg?.length || pkg?.dimensions?.length, 1)),
       weight: Math.max(0.001, toNumber(pkg?.weight, 0.3)),
-      insurance_value: Math.max(0, toNumber(pkg?.insurance_value, 0)),
-      products: Array.isArray(pkg?.products) && pkg.products.length
-        ? pkg.products.map((p) => ({
-            id: String(p?.id || p?.product_id || p?.sku || "produto"),
-            quantity: Math.max(1, toNumber(p?.quantity, 1))
-          }))
-        : items.map((item, itemIndex) => ({
-            id: String(item?.product_id || item?.sku || item?.id || `item-${itemIndex + 1}`),
-            quantity: Math.max(1, toNumber(item?.quantity, 1))
-          }))
+      insurance_value: Math.max(
+        0,
+        roundMoney(
+          pkg?.insurance_value !== undefined
+            ? pkg.insurance_value
+            : totalDeclaredValue
+        )
+      ),
+      products:
+        Array.isArray(pkg?.products) && pkg.products.length
+          ? pkg.products.map((p) => ({
+              id: String(p?.id || p?.product_id || p?.sku || "produto"),
+              quantity: Math.max(1, toNumber(p?.quantity, 1))
+            }))
+          : items.map((item, itemIndex) => ({
+              id: String(item?.product_id || item?.sku || item?.id || `item-${itemIndex + 1}`),
+              quantity: getItemQuantity(item)
+            }))
     }));
   }
-
-  const totalInsurance = items.reduce(
-    (sum, item) =>
-      sum +
-      Math.max(
-        0,
-        toNumber(item?.unit_price || item?.price || item?.product?.price, 0)
-      ) *
-        Math.max(1, toNumber(item?.quantity, 1)),
-    0
-  );
 
   return [
     {
@@ -174,10 +207,10 @@ function buildMelhorEnvioVolumes(order, items = []) {
           0
         )
       ),
-      insurance_value: totalInsurance,
+      insurance_value: totalDeclaredValue,
       products: items.map((item, index) => ({
         id: String(item?.product_id || item?.sku || item?.id || `item-${index + 1}`),
-        quantity: Math.max(1, toNumber(item?.quantity, 1))
+        quantity: getItemQuantity(item)
       }))
     }
   ];
@@ -233,6 +266,12 @@ function buildCartPayload(order, items = []) {
     throw new Error("Pedido sem volumes para gerar etiqueta");
   }
 
+  const declaredValue = getOrderDeclaredValue(items);
+
+  if (declaredValue <= 0) {
+    throw new Error("Valor declarado do pedido inválido para gerar etiqueta");
+  }
+
   return {
     service: Number(order?.shipping_service_code),
     from: {
@@ -279,9 +318,17 @@ function buildCartPayload(order, items = []) {
       own_hand: false,
       collect: false,
       reverse: false,
-      non_commercial: true
+      non_commercial: isNonCommercialShipment(order)
     }
   };
+}
+
+function headersToObject(headers) {
+  try {
+    return Object.fromEntries(headers.entries());
+  } catch {
+    return {};
+  }
 }
 
 async function createMelhorEnvioCart(order, items = []) {
@@ -301,21 +348,30 @@ async function createMelhorEnvioCart(order, items = []) {
   const data = await response.json().catch(() => null);
 
   if (!response.ok) {
+    const responseHeaders = headersToObject(response.headers);
+
     console.error(
       "MELHOR ENVIO CART ERROR: " +
         JSON.stringify({
           status: response.status,
           data,
-          payload
+          payload,
+          responseHeaders
         })
     );
 
-    throw new Error(
+    const message =
       data?.message ||
-        data?.error ||
-        data?.details ||
-        "Erro ao inserir frete no carrinho do Melhor Envio"
-    );
+      data?.error ||
+      data?.details ||
+      "Erro ao inserir frete no carrinho do Melhor Envio";
+
+    const error = new Error(message);
+    error.httpStatus = response.status;
+    error.responseData = data;
+    error.responseHeaders = responseHeaders;
+    error.payload = payload;
+    throw error;
   }
 
   return {
@@ -484,19 +540,27 @@ function normalizeMelhorEnvioLabelResult({
 export async function generateAutomaticShippingLabel(order, items = []) {
   try {
     if (!order?.id) {
-      return buildFallbackResult(order, "Pedido inválido para gerar etiqueta");
+      return buildFailureResult(order, "Pedido inválido para gerar etiqueta", {
+        labelStatus: "invalid_order"
+      });
     }
 
     if (!items?.length) {
-      return buildFallbackResult(order, "Pedido sem itens para gerar etiqueta");
+      return buildFailureResult(order, "Pedido sem itens para gerar etiqueta", {
+        labelStatus: "invalid_items"
+      });
     }
 
     if (!order.shipping_cep || !order.shipping_address || !order.shipping_number) {
-      return buildFallbackResult(order, "Endereço incompleto para gerar etiqueta");
+      return buildFailureResult(order, "Endereço incompleto para gerar etiqueta", {
+        labelStatus: "invalid_address"
+      });
     }
 
     if (!String(order?.shipping_service_code || "").trim()) {
-      return buildFallbackResult(order, "Pedido sem serviço de frete selecionado");
+      return buildFailureResult(order, "Pedido sem serviço de frete selecionado", {
+        labelStatus: "missing_service"
+      });
     }
 
     console.log("MELHOR ENVIO STEP: criar carrinho");
@@ -522,6 +586,10 @@ export async function generateAutomaticShippingLabel(order, items = []) {
       "ERRO MELHOR ENVIO LABEL: " +
         JSON.stringify({
           message: error.message,
+          httpStatus: error?.httpStatus || null,
+          responseData: error?.responseData || null,
+          responseHeaders: error?.responseHeaders || null,
+          payload: error?.payload || null,
           orderId: order?.id,
           orderNumber: order?.order_number,
           shippingServiceCode: order?.shipping_service_code,
@@ -532,9 +600,18 @@ export async function generateAutomaticShippingLabel(order, items = []) {
         })
     );
 
-    return buildFallbackResult(
+    const blocked403 = Number(error?.httpStatus || 0) === 403;
+
+    return buildFailureResult(
       order,
-      error.message || "Erro ao gerar etiqueta automática"
+      error.message || "Erro ao gerar etiqueta automática",
+      {
+        labelStatus: blocked403 ? "blocked_me_cart_403" : "error",
+        httpStatus: error?.httpStatus || null,
+        responseData: error?.responseData || null,
+        responseHeaders: error?.responseHeaders || null,
+        payload: error?.payload || null
+      }
     );
   }
 }
