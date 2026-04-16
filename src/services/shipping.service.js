@@ -18,32 +18,6 @@ function roundMoney(value) {
   return Math.round((toNumber(value, 0) + Number.EPSILON) * 100) / 100;
 }
 
-function getApiBaseUrl() {
-  const configured = String(
-    process.env.API_BASE_URL || env.apiBaseUrl || ""
-  ).trim();
-
-  if (configured) {
-    return configured.replace(/\/+$/, "");
-  }
-
-  return "http://localhost:5000";
-}
-
-function isNonCommercialShipment(order) {
-  const explicit =
-    process.env.MELHOR_ENVIO_NON_COMMERCIAL ??
-    order?.shipping_non_commercial ??
-    order?.non_commercial;
-
-  if (explicit === undefined || explicit === null || explicit === "") {
-    return false;
-  }
-
-  const normalized = String(explicit).trim().toLowerCase();
-  return ["1", "true", "yes", "on", "sim"].includes(normalized);
-}
-
 function buildFailureResult(order, error = "", extra = {}) {
   const message = String(error || "Erro ao gerar etiqueta automática").trim();
 
@@ -73,6 +47,14 @@ function getStoreOriginZipCode() {
     process.env.STORE_ORIGIN_ZIP_CODE ||
       process.env.FRENET_ORIGIN_ZIP_CODE ||
       env.frenetOriginZipCode ||
+      ""
+  );
+}
+
+function getStoreOriginDocument(order) {
+  return onlyDigits(
+    process.env.STORE_DOCUMENT ||
+      order?.store_document ||
       ""
   );
 }
@@ -238,9 +220,14 @@ function normalizeAddressForMelhorEnvio(order) {
 
 function buildCartPayload(order, items = []) {
   const originZipCode = getStoreOriginZipCode();
+  const originDocument = getStoreOriginDocument(order);
 
   if (!originZipCode || originZipCode.length < 8) {
     throw new Error("CEP de origem da loja não configurado");
+  }
+
+  if (!originDocument || originDocument.length !== 11) {
+    throw new Error("CPF do remetente não configurado para teste PF");
   }
 
   const destination = normalizeAddressForMelhorEnvio(order);
@@ -276,15 +263,11 @@ function buildCartPayload(order, items = []) {
     service: Number(order?.shipping_service_code),
     from: {
       name: String(process.env.STORE_ORIGIN_NAME || "OZONTECK").trim(),
-      phone: String(process.env.STORE_ORIGIN_PHONE || order?.store_phone || "").trim() || undefined,
-      email: String(process.env.STORE_ORIGIN_EMAIL || order?.store_email || "").trim() || undefined,
-      document: String(process.env.STORE_ORIGIN_DOCUMENT || order?.store_document || "").trim() || undefined,
-      company_document: String(
-        process.env.STORE_ORIGIN_COMPANY_DOCUMENT || order?.store_company_document || ""
-      ).trim() || undefined,
-      state_register: String(
-        process.env.STORE_ORIGIN_STATE_REGISTER || order?.store_state_register || ""
-      ).trim() || undefined,
+      phone: String(process.env.STORE_PHONE || order?.store_phone || "").trim() || undefined,
+      email: String(process.env.STORE_EMAIL || order?.store_email || "").trim() || undefined,
+      document: originDocument,
+      company_document: undefined,
+      state_register: undefined,
       address: String(process.env.STORE_ORIGIN_ADDRESS || "").trim() || undefined,
       complement: String(process.env.STORE_ORIGIN_COMPLEMENT || "").trim() || undefined,
       number: String(process.env.STORE_ORIGIN_NUMBER || "").trim() || undefined,
@@ -292,13 +275,13 @@ function buildCartPayload(order, items = []) {
       city: String(process.env.STORE_ORIGIN_CITY || "").trim() || undefined,
       country_id: "BR",
       postal_code: originZipCode,
-      note: "Remetente OZONTECK"
+      note: "Remetente PF OZONTECK"
     },
     to: {
       name: String(order?.customer_name || "").trim(),
       phone: String(order?.customer_phone || "").trim(),
       email: String(order?.customer_email || "").trim(),
-      document: String(order?.customer_cpf || "").trim() || undefined,
+      document: onlyDigits(order?.customer_cpf) || undefined,
       company_document: undefined,
       state_register: undefined,
       address: destination.address,
@@ -318,7 +301,7 @@ function buildCartPayload(order, items = []) {
       own_hand: false,
       collect: false,
       reverse: false,
-      non_commercial: isNonCommercialShipment(order)
+      non_commercial: true
     }
   };
 }
