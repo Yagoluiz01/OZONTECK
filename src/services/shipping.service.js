@@ -54,9 +54,32 @@ function getStoreOriginZipCode() {
 function getStoreOriginDocument(order) {
   return onlyDigits(
     process.env.STORE_DOCUMENT ||
+      process.env.STORE_COMPANY_DOCUMENT ||
       order?.store_document ||
       ""
   );
+}
+
+function getStoreOriginName() {
+  return String(process.env.STORE_ORIGIN_NAME || "OZONTECK").trim();
+}
+
+function getStorePhone(order) {
+  return String(process.env.STORE_PHONE || order?.store_phone || "").trim();
+}
+
+function getStoreEmail(order) {
+  return String(process.env.STORE_EMAIL || order?.store_email || "").trim();
+}
+
+function getStoreOriginAddress() {
+  return {
+    address: String(process.env.STORE_ORIGIN_ADDRESS || "").trim(),
+    complement: String(process.env.STORE_ORIGIN_COMPLEMENT || "").trim(),
+    number: String(process.env.STORE_ORIGIN_NUMBER || "").trim(),
+    district: String(process.env.STORE_ORIGIN_DISTRICT || "").trim(),
+    city: String(process.env.STORE_ORIGIN_CITY || "").trim()
+  };
 }
 
 function getItemUnitDeclaredValue(item) {
@@ -81,121 +104,99 @@ function getOrderDeclaredValue(items = []) {
   );
 }
 
+function getItemName(item, index) {
+  return String(
+    item?.product_name ||
+      item?.name ||
+      item?.product?.name ||
+      item?.title ||
+      `Produto ${index + 1}`
+  ).trim();
+}
+
+function getItemId(item, index) {
+  return String(
+    item?.product_id ||
+      item?.sku ||
+      item?.id ||
+      `item-${index + 1}`
+  ).trim();
+}
+
 function buildMelhorEnvioProducts(items = []) {
-  return items.map((item, index) => {
-    const quantity = getItemQuantity(item);
+  return items.map((item, index) => ({
+    id: getItemId(item, index),
+    name: getItemName(item, index),
+    unitary_value: getItemUnitDeclaredValue(item),
+    quantity: getItemQuantity(item)
+  }));
+}
 
-    const width = Math.max(
-      1,
-      toNumber(item?.width || item?.width_cm || item?.product?.widthCm, 1)
-    );
+function buildSingleVolumeFromItems(items = []) {
+  const width = Math.max(
+    1,
+    items.reduce((max, item) => {
+      return Math.max(
+        max,
+        toNumber(item?.width || item?.width_cm || item?.product?.widthCm, 1)
+      );
+    }, 1)
+  );
 
-    const height = Math.max(
-      1,
-      toNumber(item?.height || item?.height_cm || item?.product?.heightCm, 1)
-    );
+  const height = Math.max(
+    1,
+    items.reduce((sum, item) => {
+      return sum + Math.max(
+        1,
+        toNumber(item?.height || item?.height_cm || item?.product?.heightCm, 1)
+      );
+    }, 0)
+  );
 
-    const length = Math.max(
-      1,
-      toNumber(item?.length || item?.length_cm || item?.product?.lengthCm, 1)
-    );
+  const length = Math.max(
+    1,
+    items.reduce((max, item) => {
+      return Math.max(
+        max,
+        toNumber(item?.length || item?.length_cm || item?.product?.lengthCm, 1)
+      );
+    }, 1)
+  );
 
-    const weight = Math.max(
-      0.001,
-      toNumber(item?.weight || item?.weight_kg || item?.product?.weightKg, 0.3)
-    );
+  const weight = Math.max(
+    0.001,
+    items.reduce((sum, item) => {
+      return sum + Math.max(
+        0.001,
+        toNumber(item?.weight || item?.weight_kg || item?.product?.weightKg, 0.3)
+      );
+    }, 0)
+  );
 
-    const insuranceValue = getItemUnitDeclaredValue(item);
-
-    return {
-      id: String(item?.product_id || item?.sku || item?.id || `item-${index + 1}`),
-      width,
-      height,
-      length,
-      weight,
-      insurance_value: insuranceValue,
-      quantity
-    };
-  });
+  return {
+    id: "volume-1",
+    width,
+    height,
+    length,
+    weight
+  };
 }
 
 function buildMelhorEnvioVolumes(order, items = []) {
   const raw = order?.shipping_quote_raw || {};
   const packages = Array.isArray(raw?.packages) ? raw.packages : [];
-  const totalDeclaredValue = getOrderDeclaredValue(items);
 
   if (packages.length) {
     return packages.map((pkg, index) => ({
       id: String(pkg?.id || `volume-${index + 1}`),
-      format: String(pkg?.format || "box"),
       width: Math.max(1, toNumber(pkg?.width || pkg?.dimensions?.width, 1)),
       height: Math.max(1, toNumber(pkg?.height || pkg?.dimensions?.height, 1)),
       length: Math.max(1, toNumber(pkg?.length || pkg?.dimensions?.length, 1)),
-      weight: Math.max(0.001, toNumber(pkg?.weight, 0.3)),
-      insurance_value: Math.max(
-        0,
-        roundMoney(
-          pkg?.insurance_value !== undefined
-            ? pkg.insurance_value
-            : totalDeclaredValue
-        )
-      ),
-      products:
-        Array.isArray(pkg?.products) && pkg.products.length
-          ? pkg.products.map((p) => ({
-              id: String(p?.id || p?.product_id || p?.sku || "produto"),
-              quantity: Math.max(1, toNumber(p?.quantity, 1))
-            }))
-          : items.map((item, itemIndex) => ({
-              id: String(item?.product_id || item?.sku || item?.id || `item-${itemIndex + 1}`),
-              quantity: getItemQuantity(item)
-            }))
+      weight: Math.max(0.001, toNumber(pkg?.weight, 0.3))
     }));
   }
 
-  return [
-    {
-      id: "volume-1",
-      format: "box",
-      width: Math.max(
-        1,
-        items.reduce(
-          (max, item) =>
-            Math.max(max, toNumber(item?.width || item?.width_cm || item?.product?.widthCm, 1)),
-          1
-        )
-      ),
-      height: Math.max(
-        1,
-        items.reduce(
-          (sum, item) =>
-            sum + Math.max(1, toNumber(item?.height || item?.height_cm || item?.product?.heightCm, 1)),
-          0
-        )
-      ),
-      length: Math.max(
-        1,
-        items.reduce(
-          (max, item) =>
-            Math.max(max, toNumber(item?.length || item?.length_cm || item?.product?.lengthCm, 1)),
-          1
-        )
-      ),
-      weight: Math.max(
-        0.001,
-        items.reduce(
-          (sum, item) =>
-            sum + Math.max(0.001, toNumber(item?.weight || item?.weight_kg || item?.product?.weightKg, 0.3)),
-          0
-        )
-      ),
-      insurance_value: totalDeclaredValue,
-      products: items.map((item, index) => ({
-        id: String(item?.product_id || item?.sku || item?.id || `item-${index + 1}`),
-        quantity: getItemQuantity(item)
-      }))
-    }
-  ];
+  return [buildSingleVolumeFromItems(items)];
 }
 
 function normalizeAddressForMelhorEnvio(order) {
@@ -221,13 +222,15 @@ function normalizeAddressForMelhorEnvio(order) {
 function buildCartPayload(order, items = []) {
   const originZipCode = getStoreOriginZipCode();
   const originDocument = getStoreOriginDocument(order);
+  const originAddress = getStoreOriginAddress();
+  console.log("SHIPPING SERVICE NOVO ATIVO V2");
 
   if (!originZipCode || originZipCode.length < 8) {
     throw new Error("CEP de origem da loja não configurado");
   }
 
-  if (!originDocument || originDocument.length !== 11) {
-    throw new Error("CPF do remetente não configurado para teste PF");
+  if (!originDocument) {
+    throw new Error("Documento do remetente não configurado");
   }
 
   const destination = normalizeAddressForMelhorEnvio(order);
@@ -259,44 +262,44 @@ function buildCartPayload(order, items = []) {
     throw new Error("Valor declarado do pedido inválido para gerar etiqueta");
   }
 
-  return {
+  const from = {
+    name: getStoreOriginName(),
+    phone: getStorePhone(order) || undefined,
+    email: getStoreEmail(order) || undefined,
+    document: originDocument,
+    address: originAddress.address || undefined,
+    complement: originAddress.complement || undefined,
+    number: originAddress.number || undefined,
+    district: originAddress.district || undefined,
+    city: originAddress.city || undefined,
+    country_id: "BR",
+    postal_code: originZipCode
+  };
+
+  const to = {
+    name: String(order?.customer_name || "").trim(),
+    phone: String(order?.customer_phone || "").trim() || undefined,
+    email: String(order?.customer_email || "").trim() || undefined,
+    document: onlyDigits(order?.customer_cpf) || undefined,
+    address: destination.address,
+    complement: destination.complement || undefined,
+    number: destination.number,
+    district: destination.district || undefined,
+    city: destination.city,
+    country_id: "BR",
+    postal_code: destination.postal_code,
+    state_abbr: destination.state_abbr,
+    note: `Pedido ${String(order?.order_number || order?.id || "").trim()}`
+  };
+
+  const payload = {
     service: Number(order?.shipping_service_code),
-    from: {
-      name: String(process.env.STORE_ORIGIN_NAME || "OZONTECK").trim(),
-      phone: String(process.env.STORE_PHONE || order?.store_phone || "").trim() || undefined,
-      email: String(process.env.STORE_EMAIL || order?.store_email || "").trim() || undefined,
-      document: originDocument,
-      company_document: undefined,
-      state_register: undefined,
-      address: String(process.env.STORE_ORIGIN_ADDRESS || "").trim() || undefined,
-      complement: String(process.env.STORE_ORIGIN_COMPLEMENT || "").trim() || undefined,
-      number: String(process.env.STORE_ORIGIN_NUMBER || "").trim() || undefined,
-      district: String(process.env.STORE_ORIGIN_DISTRICT || "").trim() || undefined,
-      city: String(process.env.STORE_ORIGIN_CITY || "").trim() || undefined,
-      country_id: "BR",
-      postal_code: originZipCode,
-      note: "Remetente PF OZONTECK"
-    },
-    to: {
-      name: String(order?.customer_name || "").trim(),
-      phone: String(order?.customer_phone || "").trim(),
-      email: String(order?.customer_email || "").trim(),
-      document: onlyDigits(order?.customer_cpf) || undefined,
-      company_document: undefined,
-      state_register: undefined,
-      address: destination.address,
-      complement: destination.complement || undefined,
-      number: destination.number,
-      district: destination.district || undefined,
-      city: destination.city,
-      country_id: "BR",
-      postal_code: destination.postal_code,
-      state_abbr: destination.state_abbr,
-      note: `Pedido ${String(order?.order_number || order?.id || "").trim()}`
-    },
+    from,
+    to,
     products,
     volumes,
     options: {
+      insurance_value: declaredValue,
       receipt: false,
       own_hand: false,
       collect: false,
@@ -304,6 +307,8 @@ function buildCartPayload(order, items = []) {
       non_commercial: true
     }
   };
+
+  return payload;
 }
 
 function headersToObject(headers) {
