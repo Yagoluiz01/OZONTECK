@@ -4,6 +4,7 @@ import { env } from "../config/env.js";
 import { calculateShippingWithMelhorEnvio } from "../services/melhorEnvio.service.js";
 import { generateAutomaticShippingLabel } from "../services/shipping.service.js";
 import { processPaidOrder } from "../jobs/processPaidOrder.js";
+import { buildMelhorEnvioAuthorizeUrl } from "../services/melhorEnvio.service.js";
 const router = express.Router();
 
 function slugify(text) {
@@ -1574,6 +1575,22 @@ router.post("/orders/:id/process-paid", async (req, res) => {
     return res.status(500).json({
       success: false,
       message: error.message || "Erro ao processar pedido pago"
+    });
+  }
+});
+
+router.get("/melhor-envio/authorize-url", async (req, res) => {
+  try {
+    return res.status(200).json({
+      success: true,
+      url: buildMelhorEnvioAuthorizeUrl()
+    });
+  } catch (error) {
+    console.error("ERRO AO GERAR URL DE AUTORIZAÇÃO DO MELHOR ENVIO:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Erro ao gerar URL de autorização"
     });
   }
 });

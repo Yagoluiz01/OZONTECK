@@ -307,6 +307,10 @@ function buildCartPayload(order, items = []) {
       non_commercial: true
     }
   };
+console.log("DEBUG REMETENTE DOCUMENT:", from.document);
+console.log("DEBUG DESTINATARIO DOCUMENT:", to.document);
+console.log("DEBUG ORDER CUSTOMER CPF:", order?.customer_cpf);
+
 
   return payload;
 }
