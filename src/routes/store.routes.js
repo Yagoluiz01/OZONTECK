@@ -3,6 +3,7 @@ import crypto from "crypto";
 import { env } from "../config/env.js";
 import { calculateShippingWithMelhorEnvio } from "../services/melhorEnvio.service.js";
 import { generateAutomaticShippingLabel } from "../services/shipping.service.js";
+import { processPaidOrder } from "../jobs/processPaidOrder.js";
 const router = express.Router();
 
 function slugify(text) {
@@ -1556,61 +1557,23 @@ router.post("/payments/simulate/:orderNumber", async (req, res) => {
 });
 
 router.get("/orders/:orderNumber/status", async (req, res) => {
+  // ...
+});
+
+router.post("/orders/:id/process-paid", async (req, res) => {
   try {
-    const orderNumber = String(req.params.orderNumber || "").trim();
-
-    if (!orderNumber) {
-      return res.status(400).json({
-        success: false,
-        message: "Número do pedido é obrigatório"
-      });
-    }
-
-    const url = new URL(`${env.supabaseUrl}/rest/v1/orders`);
-    url.searchParams.set("order_number", `eq.${orderNumber}`);
-    url.searchParams.set(
-      "select",
-      "id,order_number,payment_status,payment_raw_status,order_status,tracking_code,paid_at,payment_gateway,payment_external_reference,shipping_label_status,shipping_label_url,shipping_label_pdf_url,shipping_tracking_code,shipping_shipment_id,shipping_label_generated_at,shipping_label_error"
-    );
-    url.searchParams.set("limit", "1");
-
-    const response = await fetch(url.toString(), {
-      method: "GET",
-      headers: {
-        apikey: env.supabaseServiceRoleKey,
-        Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
-        "Content-Type": "application/json",
-        Accept: "application/json"
-      }
-    });
-
-    const data = await response.json().catch(() => []);
-
-    if (!response.ok) {
-      return res.status(500).json({
-        success: false,
-        message: "Erro ao consultar status do pedido",
-        details: data
-      });
-    }
-
-    if (!Array.isArray(data) || !data[0]) {
-      return res.status(404).json({
-        success: false,
-        message: "Pedido não encontrado"
-      });
-    }
+    const result = await processPaidOrder({ orderId: req.params.id });
 
     return res.status(200).json({
       success: true,
-      order: data[0]
+      result
     });
   } catch (error) {
-    console.error("ERRO AO CONSULTAR STATUS DO PEDIDO:", error);
+    console.error("PROCESS PAID ORDER ERROR:", error);
 
     return res.status(500).json({
       success: false,
-      message: error.message || "Erro interno ao consultar status do pedido"
+      message: error.message || "Erro ao processar pedido pago"
     });
   }
 });
