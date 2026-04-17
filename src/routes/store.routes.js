@@ -1,10 +1,13 @@
 import express from "express";
 import crypto from "crypto";
 import { env } from "../config/env.js";
-import { calculateShippingWithMelhorEnvio } from "../services/melhorEnvio.service.js";
+import {
+  calculateShippingWithMelhorEnvio,
+  buildMelhorEnvioAuthorizeUrl
+} from "../services/melhorEnvio.service.js";
 import { generateAutomaticShippingLabel } from "../services/shipping.service.js";
 import { processPaidOrder } from "../jobs/processPaidOrder.js";
-import { buildMelhorEnvioAuthorizeUrl } from "../services/melhorEnvio.service.js";
+
 const router = express.Router();
 
 function slugify(text) {
@@ -810,6 +813,49 @@ async function quoteShippingWithMelhorEnvio({ zipCode, items }) {
   };
 }
 
+function resolveSelectedShippingServiceCode(selectedShipping = {}) {
+  const direct = String(selectedShipping?.serviceCode || "").trim();
+  const directNumber = Number(direct);
+
+  if (Number.isFinite(directNumber) && directNumber > 0) {
+    return String(directNumber);
+  }
+
+  const raw = selectedShipping?.raw || {};
+  const candidates = [
+    raw?.id,
+    raw?.Id,
+    raw?.serviceCode,
+    raw?.service_code,
+    raw?.ServiceCode,
+    raw?.Code
+  ]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+
+  for (const candidate of candidates) {
+    const numeric = Number(candidate);
+    if (Number.isFinite(numeric) && numeric > 0) {
+      return String(numeric);
+    }
+  }
+
+  return direct;
+}
+
+function buildShippingQuoteRawForOrder(selectedShipping = {}) {
+  const raw = selectedShipping?.raw || null;
+
+  return {
+    ...(raw && typeof raw === "object" ? raw : {}),
+    selected_service_code_front: String(selectedShipping?.serviceCode || "").trim(),
+    selected_service_name_front: String(selectedShipping?.serviceName || "").trim(),
+    selected_carrier_front: String(selectedShipping?.carrier || "").trim(),
+    selected_price_front: Number(selectedShipping?.price || 0) || 0,
+    selected_delivery_time_front:
+      Number(selectedShipping?.deliveryTime || 0) || 0
+  };
+}
 
 async function saveGeneratedLabel(orderId, labelData) {
   return updateOrderById(orderId, {
@@ -1051,7 +1097,26 @@ router.post("/orders", async (req, res) => {
       (acc, item) => acc + item.totalPrice,
       0
     );
+
     const selectedShipping = body.shipping || {};
+
+    console.log(
+      "DEBUG SELECTED SHIPPING AO CRIAR PEDIDO:",
+      JSON.stringify(selectedShipping)
+    );
+    console.log(
+      "DEBUG SHIPPING SERVICE CODE RECEBIDO DO FRONT:",
+      selectedShipping?.serviceCode
+    );
+
+    const resolvedShippingServiceCode =
+      resolveSelectedShippingServiceCode(selectedShipping);
+
+    console.log(
+      "DEBUG SHIPPING SERVICE CODE RESOLVIDO PARA SALVAR:",
+      resolvedShippingServiceCode
+    );
+
     const shippingAmount = Number(
       body.shippingAmount ?? selectedShipping.price ?? 0
     );
@@ -1075,12 +1140,12 @@ router.post("/orders", async (req, res) => {
       shipping_city: String(customer.cidade || "").trim(),
       shipping_state: String(customer.estado || "").trim(),
       shipping_carrier: String(selectedShipping.carrier || "").trim(),
-      shipping_service_code: String(selectedShipping.serviceCode || "").trim(),
+      shipping_service_code: String(resolvedShippingServiceCode || "").trim(),
       shipping_service_name: String(selectedShipping.serviceName || "").trim(),
       shipping_delivery_time: Number(selectedShipping.deliveryTime || 0) || null,
-      shipping_quote_raw: selectedShipping.raw || null,
+      shipping_quote_raw: buildShippingQuoteRawForOrder(selectedShipping),
       shipping_label_status: "pending",
-      subtotal: subtotal,
+      subtotal,
       shipping_amount: shippingAmount,
       discount_amount: discountAmount,
       total_amount: totalAmount,
@@ -1558,7 +1623,63 @@ router.post("/payments/simulate/:orderNumber", async (req, res) => {
 });
 
 router.get("/orders/:orderNumber/status", async (req, res) => {
-  // ...
+  try {
+    const orderNumber = String(req.params.orderNumber || "").trim();
+
+    if (!orderNumber) {
+      return res.status(400).json({
+        success: false,
+        message: "Número do pedido é obrigatório"
+      });
+    }
+
+    const url = new URL(`${env.supabaseUrl}/rest/v1/orders`);
+    url.searchParams.set("order_number", `eq.${orderNumber}`);
+    url.searchParams.set(
+      "select",
+      "id,order_number,payment_status,payment_raw_status,order_status,tracking_code,paid_at,payment_gateway,payment_external_reference,shipping_label_status,shipping_label_url,shipping_label_pdf_url,shipping_tracking_code,shipping_shipment_id,shipping_label_generated_at,shipping_label_error,shipping_service_code,shipping_service_name,shipping_quote_raw"
+    );
+    url.searchParams.set("limit", "1");
+
+    const response = await fetch(url.toString(), {
+      method: "GET",
+      headers: {
+        apikey: env.supabaseServiceRoleKey,
+        Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
+        "Content-Type": "application/json",
+        Accept: "application/json"
+      }
+    });
+
+    const data = await response.json().catch(() => []);
+
+    if (!response.ok) {
+      return res.status(500).json({
+        success: false,
+        message: "Erro ao consultar status do pedido",
+        details: data
+      });
+    }
+
+    if (!Array.isArray(data) || !data[0]) {
+      return res.status(404).json({
+        success: false,
+        message: "Pedido não encontrado"
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      order: data[0]
+    });
+  } catch (error) {
+    console.error("ERRO AO CONSULTAR STATUS DO PEDIDO:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Erro interno ao consultar status do pedido"
+    });
+  }
 });
 
 router.post("/orders/:id/process-paid", async (req, res) => {
