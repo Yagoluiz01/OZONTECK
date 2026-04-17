@@ -219,11 +219,54 @@ function normalizeAddressForMelhorEnvio(order) {
   };
 }
 
+function resolveMelhorEnvioServiceCode(order) {
+  const raw = String(order?.shipping_service_code || "").trim();
+
+  console.log("DEBUG SHIPPING SERVICE CODE RAW:", raw);
+
+  const directNumber = Number(raw);
+  console.log("DEBUG SHIPPING SERVICE CODE NUMBER:", directNumber);
+
+  if (Number.isFinite(directNumber) && directNumber > 0) {
+    return directNumber;
+  }
+
+  const rawQuote = order?.shipping_quote_raw || {};
+
+  const candidates = [
+    rawQuote?.serviceCode,
+    rawQuote?.service_code,
+    rawQuote?.ServiceCode,
+    rawQuote?.Code,
+    rawQuote?.Id,
+    rawQuote?.id,
+    rawQuote?.raw?.serviceCode,
+    rawQuote?.raw?.service_code,
+    rawQuote?.raw?.ServiceCode,
+    rawQuote?.raw?.Code,
+    rawQuote?.raw?.Id,
+    rawQuote?.raw?.id
+  ]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+
+  console.log("DEBUG SHIPPING SERVICE CODE CANDIDATES:", JSON.stringify(candidates));
+
+  for (const candidate of candidates) {
+    const n = Number(candidate);
+    if (Number.isFinite(n) && n > 0) {
+      console.log("DEBUG SHIPPING SERVICE CODE RESOLVED FROM QUOTE:", n);
+      return n;
+    }
+  }
+
+  return null;
+}
+
 function buildCartPayload(order, items = []) {
   const originZipCode = getStoreOriginZipCode();
   const originDocument = getStoreOriginDocument(order);
   const originAddress = getStoreOriginAddress();
-  console.log("SHIPPING SERVICE NOVO ATIVO V2");
 
   if (!originZipCode || originZipCode.length < 8) {
     throw new Error("CEP de origem da loja não configurado");
@@ -262,6 +305,14 @@ function buildCartPayload(order, items = []) {
     throw new Error("Valor declarado do pedido inválido para gerar etiqueta");
   }
 
+  const serviceCode = resolveMelhorEnvioServiceCode(order);
+
+  if (!serviceCode) {
+    throw new Error(
+      `Código de serviço do Melhor Envio inválido no pedido: ${String(order?.shipping_service_code || "").trim()}`
+    );
+  }
+
   const from = {
     name: getStoreOriginName(),
     phone: getStorePhone(order) || undefined,
@@ -292,8 +343,13 @@ function buildCartPayload(order, items = []) {
     note: `Pedido ${String(order?.order_number || order?.id || "").trim()}`
   };
 
+  console.log("SERVIÇO DE TRANSPORTE NOVO ATIVO V2");
+  console.log("DEBUG REMETENTE DOCUMENT:", from.document);
+  console.log("DEBUG DESTINATARIO DOCUMENT:", to.document);
+  console.log("DEPURAR PEDIDO CLIENTE CPF:", order?.customer_cpf);
+
   const payload = {
-    service: Number(order?.shipping_service_code),
+    service: serviceCode,
     from,
     to,
     products,
@@ -307,10 +363,6 @@ function buildCartPayload(order, items = []) {
       non_commercial: true
     }
   };
-console.log("DEBUG REMETENTE DOCUMENT:", from.document);
-console.log("DEBUG DESTINATARIO DOCUMENT:", to.document);
-console.log("DEBUG ORDER CUSTOMER CPF:", order?.customer_cpf);
-
 
   return payload;
 }
