@@ -84,6 +84,165 @@ function getMercadoPagoWebhookSecret() {
   ).trim();
 }
 
+function getMetaPixelId() {
+  return String(
+    env.metaPixelId ||
+      process.env.META_PIXEL_ID ||
+      ""
+  ).trim();
+}
+
+function getMetaConversionsApiAccessToken() {
+  return String(
+    env.metaConversionsApiAccessToken ||
+      process.env.META_CONVERSIONS_API_ACCESS_TOKEN ||
+      ""
+  ).trim();
+}
+
+function getMetaApiVersion() {
+  return String(
+    env.metaApiVersion ||
+      process.env.META_API_VERSION ||
+      "v22.0"
+  ).trim();
+}
+
+function sha256Normalize(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!normalized) return "";
+  return crypto.createHash("sha256").update(normalized).digest("hex");
+}
+
+function hashPhoneForMeta(value) {
+  const digits = onlyDigits(value);
+  if (!digits) return "";
+  return crypto.createHash("sha256").update(digits).digest("hex");
+}
+
+function buildMetaUserData(order) {
+  const email = String(order?.customer_email || "").trim().toLowerCase();
+  const phone = String(order?.customer_phone || "").trim();
+  const firstName = String(order?.customer_name || "")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)[0] || "";
+  const lastNameParts = String(order?.customer_name || "")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  const lastName =
+    lastNameParts.length > 1 ? lastNameParts[lastNameParts.length - 1] : "";
+
+  const city = String(order?.shipping_city || "").trim().toLowerCase();
+  const state = String(order?.shipping_state || "").trim().toLowerCase();
+  const zip = onlyDigits(order?.shipping_cep || "");
+  const country = "br";
+
+  const userData = {};
+
+  if (email) userData.em = [sha256Normalize(email)];
+  if (phone) userData.ph = [hashPhoneForMeta(phone)];
+  if (firstName) userData.fn = [sha256Normalize(firstName)];
+  if (lastName) userData.ln = [sha256Normalize(lastName)];
+  if (city) userData.ct = [sha256Normalize(city)];
+  if (state) userData.st = [sha256Normalize(state)];
+  if (zip) userData.zp = [sha256Normalize(zip)];
+  if (country) userData.country = [sha256Normalize(country)];
+
+  return userData;
+}
+
+async function sendMetaPurchaseEvent({ order, items = [], payment }) {
+  try {
+    const pixelId = getMetaPixelId();
+    const accessToken = getMetaConversionsApiAccessToken();
+    const apiVersion = getMetaApiVersion();
+
+    if (!pixelId || !accessToken) {
+      console.log(
+        "META PURCHASE SKIPPED: META_PIXEL_ID ou META_CONVERSIONS_API_ACCESS_TOKEN não configurado"
+      );
+      return {
+        sent: false,
+        skipped: true,
+        reason: "meta_not_configured"
+      };
+    }
+
+    const totalValue = Number(order?.total_amount || 0) || 0;
+    const eventId = `purchase_${String(order?.order_number || "")}_${String(payment?.id || "")}`.trim();
+
+    const payload = {
+      data: [
+        {
+          event_name: "Purchase",
+          event_time: Math.floor(Date.now() / 1000),
+          action_source: "website",
+          event_id: eventId,
+          user_data: buildMetaUserData(order),
+          custom_data: {
+            currency: "BRL",
+            value: totalValue,
+            order_id: String(order?.order_number || ""),
+            content_type: "product",
+            content_ids: items
+              .map((item) => String(item?.product_id || item?.id || "").trim())
+              .filter(Boolean),
+            contents: items
+              .map((item) => ({
+                id: String(item?.product_id || item?.id || "").trim(),
+                quantity: Number(item?.quantity || 1) || 1,
+                item_price: Number(item?.unit_price || 0) || 0
+              }))
+              .filter((item) => item.id)
+          }
+        }
+      ]
+    };
+
+    if (process.env.META_TEST_EVENT_CODE) {
+      payload.test_event_code = String(process.env.META_TEST_EVENT_CODE).trim();
+    }
+
+    const url = `https://graph.facebook.com/${apiVersion}/${pixelId}/events?access_token=${encodeURIComponent(accessToken)}`;
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(payload)
+    });
+
+    const data = await response.json().catch(() => ({}));
+
+    if (!response.ok) {
+      console.error("ERRO AO ENVIAR PURCHASE PARA META:", data);
+      return {
+        sent: false,
+        skipped: false,
+        error: data
+      };
+    }
+
+    console.log("PURCHASE ENVIADO PARA META COM SUCESSO:", data);
+
+    return {
+      sent: true,
+      skipped: false,
+      response: data
+    };
+  } catch (error) {
+    console.error("ERRO INTERNO AO ENVIAR PURCHASE PARA META:", error);
+    return {
+      sent: false,
+      skipped: false,
+      error: error.message || String(error)
+    };
+  }
+}
+
 function getApiBaseUrl(req) {
   const configured = env.apiBaseUrl || process.env.API_BASE_URL || "";
 
@@ -1348,6 +1507,17 @@ router.post("/payments/mercado-pago/webhook", async (req, res) => {
       });
     }
 
+    let previousOrder = null;
+
+    try {
+      previousOrder = await findOrderByExternalReference(externalReference);
+    } catch (previousOrderError) {
+      console.warn(
+        "NÃO FOI POSSÍVEL BUSCAR ESTADO ANTERIOR DO PEDIDO ANTES DO UPDATE:",
+        previousOrderError.message || previousOrderError
+      );
+    }
+
     const updatePayload = {
       payment_reference: String(payment.id || ""),
       payment_raw_status: paymentStatus,
@@ -1387,6 +1557,7 @@ router.post("/payments/mercado-pago/webhook", async (req, res) => {
     }
 
     let labelResult = null;
+    let metaPurchaseResult = null;
 
     if (paymentStatus === "approved") {
       try {
@@ -1395,8 +1566,26 @@ router.post("/payments/mercado-pago/webhook", async (req, res) => {
             ? updateResponse.data[0]
             : await findOrderByExternalReference(externalReference);
 
+        const orderItems = await findOrderItems(updatedOrder.id);
+
+        const alreadyPaidBeforeWebhook =
+          String(previousOrder?.payment_status || "").trim().toLowerCase() === "paid";
+
+        if (!alreadyPaidBeforeWebhook) {
+          metaPurchaseResult = await sendMetaPurchaseEvent({
+            order: updatedOrder,
+            items: orderItems,
+            payment
+          });
+        } else {
+          metaPurchaseResult = {
+            sent: false,
+            skipped: true,
+            reason: "already_paid_before_webhook"
+          };
+        }
+
         if (updatedOrder?.shipping_label_status !== "generated") {
-          const orderItems = await findOrderItems(updatedOrder.id);
           const generatedLabel = await generateAutomaticShippingLabel(
             updatedOrder,
             orderItems
@@ -1449,7 +1638,8 @@ router.post("/payments/mercado-pago/webhook", async (req, res) => {
       received: true,
       externalReference,
       paymentStatus,
-      label: labelResult
+      label: labelResult,
+      metaPurchase: metaPurchaseResult
     });
   } catch (error) {
     console.error("ERRO NO WEBHOOK DO MERCADO PAGO:", error);
@@ -1480,6 +1670,17 @@ router.post("/payments/simulate/:orderNumber", async (req, res) => {
         success: false,
         message: "Número do pedido é obrigatório"
       });
+    }
+
+    let previousOrder = null;
+
+    try {
+      previousOrder = await findOrderByExternalReference(orderNumber);
+    } catch (previousOrderError) {
+      console.warn(
+        "NÃO FOI POSSÍVEL BUSCAR ESTADO ANTERIOR DO PEDIDO ANTES DA SIMULAÇÃO:",
+        previousOrderError.message || previousOrderError
+      );
     }
 
     const updatePayload = {
@@ -1517,11 +1718,32 @@ router.post("/payments/simulate/:orderNumber", async (req, res) => {
       directOrderUpdate.data.length
     ) {
       const updatedOrder = directOrderUpdate.data[0];
+      let metaPurchaseResult = null;
 
       if ((status === "approved" || status === "paid") && updatedOrder?.id) {
         try {
+          const orderItems = await findOrderItems(updatedOrder.id);
+
+          const alreadyPaidBeforeSimulation =
+            String(previousOrder?.payment_status || "").trim().toLowerCase() === "paid";
+
+          if (!alreadyPaidBeforeSimulation) {
+            metaPurchaseResult = await sendMetaPurchaseEvent({
+              order: updatedOrder,
+              items: orderItems,
+              payment: {
+                id: `simulation_${updatedOrder.order_number}`
+              }
+            });
+          } else {
+            metaPurchaseResult = {
+              sent: false,
+              skipped: true,
+              reason: "already_paid_before_simulation"
+            };
+          }
+
           if (updatedOrder.shipping_label_status !== "generated") {
-            const orderItems = await findOrderItems(updatedOrder.id);
             const generatedLabel = await generateAutomaticShippingLabel(
               updatedOrder,
               orderItems
@@ -1540,13 +1762,14 @@ router.post("/payments/simulate/:orderNumber", async (req, res) => {
       return res.status(200).json({
         success: true,
         message: "Pagamento simulado com sucesso",
-        order: updatedOrder
+        order: updatedOrder,
+        metaPurchase: metaPurchaseResult
       });
     }
 
     const findUrl = new URL(`${env.supabaseUrl}/rest/v1/orders`);
     findUrl.searchParams.set("order_number", `eq.${orderNumber}`);
-    findUrl.searchParams.set("select", "id,order_number,shipping_label_status");
+    findUrl.searchParams.set("select", "id,order_number,shipping_label_status,payment_status");
     findUrl.searchParams.set("limit", "1");
 
     const findResponse = await fetch(findUrl.toString(), {
@@ -1584,11 +1807,32 @@ router.post("/payments/simulate/:orderNumber", async (req, res) => {
     }
 
     const updatedOrder = fallbackUpdate.data[0];
+    let metaPurchaseResult = null;
 
     if ((status === "approved" || status === "paid") && updatedOrder?.id) {
       try {
+        const orderItems = await findOrderItems(updatedOrder.id);
+
+        const alreadyPaidBeforeSimulation =
+          String(previousOrder?.payment_status || "").trim().toLowerCase() === "paid";
+
+        if (!alreadyPaidBeforeSimulation) {
+          metaPurchaseResult = await sendMetaPurchaseEvent({
+            order: updatedOrder,
+            items: orderItems,
+            payment: {
+              id: `simulation_${updatedOrder.order_number}`
+            }
+          });
+        } else {
+          metaPurchaseResult = {
+            sent: false,
+            skipped: true,
+            reason: "already_paid_before_simulation"
+          };
+        }
+
         if (updatedOrder.shipping_label_status !== "generated") {
-          const orderItems = await findOrderItems(updatedOrder.id);
           const generatedLabel = await generateAutomaticShippingLabel(
             updatedOrder,
             orderItems
@@ -1610,7 +1854,8 @@ router.post("/payments/simulate/:orderNumber", async (req, res) => {
     return res.status(200).json({
       success: true,
       message: "Pagamento simulado com sucesso",
-      order: updatedOrder
+      order: updatedOrder,
+      metaPurchase: metaPurchaseResult
     });
   } catch (error) {
     console.error("ERRO AO SIMULAR PAGAMENTO:", error);
