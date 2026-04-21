@@ -504,6 +504,423 @@ function normalizeCartCreatedResult({
   };
 }
 
+function collectObjects(node, acc = []) {
+  if (!node) return acc;
+
+  if (Array.isArray(node)) {
+    for (const item of node) {
+      collectObjects(item, acc);
+    }
+    return acc;
+  }
+
+  if (typeof node === "object") {
+    acc.push(node);
+    for (const value of Object.values(node)) {
+      collectObjects(value, acc);
+    }
+  }
+
+  return acc;
+}
+
+function pickFirstString(obj, keys = []) {
+  for (const key of keys) {
+    const value = String(obj?.[key] || "").trim();
+    if (value) return value;
+  }
+  return "";
+}
+
+function extractTrackingInfoFromResponse(data, shipmentId) {
+  const objects = collectObjects(data, []);
+  const normalizedShipmentId = String(shipmentId || "").trim();
+
+  let matched = objects.find((item) => {
+    const candidateId = pickFirstString(item, ["id", "order_id", "cart_id"]);
+    return candidateId && candidateId === normalizedShipmentId;
+  });
+
+  if (!matched) {
+    matched = objects.find((item) => {
+      return Boolean(
+        pickFirstString(item, [
+          "tracking",
+          "tracking_code",
+          "status",
+          "situation",
+          "state",
+          "shipment_status"
+        ])
+      );
+    });
+  }
+
+  const trackingCode = pickFirstString(matched || {}, [
+    "tracking",
+    "tracking_code",
+    "code"
+  ]);
+
+  const status = pickFirstString(matched || {}, [
+    "status",
+    "situation",
+    "state",
+    "shipment_status"
+  ]);
+
+  const carrier = pickFirstString(matched || {}, [
+    "carrier",
+    "company_name",
+    "agency"
+  ]);
+
+  return {
+    trackingCode,
+    status,
+    carrier,
+    raw: matched || null
+  };
+}
+
+function extractLabelUrlFromResponse(data) {
+  const objects = collectObjects(data, []);
+
+  const matched = objects.find((item) => {
+    return Boolean(
+      pickFirstString(item, ["url", "link", "path", "pdf", "pdf_url"])
+    );
+  });
+
+  const url = pickFirstString(matched || {}, [
+    "url",
+    "link",
+    "path",
+    "pdf",
+    "pdf_url"
+  ]);
+
+  return {
+    url,
+    raw: matched || null
+  };
+}
+
+async function postMelhorEnvioEndpoint(accessToken, baseUrl, endpoint, body) {
+  const response = await fetch(`${baseUrl}${endpoint}`, {
+    method: "POST",
+    headers: buildMelhorEnvioHeaders(accessToken),
+    body: JSON.stringify(body)
+  });
+
+  const data = await response.json().catch(() => null);
+
+  return {
+    ok: response.ok,
+    status: response.status,
+    data
+  };
+}
+
+async function fetchPendingCartCreatedOrders(limit = 20) {
+  const url = new URL(`${env.supabaseUrl}/rest/v1/orders`);
+  url.searchParams.set(
+    "select",
+    [
+      "id",
+      "order_number",
+      "payment_status",
+      "shipping_carrier",
+      "shipping_tracking_code",
+      "tracking_code",
+      "shipping_label_status",
+      "shipping_label_url",
+      "shipping_label_pdf_url",
+      "shipping_shipment_id",
+      "shipping_label_error",
+      "shipping_label_raw",
+      "paid_at",
+      "created_at"
+    ].join(",")
+  );
+  url.searchParams.set("shipping_label_status", "eq.cart_created");
+  url.searchParams.set("shipping_shipment_id", "not.is.null");
+  url.searchParams.set("order", "paid_at.asc.nullslast,created_at.asc");
+  url.searchParams.set("limit", String(Math.max(1, Number(limit) || 20)));
+
+  const response = await fetch(url.toString(), {
+    method: "GET",
+    headers: {
+      apikey: env.supabaseServiceRoleKey,
+      Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
+      "Content-Type": "application/json",
+      Accept: "application/json"
+    }
+  });
+
+  const data = await response.json().catch(() => []);
+
+  if (!response.ok) {
+    throw new Error("Erro ao buscar pedidos pendentes de sincronização do Melhor Envio");
+  }
+
+  return Array.isArray(data) ? data : [];
+}
+
+async function updateOrderSyncRecord(orderId, payload) {
+  const url = new URL(`${env.supabaseUrl}/rest/v1/orders`);
+  url.searchParams.set("id", `eq.${orderId}`);
+  url.searchParams.set("select", "*");
+
+  const response = await fetch(url.toString(), {
+    method: "PATCH",
+    headers: {
+      apikey: env.supabaseServiceRoleKey,
+      Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
+      "Content-Type": "application/json",
+      Prefer: "return=representation"
+    },
+    body: JSON.stringify(payload)
+  });
+
+  const data = await response.json().catch(() => []);
+
+  if (!response.ok) {
+    throw new Error("Erro ao atualizar pedido sincronizado do Melhor Envio");
+  }
+
+  return Array.isArray(data) ? data[0] || null : null;
+}
+
+async function addOrderSyncTimeline(orderId, label, description) {
+  const response = await fetch(`${env.supabaseUrl}/rest/v1/rpc/add_order_timeline_event`, {
+    method: "POST",
+    headers: {
+      apikey: env.supabaseServiceRoleKey,
+      Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      p_order_id: orderId,
+      p_event_label: label,
+      p_event_description: description
+    })
+  });
+
+  if (!response.ok) {
+    const data = await response.json().catch(() => null);
+    console.error(
+      "MELHOR ENVIO SYNC TIMELINE ERROR: " +
+        JSON.stringify({
+          orderId,
+          label,
+          description,
+          data
+        })
+    );
+  }
+}
+
+function mergeShippingLabelRaw(existingRaw, patch) {
+  const base =
+    existingRaw && typeof existingRaw === "object"
+      ? existingRaw
+      : {};
+
+  return {
+    ...base,
+    ...patch
+  };
+}
+
+function shouldMarkAsGenerated({ labelUrl }) {
+  return Boolean(String(labelUrl || "").trim());
+}
+
+async function syncSingleCartCreatedOrder(order, accessToken, baseUrl) {
+  const shipmentId = String(order?.shipping_shipment_id || "").trim();
+
+  if (!shipmentId) {
+    return {
+      orderId: order?.id || null,
+      orderNumber: order?.order_number || null,
+      status: "skipped_missing_shipment_id"
+    };
+  }
+
+  const trackingResponse = await postMelhorEnvioEndpoint(
+    accessToken,
+    baseUrl,
+    "/me/shipment/tracking",
+    {
+      orders: [shipmentId]
+    }
+  );
+
+  const previewResponse = await postMelhorEnvioEndpoint(
+    accessToken,
+    baseUrl,
+    "/me/shipment/preview",
+    {
+      orders: [shipmentId]
+    }
+  );
+
+  let printResponse = null;
+
+  if (!previewResponse.ok) {
+    printResponse = await postMelhorEnvioEndpoint(
+      accessToken,
+      baseUrl,
+      "/me/shipment/print",
+      {
+        mode: "private",
+        orders: [shipmentId]
+      }
+    );
+  }
+
+  const trackingInfo = extractTrackingInfoFromResponse(
+    trackingResponse.data,
+    shipmentId
+  );
+
+  const previewInfo = extractLabelUrlFromResponse(previewResponse.data);
+  const printInfo = extractLabelUrlFromResponse(printResponse?.data);
+
+  const labelUrl = String(previewInfo.url || printInfo.url || "").trim();
+  const trackingCode = String(
+    trackingInfo.trackingCode ||
+      order?.shipping_tracking_code ||
+      order?.tracking_code ||
+      ""
+  ).trim();
+
+  const carrier = String(
+    trackingInfo.carrier ||
+      order?.shipping_carrier ||
+      "Melhor Envio"
+  ).trim();
+
+  const shouldGenerate = shouldMarkAsGenerated({ labelUrl });
+
+  const mergedRaw = mergeShippingLabelRaw(order?.shipping_label_raw, {
+    sync_attempted_at: new Date().toISOString(),
+    sync_tracking_response: trackingResponse.data,
+    sync_preview_response: previewResponse.data,
+    sync_print_response: printResponse?.data || null,
+    sync_tracking_status: trackingInfo.status || "",
+    sync_tracking_code: trackingInfo.trackingCode || "",
+    sync_label_url: labelUrl || "",
+    sync_label_generated: shouldGenerate
+  });
+
+  if (!shouldGenerate) {
+    await updateOrderSyncRecord(order.id, {
+      shipping_label_error: "",
+      shipping_label_raw: mergedRaw
+    });
+
+    return {
+      orderId: order?.id || null,
+      orderNumber: order?.order_number || null,
+      status: "cart_still_pending",
+      shipmentId
+    };
+  }
+
+  await updateOrderSyncRecord(order.id, {
+    shipping_label_status: "generated",
+    shipping_label_url: labelUrl,
+    shipping_label_pdf_url: labelUrl,
+    shipping_tracking_code: trackingCode,
+    tracking_code: trackingCode || order?.tracking_code || "",
+    shipping_carrier: carrier,
+    shipping_label_generated_at: new Date().toISOString(),
+    shipping_label_error: "",
+    shipping_label_raw: mergedRaw
+  });
+
+  await addOrderSyncTimeline(
+    order.id,
+    "Etiqueta sincronizada automaticamente",
+    [
+      "Etiqueta detectada automaticamente após compra manual no Melhor Envio.",
+      carrier ? `Transportadora: ${carrier}.` : "",
+      trackingCode ? `Código de rastreio: ${trackingCode}.` : "",
+      shipmentId ? `ID do envio/carrinho: ${shipmentId}.` : "",
+      labelUrl ? `URL da etiqueta: ${labelUrl}.` : ""
+    ]
+      .filter(Boolean)
+      .join(" ")
+  );
+
+  return {
+    orderId: order?.id || null,
+    orderNumber: order?.order_number || null,
+    status: "generated",
+    shipmentId,
+    trackingCode,
+    labelUrl
+  };
+}
+
+export async function syncPendingMelhorEnvioLabels({
+  limit = 20
+} = {}) {
+  const pendingOrders = await fetchPendingCartCreatedOrders(limit);
+
+  if (!pendingOrders.length) {
+    return {
+      success: true,
+      checked: 0,
+      updated: 0,
+      pending: 0,
+      results: []
+    };
+  }
+
+  const accessToken = await getMelhorEnvioAccessToken();
+  const { baseUrl } = getMelhorEnvioConfig();
+
+  const results = [];
+
+  for (const order of pendingOrders) {
+    try {
+      const result = await syncSingleCartCreatedOrder(order, accessToken, baseUrl);
+      results.push(result);
+    } catch (error) {
+      console.error(
+        "MELHOR ENVIO AUTO SYNC ERROR: " +
+          JSON.stringify({
+            orderId: order?.id || null,
+            orderNumber: order?.order_number || null,
+            shipmentId: order?.shipping_shipment_id || null,
+            message: error.message
+          })
+      );
+
+      results.push({
+        orderId: order?.id || null,
+        orderNumber: order?.order_number || null,
+        status: "error",
+        message: error.message
+      });
+    }
+  }
+
+  const updated = results.filter((item) => item.status === "generated").length;
+  const pending = results.filter((item) => item.status === "cart_still_pending").length;
+
+  return {
+    success: true,
+    checked: pendingOrders.length,
+    updated,
+    pending,
+    results
+  };
+}
+
 export async function generateAutomaticShippingLabel(order, items = []) {
   try {
     if (!order?.id) {
