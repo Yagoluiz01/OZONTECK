@@ -19,7 +19,7 @@ function roundMoney(value) {
 }
 
 function buildFailureResult(order, error = "", extra = {}) {
-  const message = String(error || "Erro ao gerar etiqueta automática").trim();
+  const message = String(error || "Erro ao criar carrinho automático no Melhor Envio").trim();
 
   return {
     success: false,
@@ -285,24 +285,24 @@ function buildCartPayload(order, items = []) {
     !destination.city ||
     !destination.state_abbr
   ) {
-    throw new Error("Endereço do pedido incompleto para gerar etiqueta");
+    throw new Error("Endereço do pedido incompleto para criar carrinho");
   }
 
   const products = buildMelhorEnvioProducts(items);
   const volumes = buildMelhorEnvioVolumes(order, items);
 
   if (!products.length) {
-    throw new Error("Pedido sem itens para gerar etiqueta");
+    throw new Error("Pedido sem itens para criar carrinho");
   }
 
   if (!volumes.length) {
-    throw new Error("Pedido sem volumes para gerar etiqueta");
+    throw new Error("Pedido sem volumes para criar carrinho");
   }
 
   const declaredValue = getOrderDeclaredValue(items);
 
   if (declaredValue <= 0) {
-    throw new Error("Valor declarado do pedido inválido para gerar etiqueta");
+    throw new Error("Valor declarado do pedido inválido para criar carrinho");
   }
 
   const serviceCode = resolveMelhorEnvioServiceCode(order);
@@ -348,7 +348,7 @@ function buildCartPayload(order, items = []) {
   console.log("DEBUG DESTINATARIO DOCUMENT:", to.document);
   console.log("DEPURAR PEDIDO CLIENTE CPF:", order?.customer_cpf);
 
-  const payload = {
+  return {
     service: serviceCode,
     from,
     to,
@@ -363,8 +363,6 @@ function buildCartPayload(order, items = []) {
       non_commercial: true
     }
   };
-
-  return payload;
 }
 
 function headersToObject(headers) {
@@ -432,185 +430,76 @@ async function createMelhorEnvioCart(order, items = []) {
   };
 }
 
-function extractCartIds(cartResponse) {
-  const candidates = [];
+function extractCartInfo(cartResponse) {
+  const source =
+    cartResponse?.data && !Array.isArray(cartResponse.data)
+      ? cartResponse.data
+      : Array.isArray(cartResponse)
+        ? cartResponse[0] || {}
+        : cartResponse?.id
+          ? cartResponse
+          : {};
 
-  if (Array.isArray(cartResponse)) {
-    candidates.push(...cartResponse);
-  }
+  const id = String(
+    source?.id || source?.order_id || source?.cart_id || ""
+  ).trim();
 
-  if (Array.isArray(cartResponse?.data)) {
-    candidates.push(...cartResponse.data);
-  }
+  const protocol = String(
+    source?.protocol || source?.protocolo || ""
+  ).trim();
 
-  if (Array.isArray(cartResponse?.orders)) {
-    candidates.push(...cartResponse.orders);
-  }
-
-  if (Array.isArray(cartResponse?.items)) {
-    candidates.push(...cartResponse.items);
-  }
-
-  if (cartResponse?.data && !Array.isArray(cartResponse.data)) {
-    candidates.push(cartResponse.data);
-  }
-
-  if (cartResponse?.order && typeof cartResponse.order === "object") {
-    candidates.push(cartResponse.order);
-  }
-
-  if (cartResponse?.item && typeof cartResponse.item === "object") {
-    candidates.push(cartResponse.item);
-  }
-
-  if (cartResponse?.id) {
-    candidates.push(cartResponse);
-  }
-
-  const ids = candidates
-    .map((item) => Number(item?.id || item?.order_id || item?.cart_id || 0))
-    .filter((id) => Number.isFinite(id) && id > 0);
-
-  return [...new Set(ids)];
-}
-
-async function checkoutMelhorEnvioCart(cartIds = []) {
-  if (!cartIds.length) {
-    throw new Error("Nenhum item válido no carrinho do Melhor Envio");
-  }
-
-  const accessToken = await getMelhorEnvioAccessToken();
-  const { baseUrl } = getMelhorEnvioConfig();
-
-  const response = await fetch(`${baseUrl}/me/shipment/checkout`, {
-    method: "POST",
-    headers: buildMelhorEnvioHeaders(accessToken),
-    body: JSON.stringify({
-      orders: cartIds
-    })
-  });
-
-  const data = await response.json().catch(() => null);
-
-  if (!response.ok) {
-    console.error(
-      "MELHOR ENVIO CHECKOUT ERROR: " +
-        JSON.stringify({
-          status: response.status,
-          data,
-          cartIds
-        })
-    );
-
-    throw new Error(
-      data?.message ||
-        data?.error ||
-        data?.details ||
-        "Erro ao comprar etiqueta no Melhor Envio"
-    );
-  }
-
-  return data;
-}
-
-async function getMelhorEnvioShipmentLabel(cartId) {
-  const accessToken = await getMelhorEnvioAccessToken();
-  const { baseUrl } = getMelhorEnvioConfig();
-
-  const response = await fetch(`${baseUrl}/me/shipment/print`, {
-    method: "POST",
-    headers: buildMelhorEnvioHeaders(accessToken),
-    body: JSON.stringify({
-      mode: "private",
-      orders: [cartId]
-    })
-  });
-
-  const data = await response.json().catch(() => null);
-
-  if (!response.ok) {
-    console.error(
-      "MELHOR ENVIO PRINT ERROR: " +
-        JSON.stringify({
-          status: response.status,
-          data,
-          cartId
-        })
-    );
-
-    throw new Error(
-      data?.message ||
-        data?.error ||
-        "Erro ao gerar PDF da etiqueta no Melhor Envio"
-    );
-  }
-
-  return data;
-}
-
-function normalizeMelhorEnvioLabelResult({
-  order,
-  cartData,
-  checkoutData,
-  printData
-}) {
-  const cartList = Array.isArray(cartData)
-    ? cartData
-    : Array.isArray(cartData?.data)
-      ? cartData.data
-      : cartData?.id
-        ? [cartData]
-        : [];
-
-  const firstCart = cartList[0] || {};
-
-  const trackingCode = String(
-    firstCart?.tracking ||
-      firstCart?.tracking_code ||
-      checkoutData?.tracking ||
-      checkoutData?.tracking_code ||
-      ""
+  const status = String(
+    source?.status || ""
   ).trim();
 
   const carrier = String(
-    firstCart?.company?.name ||
-      firstCart?.company_name ||
-      firstCart?.agency ||
+    source?.company?.name ||
+      source?.agency ||
+      ""
+  ).trim();
+
+  return {
+    id,
+    protocol,
+    status,
+    carrier,
+    rawItem: source
+  };
+}
+
+function normalizeCartCreatedResult({
+  order,
+  cartData
+}) {
+  const info = extractCartInfo(cartData);
+
+  if (!info.id) {
+    throw new Error(
+      "O Melhor Envio respondeu ao criar o carrinho, mas nenhum ID foi identificado."
+    );
+  }
+
+  const carrier = String(
+    info.carrier ||
+      order?.shipping_carrier ||
       "Melhor Envio"
   ).trim();
 
-  const shipmentId = String(
-    firstCart?.id ||
-      checkoutData?.id ||
-      order?.shipping_shipment_id ||
-      ""
-  ).trim();
-
-  const labelUrl = String(
-    printData?.url ||
-      printData?.link ||
-      printData?.path ||
-      ""
-  ).trim();
-
-  if (!labelUrl) {
-    throw new Error("Melhor Envio não retornou URL do PDF");
-  }
-
   return {
     success: true,
-    mode: "melhor_envio",
-    labelStatus: "generated",
-    labelUrl,
-    labelPdfUrl: labelUrl,
-    trackingCode,
+    mode: "melhor_envio_cart_created",
+    labelStatus: "cart_created",
+    labelUrl: "",
+    labelPdfUrl: "",
+    trackingCode: "",
     carrier,
-    shipmentId,
+    shipmentId: info.id,
     error: "",
     raw: {
-      cartData,
-      checkoutData,
-      printData
+      cartId: info.id,
+      cartProtocol: info.protocol,
+      cartStatus: info.status,
+      cartData
     }
   };
 }
@@ -618,19 +507,19 @@ function normalizeMelhorEnvioLabelResult({
 export async function generateAutomaticShippingLabel(order, items = []) {
   try {
     if (!order?.id) {
-      return buildFailureResult(order, "Pedido inválido para gerar etiqueta", {
+      return buildFailureResult(order, "Pedido inválido para criar carrinho", {
         labelStatus: "invalid_order"
       });
     }
 
     if (!items?.length) {
-      return buildFailureResult(order, "Pedido sem itens para gerar etiqueta", {
+      return buildFailureResult(order, "Pedido sem itens para criar carrinho", {
         labelStatus: "invalid_items"
       });
     }
 
     if (!order.shipping_cep || !order.shipping_address || !order.shipping_number) {
-      return buildFailureResult(order, "Endereço incompleto para gerar etiqueta", {
+      return buildFailureResult(order, "Endereço incompleto para criar carrinho", {
         labelStatus: "invalid_address"
       });
     }
@@ -644,30 +533,24 @@ export async function generateAutomaticShippingLabel(order, items = []) {
     console.log("MELHOR ENVIO STEP: criar carrinho");
     const cartResult = await createMelhorEnvioCart(order, items);
 
-    const cartIds = extractCartIds(cartResult.data);
-    console.log("MELHOR ENVIO STEP: cart ids " + JSON.stringify(cartIds));
+    const cartInfo = extractCartInfo(cartResult.data);
+    console.log(
+      "MELHOR ENVIO STEP: cart criado " +
+        JSON.stringify({
+          id: cartInfo.id,
+          protocol: cartInfo.protocol,
+          status: cartInfo.status,
+          carrier: cartInfo.carrier
+        })
+    );
 
-    if (!cartIds.length) {
-      throw new Error(
-        "O Melhor Envio respondeu ao criar o carrinho, mas nenhum ID de item foi identificado. Verifique o log MELHOR ENVIO CART SUCCESS."
-      );
-    }
-
-    console.log("MELHOR ENVIO STEP: checkout");
-    const checkoutData = await checkoutMelhorEnvioCart(cartIds);
-
-    console.log("MELHOR ENVIO STEP: print");
-    const printData = await getMelhorEnvioShipmentLabel(cartIds[0]);
-
-    return normalizeMelhorEnvioLabelResult({
+    return normalizeCartCreatedResult({
       order,
-      cartData: cartResult.data,
-      checkoutData,
-      printData
+      cartData: cartResult.data
     });
   } catch (error) {
     console.error(
-      "ERRO MELHOR ENVIO LABEL: " +
+      "ERRO MELHOR ENVIO CART: " +
         JSON.stringify({
           message: error.message,
           httpStatus: error?.httpStatus || null,
@@ -688,7 +571,7 @@ export async function generateAutomaticShippingLabel(order, items = []) {
 
     return buildFailureResult(
       order,
-      error.message || "Erro ao gerar etiqueta automática",
+      error.message || "Erro ao criar carrinho automático",
       {
         labelStatus: blocked403 ? "blocked_me_cart_403" : "error",
         httpStatus: error?.httpStatus || null,
