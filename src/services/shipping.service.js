@@ -418,6 +418,14 @@ async function createMelhorEnvioCart(order, items = []) {
     throw error;
   }
 
+  console.log(
+    "MELHOR ENVIO CART SUCCESS: " +
+      JSON.stringify({
+        status: response.status,
+        data
+      })
+  );
+
   return {
     payload,
     data
@@ -425,19 +433,45 @@ async function createMelhorEnvioCart(order, items = []) {
 }
 
 function extractCartIds(cartResponse) {
-  const list = Array.isArray(cartResponse)
-    ? cartResponse
-    : Array.isArray(cartResponse?.data)
-      ? cartResponse.data
-      : cartResponse?.id
-        ? [cartResponse]
-        : [];
+  const candidates = [];
 
-  const ids = list
-    .map((item) => Number(item?.id || 0))
+  if (Array.isArray(cartResponse)) {
+    candidates.push(...cartResponse);
+  }
+
+  if (Array.isArray(cartResponse?.data)) {
+    candidates.push(...cartResponse.data);
+  }
+
+  if (Array.isArray(cartResponse?.orders)) {
+    candidates.push(...cartResponse.orders);
+  }
+
+  if (Array.isArray(cartResponse?.items)) {
+    candidates.push(...cartResponse.items);
+  }
+
+  if (cartResponse?.data && !Array.isArray(cartResponse.data)) {
+    candidates.push(cartResponse.data);
+  }
+
+  if (cartResponse?.order && typeof cartResponse.order === "object") {
+    candidates.push(cartResponse.order);
+  }
+
+  if (cartResponse?.item && typeof cartResponse.item === "object") {
+    candidates.push(cartResponse.item);
+  }
+
+  if (cartResponse?.id) {
+    candidates.push(cartResponse);
+  }
+
+  const ids = candidates
+    .map((item) => Number(item?.id || item?.order_id || item?.cart_id || 0))
     .filter((id) => Number.isFinite(id) && id > 0);
 
-  return ids;
+  return [...new Set(ids)];
 }
 
 async function checkoutMelhorEnvioCart(cartIds = []) {
@@ -612,6 +646,12 @@ export async function generateAutomaticShippingLabel(order, items = []) {
 
     const cartIds = extractCartIds(cartResult.data);
     console.log("MELHOR ENVIO STEP: cart ids " + JSON.stringify(cartIds));
+
+    if (!cartIds.length) {
+      throw new Error(
+        "O Melhor Envio respondeu ao criar o carrinho, mas nenhum ID de item foi identificado. Verifique o log MELHOR ENVIO CART SUCCESS."
+      );
+    }
 
     console.log("MELHOR ENVIO STEP: checkout");
     const checkoutData = await checkoutMelhorEnvioCart(cartIds);
