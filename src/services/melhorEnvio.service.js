@@ -53,12 +53,20 @@ export function buildMelhorEnvioAuthorizeUrl() {
     ? "https://sandbox.melhorenvio.com.br/oauth/authorize"
     : "https://melhorenvio.com.br/oauth/authorize";
 
+  const scopes = [
+    "cart-read",
+    "cart-write",
+    "shipping-calculate",
+    "shipping-checkout",
+    "shipping-generate",
+    "shipping-tracking"
+  ];
+
   const params = new URLSearchParams({
     client_id: clientId,
     redirect_uri: redirectUri,
     response_type: "code",
-    scope:
-      "shipping-calculate shipping-checkout shipping-generate shipping-tracking"
+    scope: scopes.join(" ")
   });
 
   return `${authBase}?${params.toString()}`;
