@@ -865,6 +865,21 @@ async function syncSingleCartCreatedOrder(order, accessToken, baseUrl) {
   };
 }
 
+export async function syncSpecificMelhorEnvioLabelNow(order) {
+  if (!order?.id) {
+    throw new Error("Pedido inválido para sincronização imediata");
+  }
+
+  if (!String(order?.shipping_shipment_id || "").trim()) {
+    throw new Error("Pedido sem ID de envio/carrinho para sincronização");
+  }
+
+  const accessToken = await getMelhorEnvioAccessToken();
+  const { baseUrl } = getMelhorEnvioConfig();
+
+  return syncSingleCartCreatedOrder(order, accessToken, baseUrl);
+}
+
 export async function syncPendingMelhorEnvioLabels({
   limit = 20
 } = {}) {

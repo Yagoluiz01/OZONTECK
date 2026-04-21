@@ -1,7 +1,10 @@
 import express from "express";
 import jwt from "jsonwebtoken";
 import { env } from "../config/env.js";
-import { generateAutomaticShippingLabel } from "../services/shipping.service.js";
+import {
+  generateAutomaticShippingLabel,
+  syncSpecificMelhorEnvioLabelNow
+} from "../services/shipping.service.js";
 
 const router = express.Router();
 
@@ -1020,6 +1023,68 @@ router.put("/:id/manual-label", requireAuth, async (req, res) => {
     return res.status(500).json({
       success: false,
       message: error.message || "Erro interno ao vincular etiqueta manual",
+    });
+  }
+});
+
+router.post("/:id/sync-melhor-envio-now", requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!id) {
+      return res.status(400).json({
+        success: false,
+        message: "ID do pedido é obrigatório",
+      });
+    }
+
+    const orderResponse = await fetchOrderRawById(id);
+    const existingOrder = orderResponse.data[0] || null;
+
+    if (!orderResponse.ok || !existingOrder) {
+      return res.status(404).json({
+        success: false,
+        message: "Pedido não encontrado",
+      });
+    }
+
+    if (!String(existingOrder.shipping_shipment_id || "").trim()) {
+      return res.status(400).json({
+        success: false,
+        message: "Pedido sem ID de envio/carrinho para sincronização",
+      });
+    }
+
+    const syncResult = await syncSpecificMelhorEnvioLabelNow(existingOrder);
+
+    const refreshedOrderResponse = await fetchOrderRawById(id);
+    const refreshedOrder = refreshedOrderResponse.data[0] || null;
+
+    if (!refreshedOrderResponse.ok || !refreshedOrder) {
+      return res.status(500).json({
+        success: false,
+        message: "Sincronização executada, mas houve erro ao recarregar o pedido",
+      });
+    }
+
+    const normalizedOrder = await buildOrderDetails(refreshedOrder);
+
+    const generatedNow = syncResult?.status === "generated";
+
+    return res.status(200).json({
+      success: true,
+      message: generatedNow
+        ? "Etiqueta sincronizada com sucesso"
+        : "Sincronização executada, mas a etiqueta ainda não está disponível no Melhor Envio",
+      sync: syncResult,
+      order: normalizedOrder,
+    });
+  } catch (error) {
+    console.error("ERRO AO SINCRONIZAR ETIQUETA AGORA:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Erro interno ao sincronizar etiqueta agora",
     });
   }
 });
