@@ -816,18 +816,22 @@ async function syncSingleCartCreatedOrder(order, accessToken, baseUrl) {
   });
 
   if (!shouldGenerate) {
-    await updateOrderSyncRecord(order.id, {
-      shipping_label_error: "",
-      shipping_label_raw: mergedRaw
-    });
+  await updateOrderSyncRecord(order.id, {
+    shipping_label_status: "cart_created",
+    shipping_label_url: "",
+    shipping_label_pdf_url: "",
+    shipping_tracking_code: "",
+    shipping_label_error: "",
+    shipping_label_raw: mergedRaw
+  });
 
-    return {
-      orderId: order?.id || null,
-      orderNumber: order?.order_number || null,
-      status: "cart_still_pending",
-      shipmentId
-    };
-  }
+  return {
+    orderId: order?.id || null,
+    orderNumber: order?.order_number || null,
+    status: "cart_still_pending",
+    shipmentId
+  };
+} 
 
   await updateOrderSyncRecord(order.id, {
     shipping_label_status: "generated",
