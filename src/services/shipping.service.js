@@ -683,10 +683,25 @@ async function updateOrderSyncRecord(orderId, payload) {
     body: JSON.stringify(payload)
   });
 
-  const data = await response.json().catch(() => []);
+  const data = await response.json().catch(() => null);
 
   if (!response.ok) {
-    throw new Error("Erro ao atualizar pedido sincronizado do Melhor Envio");
+    console.error(
+      "ERRO UPDATE ORDER SYNC RECORD: " +
+        JSON.stringify({
+          orderId,
+          status: response.status,
+          payload,
+          data
+        })
+    );
+
+    throw new Error(
+      data?.message ||
+        data?.error ||
+        data?.details ||
+        "Erro ao atualizar pedido sincronizado do Melhor Envio"
+    );
   }
 
   return Array.isArray(data) ? data[0] || null : null;
