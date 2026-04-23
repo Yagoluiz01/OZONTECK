@@ -707,6 +707,9 @@ async function updateOrderSyncRecord(orderId, payload) {
   return Array.isArray(data) ? data[0] || null : null;
 }
 
+  return Array.isArray(data) ? data[0] || null : null;
+
+
 async function addOrderSyncTimeline(orderId, label, description) {
   const response = await fetch(`${env.supabaseUrl}/rest/v1/rpc/add_order_timeline_event`, {
     method: "POST",
@@ -830,7 +833,7 @@ async function syncSingleCartCreatedOrder(order, accessToken, baseUrl) {
     sync_label_generated: shouldGenerate
   });
 
-  if (!shouldGenerate) {
+ if (!shouldGenerate) {
   await updateOrderSyncRecord(order.id, {
     shipping_label_status: "pending",
     shipping_label_url: "",
