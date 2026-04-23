@@ -557,10 +557,11 @@ function extractTrackingInfoFromResponse(data, shipmentId) {
   }
 
   const trackingCode = pickFirstString(matched || {}, [
-    "tracking",
-    "tracking_code",
-    "code"
-  ]);
+  "tracking",
+  "tracking_code",
+  "melhorenvio_tracking",
+  "code"
+]);
 
   const status = pickFirstString(matched || {}, [
     "status",
@@ -643,7 +644,7 @@ async function fetchPendingCartCreatedOrders(limit = 20) {
       "created_at"
     ].join(",")
   );
-  url.searchParams.set("shipping_label_status", "eq.cart_created");
+  url.searchParams.set("shipping_label_status", "eq.pending");
   url.searchParams.set("shipping_shipment_id", "not.is.null");
   url.searchParams.set("order", "paid_at.asc.nullslast,created_at.asc");
   url.searchParams.set("limit", String(Math.max(1, Number(limit) || 20)));
@@ -707,7 +708,7 @@ async function updateOrderSyncRecord(orderId, payload) {
   return Array.isArray(data) ? data[0] || null : null;
 }
 
-  return Array.isArray(data) ? data[0] || null : null;
+  
 
 
 async function addOrderSyncTimeline(orderId, label, description) {
@@ -751,8 +752,14 @@ function mergeShippingLabelRaw(existingRaw, patch) {
   };
 }
 
-function shouldMarkAsGenerated({ labelUrl }) {
-  return Boolean(String(labelUrl || "").trim());
+function shouldMarkAsGenerated({ labelUrl, trackingCode, trackingStatus }) {
+  const normalizedStatus = String(trackingStatus || "").trim().toLowerCase();
+
+  return Boolean(
+    String(labelUrl || "").trim() ||
+      String(trackingCode || "").trim() ||
+      ["released", "generated", "paid", "posted"].includes(normalizedStatus)
+  );
 }
 
 async function syncSingleCartCreatedOrder(order, accessToken, baseUrl) {
@@ -775,7 +782,7 @@ async function syncSingleCartCreatedOrder(order, accessToken, baseUrl) {
     }
   );
 
-  const previewResponse = await postMelhorEnvioEndpoint(
+   const previewResponse = await postMelhorEnvioEndpoint(
     accessToken,
     baseUrl,
     "/me/shipment/preview",
@@ -783,6 +790,9 @@ async function syncSingleCartCreatedOrder(order, accessToken, baseUrl) {
       orders: [shipmentId]
     }
   );
+
+  console.log("MELHOR ENVIO PREVIEW STATUS:", previewResponse.status);
+  console.log("MELHOR ENVIO PREVIEW RAW:", JSON.stringify(previewResponse.data));
 
   let printResponse = null;
 
@@ -797,6 +807,9 @@ async function syncSingleCartCreatedOrder(order, accessToken, baseUrl) {
       }
     );
   }
+
+  console.log("MELHOR ENVIO PRINT STATUS:", printResponse?.status || null);
+  console.log("MELHOR ENVIO PRINT RAW:", JSON.stringify(printResponse?.data || null));
 
   const trackingInfo = extractTrackingInfoFromResponse(
     trackingResponse.data,
@@ -820,7 +833,11 @@ async function syncSingleCartCreatedOrder(order, accessToken, baseUrl) {
       "Melhor Envio"
   ).trim();
 
-  const shouldGenerate = shouldMarkAsGenerated({ labelUrl });
+ const shouldGenerate = shouldMarkAsGenerated({
+  labelUrl,
+  trackingCode,
+  trackingStatus: trackingInfo.status
+});
 
   const mergedRaw = mergeShippingLabelRaw(order?.shipping_label_raw, {
     sync_attempted_at: new Date().toISOString(),
