@@ -59,7 +59,8 @@ export function buildMelhorEnvioAuthorizeUrl() {
     "shipping-calculate",
     "shipping-checkout",
     "shipping-generate",
-    "shipping-tracking"
+    "shipping-tracking",
+    "shipping-print"
   ];
 
   const params = new URLSearchParams({
