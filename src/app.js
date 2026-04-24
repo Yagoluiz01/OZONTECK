@@ -15,7 +15,8 @@ import settingsRoutes from "./routes/settings.routes.js";
 import trackingRoutes from "./routes/tracking.routes.js";
 import storeRoutes from "./routes/store.routes.js";
 import shippingRoutes from "./routes/shipping.routes.js";
-
+import adminFinancialRoutes from "./routes/adminFinancial.routes.js";
+import adminPricingRoutes from "./routes/adminPricing.routes.js";
 const app = express();
 
 const __filename = fileURLToPath(import.meta.url);
@@ -23,12 +24,16 @@ const __dirname = path.dirname(__filename);
 
 const allowedOrigins = [
   env.frontendUrl,
+
+  "https://ozonteck-loja.onrender.com",
+
   "http://localhost:5173",
   "http://127.0.0.1:5173",
   "http://localhost:5174",
   "http://127.0.0.1:5174",
   "http://localhost:5500",
   "http://127.0.0.1:5500",
+
   null,
 ];
 
@@ -38,6 +43,7 @@ app.use(
       if (!origin || allowedOrigins.includes(origin)) {
         return callback(null, true);
       }
+
       return callback(new Error(`Origem não permitida por CORS: ${origin}`));
     },
     credentials: true,
@@ -55,15 +61,17 @@ app.use(express.json());
 
 app.use("/labels", express.static(path.join(__dirname, "../public/labels")));
 
-app.use("/api/tracking", trackingRoutes);
-app.use("/api/store", storeRoutes);
-
 app.get("/api/health", (req, res) => {
   return res.status(200).json({
     success: true,
     message: "API OZONTECK funcionando",
   });
 });
+
+app.use("/api/tracking", trackingRoutes);
+app.use("/api/store", storeRoutes);
+
+app.use("/api/admin/financial", adminFinancialRoutes);
 
 app.use("/api/auth", authRoutes);
 app.use("/api/products", productsRoutes);
@@ -72,6 +80,8 @@ app.use("/api/orders", ordersRoutes);
 app.use("/api/customers", customersRoutes);
 app.use("/api/settings", settingsRoutes);
 app.use("/api/shipping", shippingRoutes);
+app.use("/api/admin/pricing", adminPricingRoutes);
+
 app.use((req, res) => {
   return res.status(404).json({
     success: false,
