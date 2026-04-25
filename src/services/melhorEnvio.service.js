@@ -116,7 +116,9 @@ export async function exchangeMelhorEnvioCodeForToken(code) {
       "MELHOR ENVIO TOKEN EXCHANGE ERROR: " +
         JSON.stringify({
           status: response.status,
-          data
+          message: data?.message || data?.error_description || data?.error || null,
+          hasAccessToken: Boolean(data?.access_token),
+          hasRefreshToken: Boolean(data?.refresh_token)
         })
     );
 
@@ -136,7 +138,13 @@ export async function saveMelhorEnvioTokens(tokenData) {
     "MELHOR ENVIO TOKEN RAW: " +
       JSON.stringify({
         keys: tokenData ? Object.keys(tokenData) : [],
-        tokenData
+        hasAccessToken: Boolean(
+          tokenData?.access_token || tokenData?.token || tokenData?.accessToken
+        ),
+        hasRefreshToken: Boolean(
+          tokenData?.refresh_token || tokenData?.refreshToken
+        ),
+        expiresIn: tokenData?.expires_in || tokenData?.expiresIn || null
       })
   );
 
@@ -196,7 +204,17 @@ export async function saveMelhorEnvioTokens(tokenData) {
     "MELHOR ENVIO TOKEN SAVE RESULT: " +
       JSON.stringify({
         status: response.status,
-        data
+        saved: response.ok,
+        provider: Array.isArray(data) && data[0] ? data[0].provider : null,
+        hasAccessToken:
+          Array.isArray(data) && data[0]
+            ? Boolean(String(data[0].access_token || "").trim())
+            : false,
+        hasRefreshToken:
+          Array.isArray(data) && data[0]
+            ? Boolean(String(data[0].refresh_token || "").trim())
+            : false,
+        expiresAt: Array.isArray(data) && data[0] ? data[0].expires_at : null
       })
   );
 
@@ -240,7 +258,12 @@ export async function getMelhorEnvioTokenRecord() {
         hasAccessToken:
           Array.isArray(data) && data[0]
             ? Boolean(String(data[0].access_token || "").trim())
-            : false
+            : false,
+        hasRefreshToken:
+          Array.isArray(data) && data[0]
+            ? Boolean(String(data[0].refresh_token || "").trim())
+            : false,
+        expiresAt: Array.isArray(data) && data[0] ? data[0].expires_at : null
       })
   );
 
