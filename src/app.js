@@ -21,17 +21,6 @@ import adminPricingRoutes from "./routes/adminPricing.routes.js";
 
 const app = express();
 
-const globalLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 300,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: {
-    success: false,
-    message: "Muitas requisições. Tente novamente em alguns minutos.",
-  },
-});
-
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -65,8 +54,12 @@ const allowedOrigins = [
 
   "http://localhost:5173",
   "http://127.0.0.1:5173",
+  "http://192.168.1.34:5173",
+
   "http://localhost:5174",
   "http://127.0.0.1:5174",
+  "http://192.168.1.34:5174",
+
   "http://localhost:5500",
   "http://127.0.0.1:5500",
 
@@ -88,7 +81,8 @@ function isAllowedCorsOrigin(origin) {
 
   if (
     normalizedOrigin.startsWith("http://localhost:") ||
-    normalizedOrigin.startsWith("http://127.0.0.1:")
+    normalizedOrigin.startsWith("http://127.0.0.1:") ||
+    normalizedOrigin.startsWith("http://192.168.")
   ) {
     return true;
   }
@@ -96,35 +90,53 @@ function isAllowedCorsOrigin(origin) {
   return false;
 }
 
+const corsMiddleware = cors({
+  origin(origin, callback) {
+    if (isAllowedCorsOrigin(origin)) {
+      return callback(null, true);
+    }
+
+    const corsError = new Error(`Origem não permitida por CORS: ${origin}`);
+    corsError.statusCode = 403;
+    return callback(corsError);
+  },
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+    "Accept",
+    "Origin",
+    "X-Requested-With",
+    "X-Signature",
+    "X-Request-Id",
+  ],
+  optionsSuccessStatus: 204,
+});
+
+/**
+ * IMPORTANTE:
+ * CORS precisa vir ANTES do rate limit.
+ * Se o rate limit bloquear o preflight OPTIONS, o navegador mostra como erro de CORS.
+ */
+app.use(corsMiddleware);
+
+
+const globalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: Number(process.env.RATE_LIMIT_MAX || 1000),
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip(req) {
+    return req.method === "OPTIONS";
+  },
+  message: {
+    success: false,
+    message: "Muitas requisições. Tente novamente em alguns minutos.",
+  },
+});
+
 app.use(globalLimiter);
-
-app.use(
-  cors({
-    origin(origin, callback) {
-      if (isAllowedCorsOrigin(origin)) {
-        return callback(null, true);
-      }
-
-      const corsError = new Error(`Origem não permitida por CORS: ${origin}`);
-      corsError.statusCode = 403;
-      return callback(corsError);
-    },
-    credentials: true,
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: [
-      "Content-Type",
-      "Authorization",
-      "Accept",
-      "Origin",
-      "X-Requested-With",
-      "X-Signature",
-      "X-Request-Id",
-    ],
-    optionsSuccessStatus: 204,
-  })
-);
-
-
 
 app.use(
   helmet({
@@ -169,9 +181,7 @@ app.use((err, req, res, next) => {
   const statusCode = err.statusCode || err.status || 500;
   const isProduction = env.nodeEnv === "production";
 
-  if (!isProduction) {
-    console.error("[APP_ERROR]", err);
-  }
+  console.error("[APP_ERROR]", err);
 
   return res.status(statusCode).json({
     success: false,
