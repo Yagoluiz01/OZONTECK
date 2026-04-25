@@ -1003,6 +1003,60 @@ function resolveSelectedShippingServiceCode(selectedShipping = {}) {
   return direct;
 }
 
+async function validateSelectedShippingQuote({
+  zipCode,
+  items,
+  subtotal,
+  selectedShipping
+}) {
+  const selectedServiceCode = resolveSelectedShippingServiceCode(selectedShipping);
+  const selectedPrice = Number(selectedShipping?.price || 0) || 0;
+
+  if (!selectedServiceCode) {
+    throw new Error("Serviço de frete não selecionado");
+  }
+
+  if (selectedPrice <= 0) {
+    throw new Error("Valor de frete inválido");
+  }
+
+  const provider = getShippingProvider();
+
+  const result =
+    provider === "melhor_envio"
+      ? await quoteShippingWithMelhorEnvio({ zipCode, items })
+      : await quoteShippingWithFrenet({ zipCode, items, subtotal });
+
+  const quotes = Array.isArray(result.quotes) ? result.quotes : [];
+
+  const matchedQuote = quotes.find((quote) => {
+    const quoteCode = String(quote.serviceCode || "").trim();
+    return quoteCode === String(selectedServiceCode || "").trim();
+  });
+
+  if (!matchedQuote) {
+    throw new Error("Serviço de frete inválido ou expirado");
+  }
+
+  const realPrice = Number(matchedQuote.price || 0) || 0;
+
+  if (realPrice <= 0) {
+    throw new Error("Valor real de frete inválido");
+  }
+
+  const priceDifference = Math.abs(realPrice - selectedPrice);
+
+  if (priceDifference > 0.05) {
+    throw new Error("Valor de frete divergente. Recalcule o frete.");
+  }
+
+  return {
+    provider,
+    quote: matchedQuote,
+    raw: result.raw || null
+  };
+}
+
 function buildShippingQuoteRawForOrder(selectedShipping = {}) {
   const raw = selectedShipping?.raw || null;
 
@@ -1258,35 +1312,31 @@ router.post("/orders", async (req, res) => {
       0
     );
 
-    const selectedShipping = body.shipping || {};
+        const selectedShipping = body.shipping || {};
 
-    console.log(
-      "DEBUG SELECTED SHIPPING AO CRIAR PEDIDO:",
-      JSON.stringify(selectedShipping)
-    );
-    console.log(
-      "DEBUG SHIPPING SERVICE CODE RECEBIDO DO FRONT:",
-      selectedShipping?.serviceCode
-    );
+    const validatedShipping = await validateSelectedShippingQuote({
+      zipCode: customer.cep,
+      items: normalizedItems,
+      subtotal,
+      selectedShipping
+    });
 
-    const resolvedShippingServiceCode =
-      resolveSelectedShippingServiceCode(selectedShipping);
+    const validatedShippingQuote = validatedShipping.quote;
 
-    console.log(
-      "DEBUG SHIPPING SERVICE CODE RESOLVIDO PARA SALVAR:",
-      resolvedShippingServiceCode
-    );
+    const resolvedShippingServiceCode = String(
+      validatedShippingQuote.serviceCode || ""
+    ).trim();
 
-        const shippingAmount = Math.max(
-      0,
-      Number(body.shippingAmount ?? selectedShipping.price ?? 0) || 0
-    );
+    const shippingAmount = Number(validatedShippingQuote.price || 0) || 0;
 
     // Segurança: não aceitar desconto vindo direto do frontend.
     // Quando houver cupom, validar o cupom no backend antes de aplicar desconto.
     const discountAmount = 0;
 
     const totalAmount = subtotal + shippingAmount - discountAmount;
+
+
+
     await findOrCreateCustomer(customer);
     const orderNumber = generateOrderNumber();
 
