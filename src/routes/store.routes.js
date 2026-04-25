@@ -1,4 +1,5 @@
 import express from "express";
+import { requireAdminAuth } from "../middlewares/auth.middleware.js";
 import crypto from "crypto";
 import { env } from "../config/env.js";
 import {
@@ -1927,7 +1928,7 @@ router.get("/orders/:orderNumber/status", async (req, res) => {
   }
 });
 
-router.post("/orders/:id/process-paid", async (req, res) => {
+router.post("/orders/:id/process-paid", requireAdminAuth, async (req, res) => {
   try {
     const result = await processPaidOrder({ orderId: req.params.id });
 
