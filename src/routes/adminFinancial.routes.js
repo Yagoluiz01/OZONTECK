@@ -1,4 +1,5 @@
 import express from "express";
+import { requireAdminAuth } from "../middlewares/auth.middleware.js";
 import {
   listFinancialCategories,
   createFinancialCategory,
@@ -15,6 +16,8 @@ import {
 } from "../services/adminFinancial.service.js";
 
 const router = express.Router();
+
+router.use(requireAdminAuth);
 
 function ok(res, data = {}, message = "OK") {
   return res.status(200).json({
