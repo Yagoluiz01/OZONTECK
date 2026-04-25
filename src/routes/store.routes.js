@@ -30,6 +30,136 @@ function onlyDigits(value) {
   return String(value || "").replace(/\D/g, "");
 }
 
+
+function normalizeAffiliateCode(value) {
+  return String(value || "")
+    .trim()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toUpperCase()
+    .replace(/[^A-Z0-9_-]/g, "");
+}
+
+async function findActiveAffiliateByRef(refCode) {
+  const cleanRefCode = normalizeAffiliateCode(refCode);
+
+  if (!cleanRefCode) {
+    return null;
+  }
+
+  const url = new URL(`${env.supabaseUrl}/rest/v1/affiliates`);
+  url.searchParams.set("select", "*");
+  url.searchParams.set("ref_code", `eq.${cleanRefCode}`);
+  url.searchParams.set("status", "eq.active");
+  url.searchParams.set("limit", "1");
+
+  const response = await fetch(url.toString(), {
+    method: "GET",
+    headers: {
+      apikey: env.supabaseServiceRoleKey,
+      Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
+      "Content-Type": "application/json",
+      Accept: "application/json"
+    }
+  });
+
+  const data = await response.json().catch(() => []);
+
+  if (!response.ok || !Array.isArray(data) || !data[0]?.id) {
+    return null;
+  }
+
+  return data[0];
+}
+
+async function createAffiliateConversionForPaidOrder(order) {
+  if (!order?.id || !order?.affiliate_id) {
+    return {
+      created: false,
+      skipped: true,
+      reason: "order_without_affiliate"
+    };
+  }
+
+  const checkUrl = new URL(`${env.supabaseUrl}/rest/v1/affiliate_conversions`);
+  checkUrl.searchParams.set("select", "id");
+  checkUrl.searchParams.set("order_id", `eq.${order.id}`);
+  checkUrl.searchParams.set("limit", "1");
+
+  const checkResponse = await fetch(checkUrl.toString(), {
+    method: "GET",
+    headers: {
+      apikey: env.supabaseServiceRoleKey,
+      Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
+      "Content-Type": "application/json",
+      Accept: "application/json"
+    }
+  });
+
+  const checkData = await checkResponse.json().catch(() => []);
+
+  if (checkResponse.ok && Array.isArray(checkData) && checkData[0]?.id) {
+    return {
+      created: false,
+      skipped: true,
+      reason: "conversion_already_exists",
+      conversionId: checkData[0].id
+    };
+  }
+
+  const orderTotal = Number(order.total_amount || 0) || 0;
+  const commissionRate = Number(order.affiliate_commission_rate || 0) || 0;
+  const commissionAmount = Number(
+    ((orderTotal * commissionRate) / 100).toFixed(2)
+  );
+
+  if (commissionRate <= 0 || commissionAmount <= 0) {
+    return {
+      created: false,
+      skipped: true,
+      reason: "invalid_commission"
+    };
+  }
+
+  const payload = {
+    affiliate_id: order.affiliate_id,
+    order_id: order.id,
+    customer_id: null,
+    ref_code: order.affiliate_ref_code || "",
+    coupon_code: order.affiliate_coupon_code || "",
+    order_total: orderTotal,
+    commission_rate: commissionRate,
+    commission_amount: commissionAmount,
+    status: "approved",
+    approved_at: new Date().toISOString(),
+    released_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+    notes: `Comissão criada automaticamente pelo pedido ${order.order_number || order.id}.`
+  };
+
+  const createResponse = await fetch(`${env.supabaseUrl}/rest/v1/affiliate_conversions`, {
+    method: "POST",
+    headers: {
+      apikey: env.supabaseServiceRoleKey,
+      Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
+      "Content-Type": "application/json",
+      Prefer: "return=representation"
+    },
+    body: JSON.stringify(payload)
+  });
+
+  const createData = await createResponse.json().catch(() => []);
+
+  if (!createResponse.ok || !Array.isArray(createData) || !createData[0]?.id) {
+    throw new Error("Erro ao criar comissão do afiliado");
+  }
+
+  return {
+    created: true,
+    skipped: false,
+    conversion: createData[0]
+  };
+}
+
 function normalizeProduct(product) {
   const id = String(product?.id || "").trim();
   const name = String(product?.name || "").trim();
@@ -1265,6 +1395,8 @@ router.post("/orders", async (req, res) => {
     const customer = body.customer || {};
     const items = Array.isArray(body.items) ? body.items : [];
     const notes = String(body.notes || "").trim();
+    const affiliateRef = normalizeAffiliateCode(body.affiliateRef || body.affiliate_ref || "");
+    const affiliate = await findActiveAffiliateByRef(affiliateRef);
 
     if (!customer.nome || !customer.email || !customer.telefone) {
       return res.status(400).json({
@@ -1363,6 +1495,17 @@ router.post("/orders", async (req, res) => {
       shipping_amount: shippingAmount,
       discount_amount: discountAmount,
       total_amount: totalAmount,
+
+      affiliate_id: affiliate?.id || null,
+      affiliate_ref_code: affiliate?.ref_code || affiliateRef || "",
+      affiliate_coupon_code: affiliate?.coupon_code || "",
+      affiliate_commission_rate: affiliate?.commission_rate
+        ? Number(affiliate.commission_rate)
+        : null,
+      affiliate_commission_amount: affiliate?.commission_rate
+        ? Number(((totalAmount * Number(affiliate.commission_rate || 0)) / 100).toFixed(2))
+        : null,
+
       payment_status: "pending",
       order_status: "pending",
       tracking_code: "",
@@ -1613,6 +1756,7 @@ router.post("/payments/mercado-pago/webhook", async (req, res) => {
 
     let labelResult = null;
     let metaPurchaseResult = null;
+    let affiliateConversionResult = null;
 
     if (paymentStatus === "approved") {
       try {
@@ -1625,6 +1769,25 @@ router.post("/payments/mercado-pago/webhook", async (req, res) => {
 
         const alreadyPaidBeforeWebhook =
           String(previousOrder?.payment_status || "").trim().toLowerCase() === "paid";
+
+          if (!alreadyPaidBeforeWebhook) {
+        try {
+          affiliateConversionResult = await createAffiliateConversionForPaidOrder(updatedOrder);
+        } catch (affiliateError) {
+          console.error("ERRO AO CRIAR COMISSÃO DO AFILIADO:", affiliateError);
+          affiliateConversionResult = {
+            created: false,
+            skipped: false,
+            error: affiliateError.message || "Erro ao criar comissão do afiliado"
+          };
+        }
+      } else {
+        affiliateConversionResult = {
+          created: false,
+          skipped: true,
+          reason: "already_paid_before_webhook"
+        };
+      }
 
         if (!alreadyPaidBeforeWebhook) {
           metaPurchaseResult = await sendMetaPurchaseEvent({
@@ -1689,13 +1852,14 @@ router.post("/payments/mercado-pago/webhook", async (req, res) => {
     }
 
     return res.status(200).json({
-      success: true,
-      received: true,
-      externalReference,
-      paymentStatus,
-      label: labelResult,
-      metaPurchase: metaPurchaseResult
-    });
+  success: true,
+  received: true,
+  externalReference,
+  paymentStatus,
+  label: labelResult,
+  metaPurchase: metaPurchaseResult,
+  affiliateConversion: affiliateConversionResult
+});
   } catch (error) {
     console.error("ERRO NO WEBHOOK DO MERCADO PAGO:", error);
 
