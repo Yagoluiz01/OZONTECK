@@ -1277,12 +1277,16 @@ router.post("/orders", async (req, res) => {
       resolvedShippingServiceCode
     );
 
-    const shippingAmount = Number(
-      body.shippingAmount ?? selectedShipping.price ?? 0
+        const shippingAmount = Math.max(
+      0,
+      Number(body.shippingAmount ?? selectedShipping.price ?? 0) || 0
     );
-    const discountAmount = Number(body.discountAmount || 0);
-    const totalAmount = subtotal + shippingAmount - discountAmount;
 
+    // Segurança: não aceitar desconto vindo direto do frontend.
+    // Quando houver cupom, validar o cupom no backend antes de aplicar desconto.
+    const discountAmount = 0;
+
+    const totalAmount = subtotal + shippingAmount - discountAmount;
     await findOrCreateCustomer(customer);
     const orderNumber = generateOrderNumber();
 
