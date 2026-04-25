@@ -4,6 +4,7 @@ import helmet from "helmet";
 import morgan from "morgan";
 import path from "path";
 import { fileURLToPath } from "url";
+import rateLimit from "express-rate-limit";
 
 import { env } from "./config/env.js";
 import authRoutes from "./routes/auth.routes.js";
@@ -18,6 +19,17 @@ import shippingRoutes from "./routes/shipping.routes.js";
 import adminFinancialRoutes from "./routes/adminFinancial.routes.js";
 import adminPricingRoutes from "./routes/adminPricing.routes.js";
 const app = express();
+
+const globalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 300,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    message: "Muitas requisições. Tente novamente em alguns minutos.",
+  },
+});
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -34,17 +46,25 @@ const allowedOrigins = [
   "http://localhost:5500",
   "http://127.0.0.1:5500",
   "https://ozonteck-admin.onrender.com",
-  null,
+  
 ];
+
+app.use(globalLimiter); 
 
 app.use(
   cors({
     origin(origin, callback) {
-      if (!origin || allowedOrigins.includes(origin)) {
-        return callback(null, true);
-      }
+      if (!origin && env.nodeEnv !== "production") {
+  return callback(null, true);
+}
 
-      return callback(new Error(`Origem não permitida por CORS: ${origin}`));
+if (origin && allowedOrigins.includes(origin)) {
+  return callback(null, true);
+}
+
+      const corsError = new Error(`Origem não permitida por CORS: ${origin}`);
+corsError.statusCode = 403;
+return callback(corsError);
     },
     credentials: true,
   })
@@ -57,7 +77,7 @@ app.use(
 );
 
 app.use(morgan("dev"));
-app.use(express.json());
+app.use(express.json({ limit: "1mb" }));
 
 app.use("/labels", express.static(path.join(__dirname, "../public/labels")));
 
@@ -86,6 +106,22 @@ app.use((req, res) => {
   return res.status(404).json({
     success: false,
     message: "Rota não encontrada",
+  });
+});
+
+app.use((err, req, res, next) => {
+  const statusCode = err.statusCode || err.status || 500;
+  const isProduction = env.nodeEnv === "production";
+
+  if (!isProduction) {
+    console.error("[APP_ERROR]", err);
+  }
+
+  return res.status(statusCode).json({
+    success: false,
+    message: isProduction
+      ? "Erro interno no servidor."
+      : err.message || "Erro interno no servidor.",
   });
 });
 
