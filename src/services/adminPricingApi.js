@@ -1,6 +1,6 @@
 const API_BASE = import.meta.env.VITE_API_URL
   ? `${import.meta.env.VITE_API_URL}/api/admin/pricing`
-  : "http://localhost:5000/api/admin/pricing";
+  : "https://ozonteck-api-staging.onrender.com/api/admin/pricing";
 
 async function request(path, options = {}) {
   const response = await fetch(`${API_BASE}${path}`, {
