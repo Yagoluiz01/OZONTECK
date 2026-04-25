@@ -18,6 +18,7 @@ import storeRoutes from "./routes/store.routes.js";
 import shippingRoutes from "./routes/shipping.routes.js";
 import adminFinancialRoutes from "./routes/adminFinancial.routes.js";
 import adminPricingRoutes from "./routes/adminPricing.routes.js";
+
 const app = express();
 
 const globalLimiter = rateLimit({
@@ -34,10 +35,33 @@ const globalLimiter = rateLimit({
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+function normalizeOrigin(value) {
+  return String(value || "").trim().replace(/\/+$/, "");
+}
+
+function getExtraAllowedOrigins() {
+  const raw =
+    process.env.CORS_ORIGINS ||
+    process.env.ALLOWED_ORIGINS ||
+    process.env.FRONTEND_URLS ||
+    "";
+
+  return String(raw || "")
+    .split(",")
+    .map(normalizeOrigin)
+    .filter(Boolean);
+}
+
 const allowedOrigins = [
   env.frontendUrl,
 
+  process.env.FRONTEND_URL,
+  process.env.ADMIN_FRONTEND_URL,
+  process.env.STORE_FRONTEND_URL,
+
   "https://ozonteck-loja.onrender.com",
+  "https://ozonteck-admin.onrender.com",
+  "https://ozonteck-api-staging.onrender.com",
 
   "http://localhost:5173",
   "http://127.0.0.1:5173",
@@ -45,30 +69,62 @@ const allowedOrigins = [
   "http://127.0.0.1:5174",
   "http://localhost:5500",
   "http://127.0.0.1:5500",
-  "https://ozonteck-admin.onrender.com",
-  
-];
 
-app.use(globalLimiter); 
+  ...getExtraAllowedOrigins(),
+]
+  .map(normalizeOrigin)
+  .filter(Boolean);
+
+function isAllowedCorsOrigin(origin) {
+  const normalizedOrigin = normalizeOrigin(origin);
+
+  if (!normalizedOrigin) {
+    return env.nodeEnv !== "production";
+  }
+
+  if (allowedOrigins.includes(normalizedOrigin)) {
+    return true;
+  }
+
+  if (
+    normalizedOrigin.startsWith("http://localhost:") ||
+    normalizedOrigin.startsWith("http://127.0.0.1:")
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+app.use(globalLimiter);
 
 app.use(
   cors({
     origin(origin, callback) {
-      if (!origin && env.nodeEnv !== "production") {
-  return callback(null, true);
-}
-
-if (origin && allowedOrigins.includes(origin)) {
-  return callback(null, true);
-}
+      if (isAllowedCorsOrigin(origin)) {
+        return callback(null, true);
+      }
 
       const corsError = new Error(`Origem não permitida por CORS: ${origin}`);
-corsError.statusCode = 403;
-return callback(corsError);
+      corsError.statusCode = 403;
+      return callback(corsError);
     },
     credentials: true,
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+      "Accept",
+      "Origin",
+      "X-Requested-With",
+      "X-Signature",
+      "X-Request-Id",
+    ],
+    optionsSuccessStatus: 204,
   })
 );
+
+
 
 app.use(
   helmet({
