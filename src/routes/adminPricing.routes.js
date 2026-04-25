@@ -1,4 +1,5 @@
 import express from "express";
+import { requireAdminAuth } from "../middlewares/auth.middleware.js";
 import {
   applySuggestedPriceToProduct,
   calculateProductPricing,
@@ -10,6 +11,8 @@ import {
 } from "../services/adminPricing.service.js";
 
 const router = express.Router();
+
+router.use(requireAdminAuth);
 
 function ok(res, data = {}, message = "OK") {
   return res.status(200).json({
