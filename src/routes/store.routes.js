@@ -1851,12 +1851,10 @@ router.post("/payments/mercado-pago/webhook", async (req, res) => {
       }
     }
 
-    return res.status(200).json({
+   return res.status(200).json({
   success: true,
-  received: true,
-  externalReference,
-  paymentStatus,
-  label: labelResult,
+  message: "Pagamento simulado com sucesso",
+  order: updatedOrder,
   metaPurchase: metaPurchaseResult,
   affiliateConversion: affiliateConversionResult
 });
@@ -1938,6 +1936,7 @@ router.post("/payments/simulate/:orderNumber", async (req, res) => {
     ) {
       const updatedOrder = directOrderUpdate.data[0];
       let metaPurchaseResult = null;
+      let affiliateConversionResult = null;
 
       if ((status === "approved" || status === "paid") && updatedOrder?.id) {
         try {
@@ -1947,20 +1946,38 @@ router.post("/payments/simulate/:orderNumber", async (req, res) => {
             String(previousOrder?.payment_status || "").trim().toLowerCase() === "paid";
 
           if (!alreadyPaidBeforeSimulation) {
-            metaPurchaseResult = await sendMetaPurchaseEvent({
-              order: updatedOrder,
-              items: orderItems,
-              payment: {
-                id: `simulation_${updatedOrder.order_number}`
-              }
-            });
-          } else {
-            metaPurchaseResult = {
-              sent: false,
-              skipped: true,
-              reason: "already_paid_before_simulation"
-            };
-          }
+  try {
+    affiliateConversionResult = await createAffiliateConversionForPaidOrder(updatedOrder);
+  } catch (affiliateError) {
+    console.error("ERRO AO CRIAR COMISSÃO DO AFILIADO NA SIMULAÇÃO:", affiliateError);
+
+    affiliateConversionResult = {
+      created: false,
+      skipped: false,
+      error: affiliateError.message || "Erro ao criar comissão do afiliado na simulação"
+    };
+  }
+
+  metaPurchaseResult = await sendMetaPurchaseEvent({
+    order: updatedOrder,
+    items: orderItems,
+    payment: {
+      id: `simulation_${updatedOrder.order_number}`
+    }
+  });
+} else {
+  affiliateConversionResult = {
+    created: false,
+    skipped: true,
+    reason: "already_paid_before_simulation"
+  };
+
+  metaPurchaseResult = {
+    sent: false,
+    skipped: true,
+    reason: "already_paid_before_simulation"
+  };
+}
 
           if (updatedOrder.shipping_label_status !== "generated") {
             const generatedLabel = await generateAutomaticShippingLabel(
@@ -2027,6 +2044,7 @@ router.post("/payments/simulate/:orderNumber", async (req, res) => {
 
     const updatedOrder = fallbackUpdate.data[0];
     let metaPurchaseResult = null;
+    let affiliateConversionResult = null;
 
     if ((status === "approved" || status === "paid") && updatedOrder?.id) {
       try {
@@ -2036,20 +2054,38 @@ router.post("/payments/simulate/:orderNumber", async (req, res) => {
           String(previousOrder?.payment_status || "").trim().toLowerCase() === "paid";
 
         if (!alreadyPaidBeforeSimulation) {
-          metaPurchaseResult = await sendMetaPurchaseEvent({
-            order: updatedOrder,
-            items: orderItems,
-            payment: {
-              id: `simulation_${updatedOrder.order_number}`
-            }
-          });
-        } else {
-          metaPurchaseResult = {
-            sent: false,
-            skipped: true,
-            reason: "already_paid_before_simulation"
-          };
-        }
+  try {
+    affiliateConversionResult = await createAffiliateConversionForPaidOrder(updatedOrder);
+  } catch (affiliateError) {
+    console.error("ERRO AO CRIAR COMISSÃO DO AFILIADO NA SIMULAÇÃO:", affiliateError);
+
+    affiliateConversionResult = {
+      created: false,
+      skipped: false,
+      error: affiliateError.message || "Erro ao criar comissão do afiliado na simulação"
+    };
+  }
+
+  metaPurchaseResult = await sendMetaPurchaseEvent({
+    order: updatedOrder,
+    items: orderItems,
+    payment: {
+      id: `simulation_${updatedOrder.order_number}`
+    }
+  });
+} else {
+  affiliateConversionResult = {
+    created: false,
+    skipped: true,
+    reason: "already_paid_before_simulation"
+  };
+
+  metaPurchaseResult = {
+    sent: false,
+    skipped: true,
+    reason: "already_paid_before_simulation"
+  };
+}
 
         if (updatedOrder.shipping_label_status !== "generated") {
           const generatedLabel = await generateAutomaticShippingLabel(
