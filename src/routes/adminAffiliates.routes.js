@@ -7,6 +7,7 @@ import {
   getAffiliateById,
   createAffiliate,
   updateAffiliate,
+  deleteAffiliate,
   listAffiliateConversions,
   listAffiliatePayouts,
   createAffiliatePayout,
@@ -153,6 +154,24 @@ router.patch("/:id", async (req, res) => {
     return fail(res, error, 400);
   }
 });
+
+
+/**
+ * EXCLUIR AFILIADO
+ */
+router.delete("/:id", async (req, res) => {
+  try {
+    const affiliate = await deleteAffiliate(req.params.id);
+
+    return ok(res, { affiliate }, "Afiliado excluído com sucesso.");
+  } catch (error) {
+    return fail(res, error, 400);
+  }
+});
+
+
+
+
 
 /**
  * CONVERSÕES / COMISSÕES

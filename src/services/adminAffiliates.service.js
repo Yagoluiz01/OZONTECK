@@ -623,3 +623,67 @@ export async function rejectAffiliateApplication(id, input = {}) {
 
   return updatedApplications?.[0] || null;
 }
+
+
+export async function deleteAffiliate(id) {
+  const affiliateId = cleanText(id);
+
+  if (!affiliateId) {
+    throw new Error("ID do afiliado é obrigatório.");
+  }
+
+  const affiliate = await getAffiliateById(affiliateId);
+
+  if (!affiliate) {
+    throw new Error("Afiliado não encontrado.");
+  }
+
+  async function hasRelatedRows(tableName) {
+    const params = new URLSearchParams();
+    params.set("select", "id");
+    params.set("affiliate_id", `eq.${affiliateId}`);
+    params.set("limit", "1");
+
+    const rows = await supabaseRequest(`/${tableName}?${params.toString()}`);
+    return Array.isArray(rows) && Boolean(rows[0]?.id);
+  }
+
+  const hasConversions = await hasRelatedRows("affiliate_conversions");
+  const hasPayouts = await hasRelatedRows("affiliate_payouts");
+
+  const ordersParams = new URLSearchParams();
+  ordersParams.set("select", "id");
+  ordersParams.set("affiliate_id", `eq.${affiliateId}`);
+  ordersParams.set("limit", "1");
+
+  const orders = await supabaseRequest(`/orders?${ordersParams.toString()}`);
+  const hasOrders = Array.isArray(orders) && Boolean(orders[0]?.id);
+
+  if (hasConversions || hasPayouts || hasOrders) {
+    throw new Error(
+      "Este afiliado já possui histórico de vendas, comissões ou pagamentos. Para preservar o financeiro, bloqueie em vez de excluir."
+    );
+  }
+
+  await supabaseRequest(`/affiliate_applications?affiliate_id=eq.${affiliateId}`, {
+    method: "PATCH",
+    headers: {
+      Prefer: "return=representation",
+    },
+    body: JSON.stringify({
+      affiliate_id: null,
+      admin_notes:
+        "Afiliado de teste excluído pelo painel admin; vínculo da solicitação removido.",
+      updated_at: new Date().toISOString(),
+    }),
+  });
+
+  const deleted = await supabaseRequest(`/affiliates?id=eq.${affiliateId}`, {
+    method: "DELETE",
+    headers: {
+      Prefer: "return=representation",
+    },
+  });
+
+  return deleted?.[0] || affiliate;
+}
