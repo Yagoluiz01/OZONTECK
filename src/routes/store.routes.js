@@ -1098,6 +1098,68 @@ function validateMercadoPagoWebhookSignature({
 }
 
 async function createMercadoPagoPreference({ req, order, items, customer }) {
+
+
+if (isPaymentSimulationEnabled()) {
+  const simulationPaymentId = `simulation_${createdOrder.order_number}`;
+
+  const simulationUpdate = await updateOrderById(createdOrder.id, {
+    payment_gateway: "simulation",
+    payment_reference: simulationPaymentId,
+    payment_external_reference: String(createdOrder.order_number || ""),
+    payment_status: "paid",
+    payment_raw_status: "approved",
+    paid_at: new Date().toISOString(),
+    order_status: "paid",
+    webhook_last_event: "checkout_simulation"
+  });
+
+  if (
+    !simulationUpdate.ok ||
+    !Array.isArray(simulationUpdate.data) ||
+    !simulationUpdate.data[0]
+  ) {
+    return res.status(500).json({
+      success: false,
+      message: "Pedido criado, mas houve erro ao aplicar a simulação de pagamento",
+      details: simulationUpdate.raw
+    });
+  }
+
+  const successUrl =
+    env.storeSuccessUrl ||
+    process.env.STORE_SUCCESS_URL ||
+    "https://ozonteck-loja.onrender.com/pages-html/pagamento-sucesso.html";
+
+  const redirectUrl = new URL(successUrl);
+
+  redirectUrl.searchParams.set("status", "approved");
+  redirectUrl.searchParams.set("external_reference", createdOrder.order_number);
+  redirectUrl.searchParams.set("payment_id", simulationPaymentId);
+
+  return res.status(201).json({
+    success: true,
+    message: "Pedido criado e pagamento simulado com sucesso",
+    order: {
+      id: createdOrder.id,
+      number: createdOrder.order_number,
+      total: totalAmount,
+      status: "paid",
+      paymentStatus: "paid"
+    },
+    payment: {
+      gateway: "simulation",
+      preferenceId: "",
+      paymentUrl: redirectUrl.toString(),
+      sandboxPaymentUrl: redirectUrl.toString(),
+      externalReference: createdOrder.order_number
+    }
+  });
+}
+
+
+
+
   const accessToken = getMercadoPagoAccessToken();
 
   if (!accessToken) {
