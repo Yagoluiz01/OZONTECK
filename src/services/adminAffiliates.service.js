@@ -188,7 +188,9 @@ async function uploadAffiliateReceipt(file, affiliateId) {
   assertValidReceiptFile(file);
 
   const extension = getFileExtension(file);
-  const safeOriginalName = sanitizeFileName(file.originalname || `comprovante.${extension}`);
+  const safeOriginalName = sanitizeFileName(
+    file.originalname || `comprovante.${extension}`
+  );
   const timestamp = Date.now();
   const random = Math.random().toString(36).slice(2, 10);
 
@@ -470,4 +472,154 @@ export async function createAffiliatePayout(input = {}) {
   });
 
   return created?.[0] || null;
+}
+
+export async function listAffiliateApplications(filters = {}) {
+  const status = cleanText(filters.status || "pending");
+  const search = cleanText(filters.search);
+
+  const params = new URLSearchParams();
+  params.set("select", "*");
+  params.set("order", "created_at.desc");
+
+  if (status) {
+    params.set("status", `eq.${status}`);
+  }
+
+  if (search) {
+    params.set(
+      "or",
+      `(full_name.ilike.*${search}*,email.ilike.*${search}*,phone.ilike.*${search}*,desired_ref_code.ilike.*${search}*,desired_coupon_code.ilike.*${search}*)`
+    );
+  }
+
+  return supabaseRequest(`/affiliate_applications?${params.toString()}`);
+}
+
+export async function getAffiliateApplicationById(id) {
+  const applicationId = cleanText(id);
+
+  if (!applicationId) {
+    throw new Error("ID da solicitação é obrigatório.");
+  }
+
+  const params = new URLSearchParams();
+  params.set("select", "*");
+  params.set("id", `eq.${applicationId}`);
+  params.set("limit", "1");
+
+  const rows = await supabaseRequest(
+    `/affiliate_applications?${params.toString()}`
+  );
+
+  return rows?.[0] || null;
+}
+
+export async function approveAffiliateApplication(id, input = {}) {
+  const application = await getAffiliateApplicationById(id);
+
+  if (!application) {
+    throw new Error("Solicitação de afiliado não encontrada.");
+  }
+
+  if (application.status !== "pending") {
+    throw new Error("Esta solicitação já foi analisada.");
+  }
+
+  const refCode = normalizeCode(
+    input.ref_code ||
+      input.refCode ||
+      application.desired_ref_code ||
+      application.full_name
+  );
+
+  const couponCode = normalizeCode(
+    input.coupon_code ||
+      input.couponCode ||
+      application.desired_coupon_code ||
+      `${refCode}10`
+  );
+
+  const commissionRate = toNumber(
+    input.commission_rate ?? input.commissionRate,
+    10
+  );
+
+  const affiliatePayload = {
+    full_name: application.full_name,
+    email: application.email,
+    phone: application.phone || null,
+    pix_key: application.pix_key || null,
+    ref_code: refCode,
+    coupon_code: couponCode || null,
+    commission_rate: commissionRate,
+    status: "active",
+    notes: cleanText(
+      input.notes || `Afiliado aprovado a partir da solicitação ${application.id}.`
+    ),
+  };
+
+  const affiliate = await createAffiliate(affiliatePayload);
+
+  if (!affiliate?.id) {
+    throw new Error("Não foi possível criar o afiliado aprovado.");
+  }
+
+  const updatedApplications = await supabaseRequest(
+    `/affiliate_applications?id=eq.${application.id}`,
+    {
+      method: "PATCH",
+      headers: {
+        Prefer: "return=representation",
+      },
+      body: JSON.stringify({
+        status: "approved",
+        affiliate_id: affiliate.id,
+        approved_at: new Date().toISOString(),
+        rejected_at: null,
+        admin_notes:
+          cleanText(input.admin_notes || input.adminNotes) || null,
+        updated_at: new Date().toISOString(),
+      }),
+    }
+  );
+
+  return {
+    application: updatedApplications?.[0] || null,
+    affiliate,
+  };
+}
+
+export async function rejectAffiliateApplication(id, input = {}) {
+  const application = await getAffiliateApplicationById(id);
+
+  if (!application) {
+    throw new Error("Solicitação de afiliado não encontrada.");
+  }
+
+  if (application.status !== "pending") {
+    throw new Error("Esta solicitação já foi analisada.");
+  }
+
+  const updatedApplications = await supabaseRequest(
+    `/affiliate_applications?id=eq.${application.id}`,
+    {
+      method: "PATCH",
+      headers: {
+        Prefer: "return=representation",
+      },
+      body: JSON.stringify({
+        status: "rejected",
+        rejected_at: new Date().toISOString(),
+        approved_at: null,
+        affiliate_id: null,
+        admin_notes:
+          cleanText(input.admin_notes || input.adminNotes || input.reason) ||
+          null,
+        updated_at: new Date().toISOString(),
+      }),
+    }
+  );
+
+  return updatedApplications?.[0] || null;
 }

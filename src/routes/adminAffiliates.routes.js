@@ -10,6 +10,9 @@ import {
   listAffiliateConversions,
   listAffiliatePayouts,
   createAffiliatePayout,
+  listAffiliateApplications,
+  approveAffiliateApplication,
+  rejectAffiliateApplication,
 } from "../services/adminAffiliates.service.js";
 
 const router = express.Router();
@@ -37,6 +40,49 @@ function fail(res, error, status = 500) {
     message: error?.message || "Erro interno.",
   });
 }
+
+/**
+ * SOLICITAÇÕES DE AFILIADOS
+ */
+router.get("/applications", async (req, res) => {
+  try {
+    const applications = await listAffiliateApplications(req.query || {});
+    return ok(res, { applications });
+  } catch (error) {
+    return fail(res, error);
+  }
+});
+
+router.post("/applications/:id/approve", async (req, res) => {
+  try {
+    const result = await approveAffiliateApplication(req.params.id, req.body || {});
+
+    return ok(
+      res,
+      result,
+      "Solicitação aprovada e afiliado criado com sucesso."
+    );
+  } catch (error) {
+    return fail(res, error, 400);
+  }
+});
+
+router.post("/applications/:id/reject", async (req, res) => {
+  try {
+    const application = await rejectAffiliateApplication(
+      req.params.id,
+      req.body || {}
+    );
+
+    return ok(
+      res,
+      { application },
+      "Solicitação de afiliado rejeitada com sucesso."
+    );
+  } catch (error) {
+    return fail(res, error, 400);
+  }
+});
 
 /**
  * RESUMO DOS AFILIADOS
