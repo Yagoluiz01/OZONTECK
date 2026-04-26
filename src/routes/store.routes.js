@@ -40,6 +40,142 @@ function normalizeAffiliateCode(value) {
     .replace(/[^A-Z0-9_-]/g, "");
 }
 
+
+function cleanText(value) {
+  return String(value || "").trim();
+}
+
+function normalizeEmail(value) {
+  return cleanText(value).toLowerCase();
+}
+
+function isValidEmail(value) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizeEmail(value));
+}
+
+async function findAffiliateApplicationByEmail(email) {
+  const cleanEmail = normalizeEmail(email);
+
+  if (!cleanEmail) {
+    return null;
+  }
+
+  const url = new URL(`${env.supabaseUrl}/rest/v1/affiliate_applications`);
+  url.searchParams.set("select", "id,email,status,created_at");
+  url.searchParams.set("email", `eq.${cleanEmail}`);
+  url.searchParams.set("status", "eq.pending");
+  url.searchParams.set("limit", "1");
+
+  const response = await fetch(url.toString(), {
+    method: "GET",
+    headers: {
+      apikey: env.supabaseServiceRoleKey,
+      Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+  });
+
+  const data = await response.json().catch(() => []);
+
+  if (!response.ok || !Array.isArray(data) || !data[0]?.id) {
+    return null;
+  }
+
+  return data[0];
+}
+
+async function createAffiliateApplication(input = {}) {
+  const fullName = cleanText(input.full_name || input.fullName || input.name);
+  const email = normalizeEmail(input.email);
+  const phone = cleanText(input.phone || input.telefone);
+  const pixKey = cleanText(input.pix_key || input.pixKey);
+  const instagram = cleanText(input.instagram);
+  const message = cleanText(input.message || input.mensagem);
+
+  const desiredRefCode = normalizeAffiliateCode(
+    input.desired_ref_code || input.desiredRefCode || input.ref_code
+  );
+
+  const desiredCouponCode = normalizeAffiliateCode(
+    input.desired_coupon_code || input.desiredCouponCode || input.coupon_code
+  );
+
+  if (!fullName) {
+    throw new Error("Nome completo é obrigatório.");
+  }
+
+  if (fullName.length < 3) {
+    throw new Error("Informe um nome completo válido.");
+  }
+
+  if (!email) {
+    throw new Error("E-mail é obrigatório.");
+  }
+
+  if (!isValidEmail(email)) {
+    throw new Error("Informe um e-mail válido.");
+  }
+
+  if (!phone) {
+    throw new Error("Telefone é obrigatório.");
+  }
+
+  if (!pixKey) {
+    throw new Error("Chave Pix é obrigatória.");
+  }
+
+  const existingPending = await findAffiliateApplicationByEmail(email);
+
+  if (existingPending) {
+    return {
+      alreadyExists: true,
+      application: existingPending,
+    };
+  }
+
+  const payload = {
+    full_name: fullName,
+    email,
+    phone,
+    pix_key: pixKey,
+    instagram: instagram || null,
+    message: message || null,
+    desired_ref_code: desiredRefCode || null,
+    desired_coupon_code: desiredCouponCode || null,
+    status: "pending",
+    admin_notes: null,
+  };
+
+  const response = await fetch(
+    `${env.supabaseUrl}/rest/v1/affiliate_applications`,
+    {
+      method: "POST",
+      headers: {
+        apikey: env.supabaseServiceRoleKey,
+        Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Prefer: "return=representation",
+      },
+      body: JSON.stringify(payload),
+    }
+  );
+
+  const data = await response.json().catch(() => []);
+
+  if (!response.ok || !Array.isArray(data) || !data[0]?.id) {
+    console.error("ERRO SUPABASE AFFILIATE APPLICATION:", data);
+    throw new Error("Erro ao salvar solicitação de afiliado.");
+  }
+
+  return {
+    alreadyExists: false,
+    application: data[0],
+  };
+}
+
+
 async function findActiveAffiliateByRef(refCode) {
   const cleanRefCode = normalizeAffiliateCode(refCode);
 
@@ -1239,10 +1375,14 @@ router.get("/products", async (req, res) => {
       .map(normalizeProduct)
       .filter((product) => product.id && product.name);
 
-    return res.status(200).json({
-      success: true,
-      products
-    });
+   return res.status(200).json({
+  success: true,
+  received: true,
+  paymentStatus,
+  label: labelResult,
+  metaPurchase: metaPurchaseResult,
+  affiliateConversion: affiliateConversionResult,
+});
   } catch (error) {
     console.error("ERRO AO LISTAR PRODUTOS DA LOJA:", error);
 
@@ -2212,6 +2352,37 @@ router.get("/melhor-envio/authorize-url", async (req, res) => {
     return res.status(500).json({
       success: false,
       message: error.message || "Erro ao gerar URL de autorização"
+    });
+  }
+});
+
+router.post("/affiliates/apply", async (req, res) => {
+  try {
+    const result = await createAffiliateApplication(req.body || {});
+
+    if (result.alreadyExists) {
+      return res.status(200).json({
+        success: true,
+        alreadyExists: true,
+        message:
+          "Você já possui uma solicitação de afiliado pendente. Aguarde a análise da equipe OZONTECK.",
+        application: result.application,
+      });
+    }
+
+    return res.status(201).json({
+      success: true,
+      alreadyExists: false,
+      message:
+        "Solicitação enviada com sucesso. Nossa equipe vai analisar seu cadastro de afiliado.",
+      application: result.application,
+    });
+  } catch (error) {
+    console.error("ERRO AO CRIAR SOLICITAÇÃO DE AFILIADO:", error);
+
+    return res.status(400).json({
+      success: false,
+      message: error.message || "Erro ao enviar solicitação de afiliado.",
     });
   }
 });
