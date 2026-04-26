@@ -1,4 +1,4 @@
-import express from "express";
+﻿import express from "express";
 import { requireAdminAuth } from "../middlewares/auth.middleware.js";
 import crypto from "crypto";
 import { env } from "../config/env.js";
@@ -85,21 +85,184 @@ async function findAffiliateApplicationByEmail(email) {
   return data[0];
 }
 
+function buildAffiliateCodeBase(fullName, email) {
+  const fromName = normalizeAffiliateCode(
+    String(fullName || "")
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean)[0] || ""
+  );
+
+  if (fromName && fromName.length >= 3) {
+    return fromName.slice(0, 8);
+  }
+
+  const fromEmail = normalizeAffiliateCode(String(email || "").split("@")[0]);
+
+  if (fromEmail && fromEmail.length >= 3) {
+    return fromEmail.slice(0, 8);
+  }
+
+  return "OZT";
+}
+
+async function affiliateCodeExists({ refCode, couponCode }) {
+  const cleanRefCode = normalizeAffiliateCode(refCode);
+  const cleanCouponCode = normalizeAffiliateCode(couponCode);
+
+  if (!cleanRefCode && !cleanCouponCode) {
+    return false;
+  }
+
+  const headers = {
+    apikey: env.supabaseServiceRoleKey,
+    Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
+    "Content-Type": "application/json",
+    Accept: "application/json",
+  };
+
+  if (cleanRefCode) {
+    const affiliatesRefUrl = new URL(`${env.supabaseUrl}/rest/v1/affiliates`);
+    affiliatesRefUrl.searchParams.set("select", "id");
+    affiliatesRefUrl.searchParams.set("ref_code", `eq.${cleanRefCode}`);
+    affiliatesRefUrl.searchParams.set("limit", "1");
+
+    const affiliatesRefResponse = await fetch(affiliatesRefUrl.toString(), {
+      method: "GET",
+      headers,
+    });
+
+    const affiliatesRefData = await affiliatesRefResponse.json().catch(() => []);
+
+    if (
+      affiliatesRefResponse.ok &&
+      Array.isArray(affiliatesRefData) &&
+      affiliatesRefData[0]?.id
+    ) {
+      return true;
+    }
+
+    const applicationsRefUrl = new URL(
+      `${env.supabaseUrl}/rest/v1/affiliate_applications`
+    );
+    applicationsRefUrl.searchParams.set("select", "id");
+    applicationsRefUrl.searchParams.set("desired_ref_code", `eq.${cleanRefCode}`);
+    applicationsRefUrl.searchParams.set("status", "eq.pending");
+    applicationsRefUrl.searchParams.set("limit", "1");
+
+    const applicationsRefResponse = await fetch(applicationsRefUrl.toString(), {
+      method: "GET",
+      headers,
+    });
+
+    const applicationsRefData = await applicationsRefResponse
+      .json()
+      .catch(() => []);
+
+    if (
+      applicationsRefResponse.ok &&
+      Array.isArray(applicationsRefData) &&
+      applicationsRefData[0]?.id
+    ) {
+      return true;
+    }
+  }
+
+  if (cleanCouponCode) {
+    const affiliatesCouponUrl = new URL(`${env.supabaseUrl}/rest/v1/affiliates`);
+    affiliatesCouponUrl.searchParams.set("select", "id");
+    affiliatesCouponUrl.searchParams.set("coupon_code", `eq.${cleanCouponCode}`);
+    affiliatesCouponUrl.searchParams.set("limit", "1");
+
+    const affiliatesCouponResponse = await fetch(
+      affiliatesCouponUrl.toString(),
+      {
+        method: "GET",
+        headers,
+      }
+    );
+
+    const affiliatesCouponData = await affiliatesCouponResponse
+      .json()
+      .catch(() => []);
+
+    if (
+      affiliatesCouponResponse.ok &&
+      Array.isArray(affiliatesCouponData) &&
+      affiliatesCouponData[0]?.id
+    ) {
+      return true;
+    }
+
+    const applicationsCouponUrl = new URL(
+      `${env.supabaseUrl}/rest/v1/affiliate_applications`
+    );
+    applicationsCouponUrl.searchParams.set("select", "id");
+    applicationsCouponUrl.searchParams.set(
+      "desired_coupon_code",
+      `eq.${cleanCouponCode}`
+    );
+    applicationsCouponUrl.searchParams.set("status", "eq.pending");
+    applicationsCouponUrl.searchParams.set("limit", "1");
+
+    const applicationsCouponResponse = await fetch(
+      applicationsCouponUrl.toString(),
+      {
+        method: "GET",
+        headers,
+      }
+    );
+
+    const applicationsCouponData = await applicationsCouponResponse
+      .json()
+      .catch(() => []);
+
+    if (
+      applicationsCouponResponse.ok &&
+      Array.isArray(applicationsCouponData) &&
+      applicationsCouponData[0]?.id
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+async function generateUniqueAffiliateCodes({ fullName, email }) {
+  const base = buildAffiliateCodeBase(fullName, email);
+
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    const randomNumber = crypto.randomInt(1000, 9999);
+    const refCode = normalizeAffiliateCode(`${base}${randomNumber}`);
+    const couponCode = refCode;
+
+    const exists = await affiliateCodeExists({
+      refCode,
+      couponCode,
+    });
+
+    if (!exists) {
+      return {
+        refCode,
+        couponCode,
+      };
+    }
+  }
+
+  const fallback = normalizeAffiliateCode(`OZT${Date.now().toString().slice(-8)}`);
+
+  return {
+    refCode: fallback,
+    couponCode: fallback,
+  };
+}
+
 async function createAffiliateApplication(input = {}) {
   const fullName = cleanText(input.full_name || input.fullName || input.name);
   const email = normalizeEmail(input.email);
   const phone = cleanText(input.phone || input.telefone);
   const pixKey = cleanText(input.pix_key || input.pixKey);
-  const instagram = cleanText(input.instagram);
-  const message = cleanText(input.message || input.mensagem);
-
-  const desiredRefCode = normalizeAffiliateCode(
-    input.desired_ref_code || input.desiredRefCode || input.ref_code
-  );
-
-  const desiredCouponCode = normalizeAffiliateCode(
-    input.desired_coupon_code || input.desiredCouponCode || input.coupon_code
-  );
 
   if (!fullName) {
     throw new Error("Nome completo é obrigatório.");
@@ -134,15 +297,20 @@ async function createAffiliateApplication(input = {}) {
     };
   }
 
+  const generatedCodes = await generateUniqueAffiliateCodes({
+    fullName,
+    email,
+  });
+
   const payload = {
     full_name: fullName,
     email,
     phone,
     pix_key: pixKey,
-    instagram: instagram || null,
-    message: message || null,
-    desired_ref_code: desiredRefCode || null,
-    desired_coupon_code: desiredCouponCode || null,
+    instagram: null,
+    message: null,
+    desired_ref_code: generatedCodes.refCode,
+    desired_coupon_code: generatedCodes.couponCode,
     status: "pending",
     admin_notes: null,
   };
@@ -174,7 +342,6 @@ async function createAffiliateApplication(input = {}) {
     application: data[0],
   };
 }
-
 
 async function findActiveAffiliateByRef(refCode) {
   const cleanRefCode = normalizeAffiliateCode(refCode);
@@ -269,7 +436,7 @@ async function createAffiliateConversionForPaidOrder(order) {
     status: "approved",
     approved_at: new Date().toISOString(),
     released_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
-    notes: `Comissão criada automaticamente pelo pedido ${order.order_number || order.id}.`
+    notes: `ComissÃ£o criada automaticamente pelo pedido ${order.order_number || order.id}.`
   };
 
   const createResponse = await fetch(`${env.supabaseUrl}/rest/v1/affiliate_conversions`, {
@@ -286,7 +453,7 @@ async function createAffiliateConversionForPaidOrder(order) {
   const createData = await createResponse.json().catch(() => []);
 
   if (!createResponse.ok || !Array.isArray(createData) || !createData[0]?.id) {
-    throw new Error("Erro ao criar comissão do afiliado");
+    throw new Error("Erro ao criar comissÃ£o do afiliado");
   }
 
   return {
@@ -428,7 +595,7 @@ async function sendMetaPurchaseEvent({ order, items = [], payment }) {
 
     if (!pixelId || !accessToken) {
       console.log(
-        "META PURCHASE SKIPPED: META_PIXEL_ID ou META_CONVERSIONS_API_ACCESS_TOKEN não configurado"
+        "META PURCHASE SKIPPED: META_PIXEL_ID ou META_CONVERSIONS_API_ACCESS_TOKEN nÃ£o configurado"
       );
       return {
         sent: false,
@@ -659,7 +826,7 @@ function mapFrenetQuotes(raw) {
       return {
         carrier,
         serviceCode,
-        serviceName: serviceName || "Serviço",
+        serviceName: serviceName || "ServiÃ§o",
         price,
         deliveryTime,
         raw: service
@@ -672,17 +839,17 @@ async function quoteShippingWithFrenet({ zipCode, items, subtotal }) {
   const config = getFrenetConfig();
 
   if (!config.token) {
-    throw new Error("FRENET_TOKEN não configurado");
+    throw new Error("FRENET_TOKEN nÃ£o configurado");
   }
 
   if (!config.originZipCode) {
-    throw new Error("FRENET_ORIGIN_ZIP_CODE não configurado");
+    throw new Error("FRENET_ORIGIN_ZIP_CODE nÃ£o configurado");
   }
 
   const destinationZipCode = onlyDigits(zipCode);
 
   if (!destinationZipCode || destinationZipCode.length < 8) {
-    throw new Error("CEP de destino inválido");
+    throw new Error("CEP de destino invÃ¡lido");
   }
 
   const pkg = buildShippingPackage(items);
@@ -803,7 +970,7 @@ async function fetchProductsMap() {
   const response = await fetchProductsTable();
 
   if (!response.ok) {
-    throw new Error("Erro ao carregar produtos para validação do pedido");
+    throw new Error("Erro ao carregar produtos para validaÃ§Ã£o do pedido");
   }
 
   const products = response.data
@@ -824,7 +991,7 @@ async function findOrCreateCustomer(customer) {
   const email = String(customer.email || "").trim().toLowerCase();
 
   if (!email) {
-    throw new Error("E-mail do cliente é obrigatório");
+    throw new Error("E-mail do cliente Ã© obrigatÃ³rio");
   }
 
   const searchUrl = new URL(`${env.supabaseUrl}/rest/v1/customers`);
@@ -934,7 +1101,7 @@ async function createMercadoPagoPreference({ req, order, items, customer }) {
   const accessToken = getMercadoPagoAccessToken();
 
   if (!accessToken) {
-    throw new Error("MERCADO_PAGO_ACCESS_TOKEN não configurado");
+    throw new Error("MERCADO_PAGO_ACCESS_TOKEN nÃ£o configurado");
   }
 
   const apiBaseUrl = getApiBaseUrl(req);
@@ -989,7 +1156,7 @@ async function createMercadoPagoPreference({ req, order, items, customer }) {
     throw new Error(
       data?.message ||
         data?.error ||
-        "Erro ao criar preferência de pagamento no Mercado Pago"
+        "Erro ao criar preferÃªncia de pagamento no Mercado Pago"
     );
   }
 
@@ -1000,7 +1167,7 @@ async function getMercadoPagoPayment(paymentId) {
   const accessToken = getMercadoPagoAccessToken();
 
   if (!accessToken) {
-    throw new Error("MERCADO_PAGO_ACCESS_TOKEN não configurado");
+    throw new Error("MERCADO_PAGO_ACCESS_TOKEN nÃ£o configurado");
   }
 
   const response = await fetch(
@@ -1097,7 +1264,7 @@ async function findOrderByExternalReference(externalReference) {
   const data = await response.json().catch(() => []);
 
   if (!response.ok || !Array.isArray(data) || !data[0]) {
-    throw new Error("Pedido não encontrado pelo external_reference");
+    throw new Error("Pedido nÃ£o encontrado pelo external_reference");
   }
 
   return data[0];
@@ -1176,7 +1343,7 @@ function mapMelhorEnvioQuotes(services = []) {
           "Transportadora"
       ).trim();
 
-      const serviceName = String(service?.name || "Serviço").trim();
+      const serviceName = String(service?.name || "ServiÃ§o").trim();
       const serviceCode = String(service?.id || "").trim();
       const price = Number(service?.price || 0) || 0;
 
@@ -1205,11 +1372,11 @@ async function quoteShippingWithMelhorEnvio({ zipCode, items }) {
   const destinationZipCode = onlyDigits(zipCode);
 
   if (!originZipCode || originZipCode.length < 8) {
-    throw new Error("CEP de origem da loja não configurado");
+    throw new Error("CEP de origem da loja nÃ£o configurado");
   }
 
   if (!destinationZipCode || destinationZipCode.length < 8) {
-    throw new Error("CEP de destino inválido");
+    throw new Error("CEP de destino invÃ¡lido");
   }
 
   const products = normalizeMelhorEnvioProducts(items);
@@ -1279,11 +1446,11 @@ async function validateSelectedShippingQuote({
   const selectedPrice = Number(selectedShipping?.price || 0) || 0;
 
   if (!selectedServiceCode) {
-    throw new Error("Serviço de frete não selecionado");
+    throw new Error("ServiÃ§o de frete nÃ£o selecionado");
   }
 
   if (selectedPrice <= 0) {
-    throw new Error("Valor de frete inválido");
+    throw new Error("Valor de frete invÃ¡lido");
   }
 
   const provider = getShippingProvider();
@@ -1301,13 +1468,13 @@ async function validateSelectedShippingQuote({
   });
 
   if (!matchedQuote) {
-    throw new Error("Serviço de frete inválido ou expirado");
+    throw new Error("ServiÃ§o de frete invÃ¡lido ou expirado");
   }
 
   const realPrice = Number(matchedQuote.price || 0) || 0;
 
   if (realPrice <= 0) {
-    throw new Error("Valor real de frete inválido");
+    throw new Error("Valor real de frete invÃ¡lido");
   }
 
   const priceDifference = Math.abs(realPrice - selectedPrice);
@@ -1418,7 +1585,7 @@ router.get("/products/:ref", async (req, res) => {
     if (!product) {
       return res.status(404).json({
         success: false,
-        message: "Produto não encontrado"
+        message: "Produto nÃ£o encontrado"
       });
     }
 
@@ -1446,14 +1613,14 @@ router.post("/shipping/quote", async (req, res) => {
     if (!zipCode) {
       return res.status(400).json({
         success: false,
-        message: "CEP é obrigatório"
+        message: "CEP Ã© obrigatÃ³rio"
       });
     }
 
     if (!items.length) {
       return res.status(400).json({
         success: false,
-        message: "Itens do carrinho são obrigatórios"
+        message: "Itens do carrinho sÃ£o obrigatÃ³rios"
       });
     }
 
@@ -1474,7 +1641,7 @@ router.post("/shipping/quote", async (req, res) => {
 
       if (!product) {
         throw new Error(
-          `Produto inválido no pedido: ${ref || "sem referência"}`
+          `Produto invÃ¡lido no pedido: ${ref || "sem referÃªncia"}`
         );
       }
 
@@ -1541,7 +1708,7 @@ router.post("/orders", async (req, res) => {
     if (!customer.nome || !customer.email || !customer.telefone) {
       return res.status(400).json({
         success: false,
-        message: "Nome, e-mail e telefone são obrigatórios"
+        message: "Nome, e-mail e telefone sÃ£o obrigatÃ³rios"
       });
     }
 
@@ -1567,7 +1734,7 @@ router.post("/orders", async (req, res) => {
 
       if (!product) {
         throw new Error(
-          `Produto inválido no pedido: ${ref || "sem referência"}`
+          `Produto invÃ¡lido no pedido: ${ref || "sem referÃªncia"}`
         );
       }
 
@@ -1601,7 +1768,7 @@ router.post("/orders", async (req, res) => {
 
     const shippingAmount = Number(validatedShippingQuote.price || 0) || 0;
 
-    // Segurança: não aceitar desconto vindo direto do frontend.
+    // SeguranÃ§a: nÃ£o aceitar desconto vindo direto do frontend.
     // Quando houver cupom, validar o cupom no backend antes de aplicar desconto.
     const discountAmount = 0;
 
@@ -1747,7 +1914,7 @@ router.post("/orders", async (req, res) => {
       return res.status(500).json({
         success: false,
         message:
-          "Pedido criado, mas houve erro ao salvar a referência de pagamento",
+          "Pedido criado, mas houve erro ao salvar a referÃªncia de pagamento",
         details: paymentUpdate.raw
       });
     }
@@ -1818,7 +1985,7 @@ router.post("/payments/mercado-pago/webhook", async (req, res) => {
       if (!isValid) {
         return res.status(401).json({
           success: false,
-          message: "Assinatura inválida do webhook"
+          message: "Assinatura invÃ¡lida do webhook"
         });
       }
     }
@@ -1851,7 +2018,7 @@ router.post("/payments/mercado-pago/webhook", async (req, res) => {
       previousOrder = await findOrderByExternalReference(externalReference);
     } catch (previousOrderError) {
       console.warn(
-        "NÃO FOI POSSÍVEL BUSCAR ESTADO ANTERIOR DO PEDIDO ANTES DO UPDATE:",
+        "NÃƒO FOI POSSÃVEL BUSCAR ESTADO ANTERIOR DO PEDIDO ANTES DO UPDATE:",
         previousOrderError.message || previousOrderError
       );
     }
@@ -1914,11 +2081,11 @@ router.post("/payments/mercado-pago/webhook", async (req, res) => {
         try {
           affiliateConversionResult = await createAffiliateConversionForPaidOrder(updatedOrder);
         } catch (affiliateError) {
-          console.error("ERRO AO CRIAR COMISSÃO DO AFILIADO:", affiliateError);
+          console.error("ERRO AO CRIAR COMISSÃƒO DO AFILIADO:", affiliateError);
           affiliateConversionResult = {
             created: false,
             skipped: false,
-            error: affiliateError.message || "Erro ao criar comissão do afiliado"
+            error: affiliateError.message || "Erro ao criar comissÃ£o do afiliado"
           };
         }
       } else {
@@ -1970,7 +2137,7 @@ router.post("/payments/mercado-pago/webhook", async (req, res) => {
           };
         }
       } catch (labelError) {
-        console.error("ERRO AO GERAR ETIQUETA AUTOMÁTICA:", labelError);
+        console.error("ERRO AO GERAR ETIQUETA AUTOMÃTICA:", labelError);
 
         const refreshedOrder =
           Array.isArray(updateResponse.data) && updateResponse.data[0]
@@ -2013,7 +2180,7 @@ router.post("/payments/simulate/:orderNumber", async (req, res) => {
     if (!isPaymentSimulationEnabled()) {
       return res.status(403).json({
         success: false,
-        message: "Simulação de pagamento desativada"
+        message: "SimulaÃ§Ã£o de pagamento desativada"
       });
     }
 
@@ -2025,7 +2192,7 @@ router.post("/payments/simulate/:orderNumber", async (req, res) => {
     if (!orderNumber) {
       return res.status(400).json({
         success: false,
-        message: "Número do pedido é obrigatório"
+        message: "NÃºmero do pedido Ã© obrigatÃ³rio"
       });
     }
 
@@ -2035,7 +2202,7 @@ router.post("/payments/simulate/:orderNumber", async (req, res) => {
       previousOrder = await findOrderByExternalReference(orderNumber);
     } catch (previousOrderError) {
       console.warn(
-        "NÃO FOI POSSÍVEL BUSCAR ESTADO ANTERIOR DO PEDIDO ANTES DA SIMULAÇÃO:",
+        "NÃƒO FOI POSSÃVEL BUSCAR ESTADO ANTERIOR DO PEDIDO ANTES DA SIMULAÃ‡ÃƒO:",
         previousOrderError.message || previousOrderError
       );
     }
@@ -2060,7 +2227,7 @@ router.post("/payments/simulate/:orderNumber", async (req, res) => {
     } else {
       return res.status(400).json({
         success: false,
-        message: "Status inválido para simulação"
+        message: "Status invÃ¡lido para simulaÃ§Ã£o"
       });
     }
 
@@ -2089,12 +2256,12 @@ router.post("/payments/simulate/:orderNumber", async (req, res) => {
   try {
     affiliateConversionResult = await createAffiliateConversionForPaidOrder(updatedOrder);
   } catch (affiliateError) {
-    console.error("ERRO AO CRIAR COMISSÃO DO AFILIADO NA SIMULAÇÃO:", affiliateError);
+    console.error("ERRO AO CRIAR COMISSÃƒO DO AFILIADO NA SIMULAÃ‡ÃƒO:", affiliateError);
 
     affiliateConversionResult = {
       created: false,
       skipped: false,
-      error: affiliateError.message || "Erro ao criar comissão do afiliado na simulação"
+      error: affiliateError.message || "Erro ao criar comissÃ£o do afiliado na simulaÃ§Ã£o"
     };
   }
 
@@ -2127,10 +2294,10 @@ router.post("/payments/simulate/:orderNumber", async (req, res) => {
             await saveGeneratedLabel(updatedOrder.id, generatedLabel);
           }
         } catch (labelError) {
-          console.error("ERRO AO GERAR ETIQUETA NA SIMULAÇÃO:", labelError);
+          console.error("ERRO AO GERAR ETIQUETA NA SIMULAÃ‡ÃƒO:", labelError);
           await saveLabelError(
             updatedOrder.id,
-            labelError.message || "Erro ao gerar etiqueta na simulação"
+            labelError.message || "Erro ao gerar etiqueta na simulaÃ§Ã£o"
           );
         }
       }
@@ -2163,7 +2330,7 @@ router.post("/payments/simulate/:orderNumber", async (req, res) => {
     if (!findResponse.ok || !Array.isArray(findData) || !findData[0]?.id) {
       return res.status(404).json({
         success: false,
-        message: "Pedido não encontrado para simulação",
+        message: "Pedido nÃ£o encontrado para simulaÃ§Ã£o",
         details: findData
       });
     }
@@ -2177,7 +2344,7 @@ router.post("/payments/simulate/:orderNumber", async (req, res) => {
     ) {
       return res.status(500).json({
         success: false,
-        message: "Erro ao atualizar pedido na simulação",
+        message: "Erro ao atualizar pedido na simulaÃ§Ã£o",
         details: fallbackUpdate.raw
       });
     }
@@ -2197,12 +2364,12 @@ router.post("/payments/simulate/:orderNumber", async (req, res) => {
   try {
     affiliateConversionResult = await createAffiliateConversionForPaidOrder(updatedOrder);
   } catch (affiliateError) {
-    console.error("ERRO AO CRIAR COMISSÃO DO AFILIADO NA SIMULAÇÃO:", affiliateError);
+    console.error("ERRO AO CRIAR COMISSÃƒO DO AFILIADO NA SIMULAÃ‡ÃƒO:", affiliateError);
 
     affiliateConversionResult = {
       created: false,
       skipped: false,
-      error: affiliateError.message || "Erro ao criar comissão do afiliado na simulação"
+      error: affiliateError.message || "Erro ao criar comissÃ£o do afiliado na simulaÃ§Ã£o"
     };
   }
 
@@ -2236,12 +2403,12 @@ router.post("/payments/simulate/:orderNumber", async (req, res) => {
         }
       } catch (labelError) {
         console.error(
-          "ERRO AO GERAR ETIQUETA NO FALLBACK DA SIMULAÇÃO:",
+          "ERRO AO GERAR ETIQUETA NO FALLBACK DA SIMULAÃ‡ÃƒO:",
           labelError
         );
         await saveLabelError(
           updatedOrder.id,
-          labelError.message || "Erro ao gerar etiqueta na simulação"
+          labelError.message || "Erro ao gerar etiqueta na simulaÃ§Ã£o"
         );
       }
     }
@@ -2269,7 +2436,7 @@ router.get("/orders/:orderNumber/status", async (req, res) => {
     if (!orderNumber) {
       return res.status(400).json({
         success: false,
-        message: "Número do pedido é obrigatório"
+        message: "NÃºmero do pedido Ã© obrigatÃ³rio"
       });
     }
 
@@ -2304,7 +2471,7 @@ router.get("/orders/:orderNumber/status", async (req, res) => {
     if (!Array.isArray(data) || !data[0]) {
       return res.status(404).json({
         success: false,
-        message: "Pedido não encontrado"
+        message: "Pedido nÃ£o encontrado"
       });
     }
 
@@ -2347,11 +2514,11 @@ router.get("/melhor-envio/authorize-url", async (req, res) => {
       url: buildMelhorEnvioAuthorizeUrl()
     });
   } catch (error) {
-    console.error("ERRO AO GERAR URL DE AUTORIZAÇÃO DO MELHOR ENVIO:", error);
+    console.error("ERRO AO GERAR URL DE AUTORIZAÃ‡ÃƒO DO MELHOR ENVIO:", error);
 
     return res.status(500).json({
       success: false,
-      message: error.message || "Erro ao gerar URL de autorização"
+      message: error.message || "Erro ao gerar URL de autorizaÃ§Ã£o"
     });
   }
 });
@@ -2365,7 +2532,7 @@ router.post("/affiliates/apply", async (req, res) => {
         success: true,
         alreadyExists: true,
         message:
-          "Você já possui uma solicitação de afiliado pendente. Aguarde a análise da equipe OZONTECK.",
+          "VocÃª jÃ¡ possui uma solicitaÃ§Ã£o de afiliado pendente. Aguarde a anÃ¡lise da equipe OZONTECK.",
         application: result.application,
       });
     }
@@ -2374,15 +2541,15 @@ router.post("/affiliates/apply", async (req, res) => {
       success: true,
       alreadyExists: false,
       message:
-        "Solicitação enviada com sucesso. Nossa equipe vai analisar seu cadastro de afiliado.",
+        "SolicitaÃ§Ã£o enviada com sucesso. Nossa equipe vai analisar seu cadastro de afiliado.",
       application: result.application,
     });
   } catch (error) {
-    console.error("ERRO AO CRIAR SOLICITAÇÃO DE AFILIADO:", error);
+    console.error("ERRO AO CRIAR SOLICITAÃ‡ÃƒO DE AFILIADO:", error);
 
     return res.status(400).json({
       success: false,
-      message: error.message || "Erro ao enviar solicitação de afiliado.",
+      message: error.message || "Erro ao enviar solicitaÃ§Ã£o de afiliado.",
     });
   }
 });
@@ -2390,8 +2557,9 @@ router.post("/affiliates/apply", async (req, res) => {
 router.get("/health", async (req, res) => {
   return res.status(200).json({
     success: true,
-    message: "Camada pública da loja ativa"
+    message: "Camada pÃºblica da loja ativa"
   });
 });
 
 export default router;
+
