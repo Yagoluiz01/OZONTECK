@@ -1098,106 +1098,10 @@ function validateMercadoPagoWebhookSignature({
 }
 
 async function createMercadoPagoPreference({ req, order, items, customer }) {
-
-
-if (isPaymentSimulationEnabled()) {
-  const simulationPaymentId = `simulation_${createdOrder.order_number}`;
-
-  const simulationUpdate = await updateOrderById(createdOrder.id, {
-    payment_gateway: "simulation",
-    payment_reference: simulationPaymentId,
-    payment_external_reference: String(createdOrder.order_number || ""),
-    payment_status: "paid",
-    payment_raw_status: "approved",
-    paid_at: new Date().toISOString(),
-    order_status: "paid",
-    webhook_last_event: "checkout_simulation"
-  });
-
-  if (
-    !simulationUpdate.ok ||
-    !Array.isArray(simulationUpdate.data) ||
-    !simulationUpdate.data[0]
-  ) {
-    return res.status(500).json({
-      success: false,
-      message: "Pedido criado, mas houve erro ao aplicar a simulação de pagamento",
-      details: simulationUpdate.raw
-    });
-  }
-
-  const successUrl =
-    env.storeSuccessUrl ||
-    process.env.STORE_SUCCESS_URL ||
-    "https://ozonteck-loja.onrender.com/pages-html/pagamento-sucesso.html";
-
-  const redirectUrl = new URL(successUrl);
-
-  redirectUrl.searchParams.set("status", "approved");
-  redirectUrl.searchParams.set("external_reference", createdOrder.order_number);
-  redirectUrl.searchParams.set("payment_id", simulationPaymentId);
-
-  return res.status(201).json({
-    success: true,
-    message: "Pedido criado e pagamento simulado com sucesso",
-    order: {
-      id: createdOrder.id,
-      number: createdOrder.order_number,
-      total: totalAmount,
-      status: "paid",
-      paymentStatus: "paid"
-    },
-    payment: {
-      gateway: "simulation",
-      preferenceId: "",
-      paymentUrl: redirectUrl.toString(),
-      sandboxPaymentUrl: redirectUrl.toString(),
-      externalReference: createdOrder.order_number
-    }
-  });
-}
-
-if (isPaymentSimulationEnabled()) {
-  const backUrls = getStoreBackUrls();
-  const simulatedPaymentUrl = new URL(
-    "https://ozonteck-loja.onrender.com/pages-html/pagamento-simulado.html"
-  );
-
-  simulatedPaymentUrl.searchParams.set(
-    "external_reference",
-    String(createdOrder.order_number || "")
-  );
-
-  simulatedPaymentUrl.searchParams.set(
-    "order_number",
-    String(createdOrder.order_number || "")
-  );
-
-  return res.status(201).json({
-    success: true,
-    message: "Pedido criado com sucesso. Aguardando pagamento simulado.",
-    order: {
-      id: createdOrder.id,
-      number: createdOrder.order_number,
-      total: totalAmount,
-      status: createdOrder.order_status,
-      paymentStatus: createdOrder.payment_status
-    },
-    payment: {
-      gateway: "simulation_page",
-      preferenceId: "",
-      paymentUrl: simulatedPaymentUrl.toString(),
-      sandboxPaymentUrl: simulatedPaymentUrl.toString(),
-      externalReference: createdOrder.order_number
-    }
-  });
-}
-
-
   const accessToken = getMercadoPagoAccessToken();
 
   if (!accessToken) {
-    throw new Error("MERCADO_PAGO_ACCESS_TOKEN nÃ£o configurado");
+    throw new Error("MERCADO_PAGO_ACCESS_TOKEN não configurado");
   }
 
   const apiBaseUrl = getApiBaseUrl(req);
@@ -1252,12 +1156,13 @@ if (isPaymentSimulationEnabled()) {
     throw new Error(
       data?.message ||
         data?.error ||
-        "Erro ao criar preferÃªncia de pagamento no Mercado Pago"
+        "Erro ao criar preferência de pagamento no Mercado Pago"
     );
   }
 
   return data;
 }
+
 
 async function getMercadoPagoPayment(paymentId) {
   const accessToken = getMercadoPagoAccessToken();
@@ -1966,28 +1871,51 @@ router.post("/orders", async (req, res) => {
       });
     }
 
-    const accessToken = getMercadoPagoAccessToken();
+   if (isPaymentSimulationEnabled()) {
+  const simulatedPaymentUrl = new URL(
+    "https://ozonteck-loja.onrender.com/pages-html/pagamento-simulado.html"
+  );
 
-    if (!accessToken) {
-      return res.status(201).json({
-        success: true,
-        message: "Pedido criado com sucesso",
-        order: {
-          id: createdOrder.id,
-          number: createdOrder.order_number,
-          total: totalAmount,
-          status: createdOrder.order_status,
-          paymentStatus: createdOrder.payment_status
-        },
-        payment: {
-          gateway: "simulation_pending",
-          preferenceId: "",
-          paymentUrl: "",
-          sandboxPaymentUrl: "",
-          externalReference: createdOrder.order_number
-        }
-      });
+  simulatedPaymentUrl.searchParams.set(
+    "external_reference",
+    String(createdOrder.order_number || "")
+  );
+
+  simulatedPaymentUrl.searchParams.set(
+    "order_number",
+    String(createdOrder.order_number || "")
+  );
+
+  return res.status(201).json({
+    success: true,
+    message: "Pedido criado com sucesso. Aguardando pagamento simulado.",
+    order: {
+      id: createdOrder.id,
+      number: createdOrder.order_number,
+      total: totalAmount,
+      status: createdOrder.order_status,
+      paymentStatus: createdOrder.payment_status
+    },
+    payment: {
+      gateway: "simulation_page",
+      preferenceId: "",
+      paymentUrl: simulatedPaymentUrl.toString(),
+      sandboxPaymentUrl: simulatedPaymentUrl.toString(),
+      externalReference: createdOrder.order_number
     }
+  });
+}
+
+const accessToken = getMercadoPagoAccessToken();
+
+if (!accessToken) {
+  return res.status(500).json({
+    success: false,
+    message:
+      "MERCADO_PAGO_ACCESS_TOKEN não configurado. Ative ENABLE_PAYMENT_SIMULATION=true para testar sem Mercado Pago."
+  });
+}
+
 
     const preference = await createMercadoPagoPreference({
       req,
@@ -2253,8 +2181,11 @@ router.post("/payments/mercado-pago/webhook", async (req, res) => {
 
    return res.status(200).json({
   success: true,
-  message: "Pagamento simulado com sucesso",
-  order: updatedOrder,
+  message: "Webhook Mercado Pago processado com sucesso",
+  received: true,
+  paymentStatus,
+  externalReference,
+  label: labelResult,
   metaPurchase: metaPurchaseResult,
   affiliateConversion: affiliateConversionResult
 });
