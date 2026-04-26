@@ -1539,17 +1539,14 @@ router.get("/products", async (req, res) => {
     }
 
     const products = response.data
-      .map(normalizeProduct)
-      .filter((product) => product.id && product.name);
+  .map(normalizeProduct)
+  .filter((product) => product.id && product.name);
 
-   return res.status(200).json({
+return res.status(200).json({
   success: true,
-  received: true,
-  paymentStatus,
-  label: labelResult,
-  metaPurchase: metaPurchaseResult,
-  affiliateConversion: affiliateConversionResult,
+  products
 });
+
   } catch (error) {
     console.error("ERRO AO LISTAR PRODUTOS DA LOJA:", error);
 
