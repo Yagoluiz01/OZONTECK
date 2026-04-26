@@ -2,6 +2,7 @@ import { env } from "../config/env.js";
 
 const SUPABASE_URL = String(env.supabaseUrl || "").replace(/\/+$/, "");
 const SERVICE_ROLE_KEY = env.supabaseServiceRoleKey;
+const AFFILIATE_RECEIPTS_BUCKET = "affiliate-receipts";
 
 function getHeaders(extra = {}) {
   return {
@@ -56,6 +57,50 @@ async function supabaseRequest(path, options = {}) {
   return data;
 }
 
+async function supabaseStorageUpload({ bucket, path, buffer, mimeType }) {
+  assertSupabaseConfig();
+
+  const uploadUrl = `${SUPABASE_URL}/storage/v1/object/${bucket}/${path}`;
+
+  const response = await fetch(uploadUrl, {
+    method: "POST",
+    headers: {
+      apikey: SERVICE_ROLE_KEY,
+      Authorization: `Bearer ${SERVICE_ROLE_KEY}`,
+      "Content-Type": mimeType || "application/octet-stream",
+      "x-upsert": "false",
+    },
+    body: buffer,
+  });
+
+  const text = await response.text();
+  let data = null;
+
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = text;
+    }
+  }
+
+  if (!response.ok) {
+    const message =
+      data?.message ||
+      data?.error ||
+      data?.details ||
+      `Erro ao enviar comprovante para o Storage: ${response.status}`;
+
+    throw new Error(message);
+  }
+
+  return {
+    path,
+    publicUrl: `${SUPABASE_URL}/storage/v1/object/public/${bucket}/${path}`,
+    raw: data,
+  };
+}
+
 function cleanText(value) {
   return String(value || "").trim();
 }
@@ -71,6 +116,98 @@ function normalizeCode(value) {
 function toNumber(value, fallback = 0) {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
+}
+
+function toMoneyNumber(value, fallback = 0) {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : fallback;
+  }
+
+  const cleanValue = String(value || "")
+    .trim()
+    .replace(/\s/g, "")
+    .replace(/\./g, "")
+    .replace(",", ".");
+
+  const number = Number(cleanValue);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function sanitizeFileName(value) {
+  return cleanText(value)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-zA-Z0-9._-]/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .toLowerCase();
+}
+
+function getFileExtension(file = {}) {
+  const originalName = sanitizeFileName(file.originalname || "");
+  const byName = originalName.includes(".")
+    ? originalName.split(".").pop()
+    : "";
+
+  if (byName) return byName;
+
+  const mime = cleanText(file.mimetype).toLowerCase();
+
+  if (mime === "image/jpeg") return "jpg";
+  if (mime === "image/png") return "png";
+  if (mime === "image/webp") return "webp";
+  if (mime === "application/pdf") return "pdf";
+
+  return "bin";
+}
+
+function assertValidReceiptFile(file) {
+  if (!file) return;
+
+  const allowedMimeTypes = [
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+    "application/pdf",
+  ];
+
+  if (!allowedMimeTypes.includes(file.mimetype)) {
+    throw new Error(
+      "Comprovante inválido. Envie imagem JPG, PNG, WEBP ou PDF."
+    );
+  }
+
+  if (!file.buffer || !file.buffer.length) {
+    throw new Error("Arquivo do comprovante está vazio.");
+  }
+}
+
+async function uploadAffiliateReceipt(file, affiliateId) {
+  if (!file) return null;
+
+  assertValidReceiptFile(file);
+
+  const extension = getFileExtension(file);
+  const safeOriginalName = sanitizeFileName(file.originalname || `comprovante.${extension}`);
+  const timestamp = Date.now();
+  const random = Math.random().toString(36).slice(2, 10);
+
+  const path = `${affiliateId}/${timestamp}-${random}-${safeOriginalName}`;
+
+  const uploaded = await supabaseStorageUpload({
+    bucket: AFFILIATE_RECEIPTS_BUCKET,
+    path,
+    buffer: file.buffer,
+    mimeType: file.mimetype,
+  });
+
+  return {
+    receipt_url: uploaded.publicUrl,
+    receipt_path: path,
+    receipt_file_name: file.originalname || safeOriginalName,
+    receipt_mime_type: file.mimetype || null,
+    receipt_uploaded_at: new Date().toISOString(),
+  };
 }
 
 function buildAffiliatePayload(input = {}, isUpdate = false) {
@@ -95,9 +232,15 @@ function buildAffiliatePayload(input = {}, isUpdate = false) {
   if (!isUpdate || refCode) payload.ref_code = refCode;
   if (!isUpdate || couponCode) payload.coupon_code = couponCode || null;
   if (!isUpdate || status) payload.status = status;
-  if (!isUpdate || input.commission_rate !== undefined || input.commissionRate !== undefined) {
+
+  if (
+    !isUpdate ||
+    input.commission_rate !== undefined ||
+    input.commissionRate !== undefined
+  ) {
     payload.commission_rate = commissionRate;
   }
+
   if (!isUpdate || pixKey) payload.pix_key = pixKey || null;
   if (!isUpdate || notes) payload.notes = notes || null;
 
@@ -114,12 +257,18 @@ function buildAffiliatePayload(input = {}, isUpdate = false) {
       payload.status = "active";
     }
 
-    if (payload.commission_rate === undefined || payload.commission_rate === null) {
+    if (
+      payload.commission_rate === undefined ||
+      payload.commission_rate === null
+    ) {
       payload.commission_rate = 10;
     }
   }
 
-  if (payload.status && !["active", "inactive", "blocked"].includes(payload.status)) {
+  if (
+    payload.status &&
+    !["active", "inactive", "blocked"].includes(payload.status)
+  ) {
     throw new Error("Status inválido. Use active, inactive ou blocked.");
   }
 
@@ -271,7 +420,7 @@ export async function listAffiliatePayouts(filters = {}) {
 
 export async function createAffiliatePayout(input = {}) {
   const affiliateId = cleanText(input.affiliate_id || input.affiliateId);
-  const amount = toNumber(input.amount, 0);
+  const amount = toMoneyNumber(input.amount, 0);
   const paymentMethod = cleanText(
     input.payment_method || input.paymentMethod || "pix"
   );
@@ -279,6 +428,8 @@ export async function createAffiliatePayout(input = {}) {
     input.reference || input.payment_reference || input.paymentReference
   );
   const notes = cleanText(input.notes);
+  const pixKey = cleanText(input.pix_key || input.pixKey);
+  const receiptFile = input.receiptFile || null;
 
   if (!affiliateId) {
     throw new Error("ID do afiliado é obrigatório.");
@@ -294,14 +445,20 @@ export async function createAffiliatePayout(input = {}) {
     throw new Error("Afiliado não encontrado.");
   }
 
+  const receiptData = receiptFile
+    ? await uploadAffiliateReceipt(receiptFile, affiliateId)
+    : null;
+
   const payload = {
     affiliate_id: affiliateId,
     amount,
     status: "paid",
     payment_method: paymentMethod || "pix",
     payment_reference: reference || null,
+    pix_key: pixKey || affiliate.pix_key || null,
     notes: notes || null,
     paid_at: new Date().toISOString(),
+    ...(receiptData || {}),
   };
 
   const created = await supabaseRequest("/affiliate_payouts", {

@@ -1,4 +1,5 @@
 import express from "express";
+import multer from "multer";
 import { requireAdminAuth } from "../middlewares/auth.middleware.js";
 import {
   listAffiliates,
@@ -8,9 +9,17 @@ import {
   updateAffiliate,
   listAffiliateConversions,
   listAffiliatePayouts,
+  createAffiliatePayout,
 } from "../services/adminAffiliates.service.js";
 
 const router = express.Router();
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 8 * 1024 * 1024,
+  },
+});
 
 router.use(requireAdminAuth);
 
@@ -128,6 +137,23 @@ router.get("/:id/payouts", async (req, res) => {
     return ok(res, { payouts });
   } catch (error) {
     return fail(res, error);
+  }
+});
+
+/**
+ * REGISTRAR PAGAMENTO COM COMPROVANTE
+ */
+router.post("/:id/payouts", upload.single("receipt"), async (req, res) => {
+  try {
+    const payout = await createAffiliatePayout({
+      ...(req.body || {}),
+      affiliate_id: req.params.id,
+      receiptFile: req.file || null,
+    });
+
+    return ok(res, { payout }, "Pagamento de comissão registrado com sucesso.");
+  } catch (error) {
+    return fail(res, error, 400);
   }
 });
 
