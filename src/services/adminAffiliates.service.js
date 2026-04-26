@@ -268,3 +268,49 @@ export async function listAffiliatePayouts(filters = {}) {
 
   return supabaseRequest(`/affiliate_payouts?${params.toString()}`);
 }
+
+export async function createAffiliatePayout(input = {}) {
+  const affiliateId = cleanText(input.affiliate_id || input.affiliateId);
+  const amount = toNumber(input.amount, 0);
+  const paymentMethod = cleanText(
+    input.payment_method || input.paymentMethod || "pix"
+  );
+  const reference = cleanText(
+    input.reference || input.payment_reference || input.paymentReference
+  );
+  const notes = cleanText(input.notes);
+
+  if (!affiliateId) {
+    throw new Error("ID do afiliado é obrigatório.");
+  }
+
+  if (amount <= 0) {
+    throw new Error("O valor do pagamento precisa ser maior que zero.");
+  }
+
+  const affiliate = await getAffiliateById(affiliateId);
+
+  if (!affiliate) {
+    throw new Error("Afiliado não encontrado.");
+  }
+
+  const payload = {
+    affiliate_id: affiliateId,
+    amount,
+    status: "paid",
+    payment_method: paymentMethod || "pix",
+    payment_reference: reference || null,
+    notes: notes || null,
+    paid_at: new Date().toISOString(),
+  };
+
+  const created = await supabaseRequest("/affiliate_payouts", {
+    method: "POST",
+    headers: {
+      Prefer: "return=representation",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  return created?.[0] || null;
+}
