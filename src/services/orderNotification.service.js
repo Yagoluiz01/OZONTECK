@@ -275,3 +275,91 @@ export async function notifyOrderPaid(order) {
     html
   });
 }
+
+
+
+export async function notifyOrderPaymentPending(order) {
+  const to = getCustomerEmail(order);
+  const customerName = getCustomerName(order);
+  const orderNumber = getOrderNumber(order);
+  const total = getOrderTotal(order);
+
+  const subject = `Pagamento pendente - pedido ${orderNumber}`;
+
+  const text = [
+    `Olá, ${customerName}.`,
+    "",
+    `Recebemos seu pedido ${orderNumber}, mas o pagamento ainda está pendente.`,
+    total ? `Total do pedido: ${total}.` : "",
+    "",
+    "Assim que o pagamento for aprovado, enviaremos uma nova confirmação automaticamente.",
+    "Se você já realizou o pagamento, aguarde alguns minutos para a confirmação.",
+    "",
+    "Equipe OZONTECK"
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  const html = `
+    <div style="font-family: Arial, sans-serif; color: #111827; line-height: 1.6;">
+      <h2 style="margin: 0 0 12px;">Pagamento pendente</h2>
+      <p>Olá, <strong>${customerName}</strong>.</p>
+      <p>Recebemos seu pedido <strong>${orderNumber}</strong>, mas o pagamento ainda está <strong>pendente</strong>.</p>
+      ${total ? `<p><strong>Total do pedido:</strong> ${total}</p>` : ""}
+      <p>Assim que o pagamento for aprovado, enviaremos uma nova confirmação automaticamente.</p>
+      <p>Se você já realizou o pagamento, aguarde alguns minutos para a confirmação.</p>
+      <p style="margin-top: 24px;">Equipe OZONTECK</p>
+    </div>
+  `;
+
+  return sendEmail({
+    order,
+    type: "payment_pending",
+    to,
+    subject,
+    text,
+    html
+  });
+}
+
+export async function notifyOrderPaymentFailed(order) {
+  const to = getCustomerEmail(order);
+  const customerName = getCustomerName(order);
+  const orderNumber = getOrderNumber(order);
+  const total = getOrderTotal(order);
+
+  const subject = `Pagamento não aprovado - pedido ${orderNumber}`;
+
+  const text = [
+    `Olá, ${customerName}.`,
+    "",
+    `O pagamento do pedido ${orderNumber} não foi aprovado.`,
+    total ? `Total do pedido: ${total}.` : "",
+    "",
+    "Você pode tentar realizar o pagamento novamente ou entrar em contato com nossa equipe para receber ajuda.",
+    "",
+    "Equipe OZONTECK"
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  const html = `
+    <div style="font-family: Arial, sans-serif; color: #111827; line-height: 1.6;">
+      <h2 style="margin: 0 0 12px;">Pagamento não aprovado</h2>
+      <p>Olá, <strong>${customerName}</strong>.</p>
+      <p>O pagamento do pedido <strong>${orderNumber}</strong> <strong>não foi aprovado</strong>.</p>
+      ${total ? `<p><strong>Total do pedido:</strong> ${total}</p>` : ""}
+      <p>Você pode tentar realizar o pagamento novamente ou entrar em contato com nossa equipe para receber ajuda.</p>
+      <p style="margin-top: 24px;">Equipe OZONTECK</p>
+    </div>
+  `;
+
+  return sendEmail({
+    order,
+    type: "payment_failed",
+    to,
+    subject,
+    text,
+    html
+  });
+}

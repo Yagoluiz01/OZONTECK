@@ -1,4 +1,9 @@
-﻿import { notifyOrderCreatedPending, notifyOrderPaid } from "../services/orderNotification.service.js";
+﻿import {
+  notifyOrderCreatedPending,
+  notifyOrderPaid,
+  notifyOrderPaymentPending,
+  notifyOrderPaymentFailed
+} from "../services/orderNotification.service.js";
 import express from "express";
 import { requireAdminAuth } from "../middlewares/auth.middleware.js";
 import crypto from "crypto";
@@ -2259,10 +2264,10 @@ router.post("/payments/simulate/:orderNumber", async (req, res) => {
     } else if (status === "pending") {
       updatePayload.payment_status = "pending";
       updatePayload.payment_raw_status = "pending";
-    } else if (status === "failed" || status === "rejected") {
-      updatePayload.payment_status = "failed";
-      updatePayload.payment_raw_status = "rejected";
-    } else {
+   } else if (status === "failed" || status === "rejected" || status === "cancelled") {
+  updatePayload.payment_status = "failed";
+  updatePayload.payment_raw_status = status === "cancelled" ? "cancelled" : "rejected";
+} else {
       return res.status(400).json({
         success: false,
         message: "Status invÃ¡lido para simulaÃ§Ã£o"
@@ -2398,6 +2403,27 @@ router.post("/payments/simulate/:orderNumber", async (req, res) => {
     let metaPurchaseResult = null;
     let affiliateConversionResult = null;
 
+
+        async function notifySimulationPaymentStatus(order) {
+      try {
+        if (status === "approved" || status === "paid") {
+          await notifyOrderPaid(order);
+          return;
+        }
+
+        if (status === "pending") {
+          await notifyOrderPaymentPending(order);
+          return;
+        }
+
+        if (status === "failed" || status === "rejected" || status === "cancelled") {
+          await notifyOrderPaymentFailed(order);
+        }
+      } catch (notificationError) {
+        console.error("ERRO AO ENVIAR NOTIFICAÇÃO DE STATUS DE PAGAMENTO NA SIMULAÇÃO:", notificationError);
+      }
+    }
+
     if ((status === "approved" || status === "paid") && updatedOrder?.id) {
       try {
         const orderItems = await findOrderItems(updatedOrder.id);
@@ -2418,14 +2444,17 @@ router.post("/payments/simulate/:orderNumber", async (req, res) => {
     };
   }
 
-  metaPurchaseResult = await sendMetaPurchaseEvent({
+     metaPurchaseResult = await sendMetaPurchaseEvent({
     order: updatedOrder,
     items: orderItems,
     payment: {
       id: `simulation_${updatedOrder.order_number}`
     }
   });
+
+  await notifySimulationPaymentStatus(updatedOrder);
 } else {
+
   affiliateConversionResult = {
     created: false,
     skipped: true,
@@ -2457,6 +2486,11 @@ router.post("/payments/simulate/:orderNumber", async (req, res) => {
         );
       }
     }
+
+    if (status === "pending" || status === "failed" || status === "rejected" || status === "cancelled") {
+      await notifySimulationPaymentStatus(updatedOrder);
+    }
+
 
     return res.status(200).json({
       success: true,
