@@ -4,6 +4,7 @@
   notifyOrderPaymentPending,
   notifyOrderPaymentFailed
 } from "../services/orderNotification.service.js";
+import { notifyAffiliateCreated } from "../services/affiliateNotification.service.js";
 import express from "express";
 import { requireAdminAuth } from "../middlewares/auth.middleware.js";
 import crypto from "crypto";
@@ -338,14 +339,25 @@ async function createAffiliateApplication(input = {}) {
 
   const data = await response.json().catch(() => []);
 
-  if (!response.ok || !Array.isArray(data) || !data[0]?.id) {
+    if (!response.ok || !Array.isArray(data) || !data[0]?.id) {
     console.error("ERRO SUPABASE AFFILIATE APPLICATION:", data);
     throw new Error("Erro ao salvar solicitação de afiliado.");
   }
 
+  const application = data[0];
+
+  try {
+    await notifyAffiliateCreated(application);
+  } catch (notificationError) {
+    console.error(
+      "ERRO AO ENVIAR NOTIFICAÇÃO DE SOLICITAÇÃO DE AFILIADO:",
+      notificationError
+    );
+  }
+
   return {
     alreadyExists: false,
-    application: data[0],
+    application,
   };
 }
 
