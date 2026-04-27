@@ -110,7 +110,15 @@ function createTransporter() {
   });
 }
 
-async function sendAffiliateEmail({ affiliate, type, to, subject, text, html }) {
+async function sendAffiliateEmail({
+  affiliate,
+  type,
+  to,
+  subject,
+  text,
+  html,
+  attachments = [],
+}) {
   const channel = "email";
   const recipient = normalizeEmail(to);
 
@@ -158,12 +166,13 @@ async function sendAffiliateEmail({ affiliate, type, to, subject, text, html }) 
 
   const transporter = createTransporter();
 
-  await transporter.sendMail({
+    await transporter.sendMail({
     from: `"${env.smtpFromName || "OZONTECK"}" <${env.smtpFromEmail}>`,
     to: recipient,
     subject,
     text,
     html,
+    attachments,
   });
 
   console.log("NOTIFICAÇÃO DE AFILIADO ENVIADA:", {
@@ -317,7 +326,7 @@ export async function notifyAffiliateRejected(application = {}) {
   });
 }
 
-export async function notifyAffiliatePayoutPaid(affiliate, payout = {}) {
+export async function notifyAffiliatePayoutPaid(affiliate, payout = {}, receiptFile = null) {
   const to = getAffiliateEmail(affiliate);
   const affiliateName = getAffiliateName(affiliate);
   const amount = formatMoney(payout.amount);
@@ -331,6 +340,7 @@ export async function notifyAffiliatePayoutPaid(affiliate, payout = {}) {
     "",
     payout.payment_method ? `Método de pagamento: ${payout.payment_method}` : "",
     payout.payment_reference ? `Referência: ${payout.payment_reference}` : "",
+    receiptFile ? "O comprovante do pagamento está anexado neste e-mail." : "",
     "",
     "Obrigado por fazer parte do programa de afiliados OZONTECK.",
     "",
@@ -344,20 +354,39 @@ export async function notifyAffiliatePayoutPaid(affiliate, payout = {}) {
       <h2 style="margin: 0 0 12px;">Pagamento de comissão registrado</h2>
       <p>Olá, <strong>${escapeHtml(affiliateName)}</strong>.</p>
       <p>Registramos o pagamento da sua comissão no valor de <strong>${escapeHtml(amount)}</strong>.</p>
+
       ${
         payout.payment_method
           ? `<p><strong>Método de pagamento:</strong> ${escapeHtml(payout.payment_method)}</p>`
           : ""
       }
+
       ${
         payout.payment_reference
           ? `<p><strong>Referência:</strong> ${escapeHtml(payout.payment_reference)}</p>`
           : ""
       }
+
+      ${
+        receiptFile
+          ? `<p>O comprovante do pagamento está anexado neste e-mail.</p>`
+          : ""
+      }
+
       <p>Obrigado por fazer parte do programa de afiliados OZONTECK.</p>
       <p style="margin-top: 24px;">Equipe OZONTECK</p>
     </div>
   `;
+
+  const attachments = [];
+
+  if (receiptFile?.buffer?.length) {
+    attachments.push({
+      filename: receiptFile.originalname || "comprovante-comissao",
+      content: receiptFile.buffer,
+      contentType: receiptFile.mimetype || "application/octet-stream",
+    });
+  }
 
   return sendAffiliateEmail({
     affiliate,
@@ -366,6 +395,7 @@ export async function notifyAffiliatePayoutPaid(affiliate, payout = {}) {
     subject,
     text,
     html,
+    attachments,
   });
 }
 

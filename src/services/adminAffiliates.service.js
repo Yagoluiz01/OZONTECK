@@ -502,9 +502,9 @@ export async function createAffiliatePayout(input = {}) {
 
     const payout = created?.[0] || null;
 
-  if (payout) {
+    if (payout) {
     await safeAffiliateNotification("affiliate_payout_paid", () =>
-      notifyAffiliatePayoutPaid(affiliate, payout)
+      notifyAffiliatePayoutPaid(affiliate, payout, receiptFile)
     );
   }
 
