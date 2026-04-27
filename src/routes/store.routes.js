@@ -2266,11 +2266,11 @@ router.post("/payments/simulate/:orderNumber", async (req, res) => {
       updatePayload.payment_raw_status = "pending";
 
   } else if (status === "failed" || status === "rejected" || status === "cancelled") {
-  updatePayload.payment_status = "cancelled";
+  updatePayload.payment_status = "pending";
   updatePayload.payment_raw_status = status === "cancelled" ? "cancelled" : "rejected";
-  updatePayload.order_status = "cancelled";
+  updatePayload.order_status = "pending";
 } else {
-  
+
       return res.status(400).json({
         success: false,
         message: "Status invÃ¡lido para simulaÃ§Ã£o"
