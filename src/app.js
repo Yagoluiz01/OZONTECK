@@ -19,6 +19,7 @@ import shippingRoutes from "./routes/shipping.routes.js";
 import adminFinancialRoutes from "./routes/adminFinancial.routes.js";
 import adminPricingRoutes from "./routes/adminPricing.routes.js";
 import adminAffiliatesRoutes from "./routes/adminAffiliates.routes.js";
+import affiliatePortalRoutes from "./routes/affiliatePortal.routes.js";
 
 const app = express();
 
@@ -170,6 +171,11 @@ app.use("/api/orders", ordersRoutes);
 app.use("/api/customers", customersRoutes);
 app.use("/api/settings", settingsRoutes);
 app.use("/api/shipping", shippingRoutes);
+app.use("/api/tracking", trackingRoutes);
+app.use("/api/store", storeRoutes);
+app.use("/api/affiliate", affiliatePortalRoutes);
+
+app.use("/api/admin/financial", adminFinancialRoutes);
 
 app.use((req, res) => {
   return res.status(404).json({
