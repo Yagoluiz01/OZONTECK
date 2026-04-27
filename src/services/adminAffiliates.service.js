@@ -108,7 +108,6 @@ async function supabaseStorageUpload({ bucket, path, buffer, mimeType }) {
   };
 }
 
-
 function cleanText(value) {
   return String(value || "").trim();
 }
@@ -144,13 +143,27 @@ function toMoneyNumber(value, fallback = 0) {
     return Number.isFinite(value) ? value : fallback;
   }
 
-  const cleanValue = String(value || "")
-    .trim()
-    .replace(/\s/g, "")
-    .replace(/\./g, "")
-    .replace(",", ".");
+  const raw = String(value || "").trim();
 
-  const number = Number(cleanValue);
+  if (!raw) {
+    return fallback;
+  }
+
+  const normalized = raw.replace(/\s/g, "");
+
+  const hasComma = normalized.includes(",");
+  const hasDot = normalized.includes(".");
+
+  let parsedValue = normalized;
+
+  if (hasComma && hasDot) {
+    parsedValue = normalized.replace(/\./g, "").replace(",", ".");
+  } else if (hasComma) {
+    parsedValue = normalized.replace(",", ".");
+  }
+
+  const number = Number(parsedValue);
+
   return Number.isFinite(number) ? number : fallback;
 }
 
@@ -368,7 +381,7 @@ export async function getAffiliateById(id) {
 export async function createAffiliate(input = {}) {
   const payload = buildAffiliatePayload(input, false);
 
-    const created = await supabaseRequest("/affiliates", {
+  const created = await supabaseRequest("/affiliates", {
     method: "POST",
     headers: {
       Prefer: "return=representation",
@@ -500,9 +513,9 @@ export async function createAffiliatePayout(input = {}) {
     body: JSON.stringify(payload),
   });
 
-    const payout = created?.[0] || null;
+  const payout = created?.[0] || null;
 
-    if (payout) {
+  if (payout) {
     await safeAffiliateNotification("affiliate_payout_paid", () =>
       notifyAffiliatePayoutPaid(affiliate, payout, receiptFile)
     );
@@ -592,11 +605,12 @@ export async function approveAffiliateApplication(id, input = {}) {
     commission_rate: commissionRate,
     status: "active",
     notes: cleanText(
-      input.notes || `Afiliado aprovado a partir da solicitação ${application.id}.`
+      input.notes ||
+        `Afiliado aprovado a partir da solicitação ${application.id}.`
     ),
   };
 
-    const affiliate = await createAffiliate({
+  const affiliate = await createAffiliate({
     ...affiliatePayload,
     skipAffiliateCreatedNotification: true,
   });
@@ -617,6 +631,7 @@ export async function approveAffiliateApplication(id, input = {}) {
         affiliate_id: affiliate.id,
         approved_at: new Date().toISOString(),
         rejected_at: null,
+        affiliate_id: affiliate.id,
         admin_notes:
           cleanText(input.admin_notes || input.adminNotes) || null,
         updated_at: new Date().toISOString(),
@@ -624,7 +639,7 @@ export async function approveAffiliateApplication(id, input = {}) {
     }
   );
 
-    await safeAffiliateNotification("affiliate_approved", () =>
+  await safeAffiliateNotification("affiliate_approved", () =>
     notifyAffiliateApproved(affiliate)
   );
 
@@ -633,7 +648,6 @@ export async function approveAffiliateApplication(id, input = {}) {
     affiliate,
   };
 }
-
 
 export async function rejectAffiliateApplication(id, input = {}) {
   const application = await getAffiliateApplicationById(id);
@@ -666,7 +680,7 @@ export async function rejectAffiliateApplication(id, input = {}) {
     }
   );
 
-   const rejectedApplication = updatedApplications?.[0] || null;
+  const rejectedApplication = updatedApplications?.[0] || null;
 
   if (rejectedApplication) {
     await safeAffiliateNotification("affiliate_rejected", () =>
@@ -676,7 +690,6 @@ export async function rejectAffiliateApplication(id, input = {}) {
 
   return rejectedApplication;
 }
-
 
 export async function deleteAffiliate(id) {
   const affiliateId = cleanText(id);
