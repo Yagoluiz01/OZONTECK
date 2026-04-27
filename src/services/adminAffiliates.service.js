@@ -1,5 +1,12 @@
 import { env } from "../config/env.js";
 
+import {
+  notifyAffiliateCreated,
+  notifyAffiliateApproved,
+  notifyAffiliateRejected,
+  notifyAffiliatePayoutPaid,
+} from "./affiliateNotification.service.js";
+
 const SUPABASE_URL = String(env.supabaseUrl || "").replace(/\/+$/, "");
 const SERVICE_ROLE_KEY = env.supabaseServiceRoleKey;
 const AFFILIATE_RECEIPTS_BUCKET = "affiliate-receipts";
@@ -101,8 +108,22 @@ async function supabaseStorageUpload({ bucket, path, buffer, mimeType }) {
   };
 }
 
+
 function cleanText(value) {
   return String(value || "").trim();
+}
+
+async function safeAffiliateNotification(label, callback) {
+  try {
+    return await callback();
+  } catch (error) {
+    console.error(`ERRO AO ENVIAR NOTIFICAÇÃO DE AFILIADO (${label}):`, error);
+    return {
+      sent: false,
+      skipped: false,
+      error: error?.message || "Erro ao enviar notificação de afiliado",
+    };
+  }
 }
 
 function normalizeCode(value) {
@@ -347,7 +368,7 @@ export async function getAffiliateById(id) {
 export async function createAffiliate(input = {}) {
   const payload = buildAffiliatePayload(input, false);
 
-  const created = await supabaseRequest("/affiliates", {
+    const created = await supabaseRequest("/affiliates", {
     method: "POST",
     headers: {
       Prefer: "return=representation",
@@ -355,7 +376,15 @@ export async function createAffiliate(input = {}) {
     body: JSON.stringify(payload),
   });
 
-  return created?.[0] || null;
+  const affiliate = created?.[0] || null;
+
+  if (affiliate && !input.skipAffiliateCreatedNotification) {
+    await safeAffiliateNotification("affiliate_created", () =>
+      notifyAffiliateCreated(affiliate)
+    );
+  }
+
+  return affiliate;
 }
 
 export async function updateAffiliate(id, input = {}) {
@@ -471,7 +500,15 @@ export async function createAffiliatePayout(input = {}) {
     body: JSON.stringify(payload),
   });
 
-  return created?.[0] || null;
+    const payout = created?.[0] || null;
+
+  if (payout) {
+    await safeAffiliateNotification("affiliate_payout_paid", () =>
+      notifyAffiliatePayoutPaid(affiliate, payout)
+    );
+  }
+
+  return payout;
 }
 
 export async function listAffiliateApplications(filters = {}) {
@@ -559,7 +596,10 @@ export async function approveAffiliateApplication(id, input = {}) {
     ),
   };
 
-  const affiliate = await createAffiliate(affiliatePayload);
+    const affiliate = await createAffiliate({
+    ...affiliatePayload,
+    skipAffiliateCreatedNotification: true,
+  });
 
   if (!affiliate?.id) {
     throw new Error("Não foi possível criar o afiliado aprovado.");
@@ -584,11 +624,16 @@ export async function approveAffiliateApplication(id, input = {}) {
     }
   );
 
+    await safeAffiliateNotification("affiliate_approved", () =>
+    notifyAffiliateApproved(affiliate)
+  );
+
   return {
     application: updatedApplications?.[0] || null,
     affiliate,
   };
 }
+
 
 export async function rejectAffiliateApplication(id, input = {}) {
   const application = await getAffiliateApplicationById(id);
@@ -621,7 +666,15 @@ export async function rejectAffiliateApplication(id, input = {}) {
     }
   );
 
-  return updatedApplications?.[0] || null;
+   const rejectedApplication = updatedApplications?.[0] || null;
+
+  if (rejectedApplication) {
+    await safeAffiliateNotification("affiliate_rejected", () =>
+      notifyAffiliateRejected(rejectedApplication)
+    );
+  }
+
+  return rejectedApplication;
 }
 
 
