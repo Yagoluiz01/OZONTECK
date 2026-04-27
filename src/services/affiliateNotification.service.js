@@ -449,3 +449,73 @@ export async function notifyAffiliateCommissionCreated(affiliate, conversion = {
     html,
   });
 }
+
+
+
+export async function notifyAffiliatePasswordReset(affiliate, temporaryPassword) {
+  const to = getAffiliateEmail(affiliate);
+  const affiliateName = getAffiliateName(affiliate);
+
+  const loginUrl = "https://ozonteck-loja.onrender.com/pages-html/afiliado-login.html";
+
+  const subject = "Recuperação de senha do painel de afiliado OZONTECK";
+
+  const text = [
+    `Olá, ${affiliateName}.`,
+    "",
+    "Recebemos uma solicitação de recuperação de senha para o seu painel de afiliado OZONTECK.",
+    "",
+    `Sua nova senha temporária é: ${temporaryPassword}`,
+    "",
+    `Acesse o painel por este link: ${loginUrl}`,
+    "",
+    "Por segurança, não compartilhe essa senha com ninguém.",
+    "",
+    "Equipe OZONTECK",
+  ].join("\n");
+
+  const html = `
+    <div style="font-family: Arial, sans-serif; color: #111827; line-height: 1.6;">
+      <h2 style="margin: 0 0 12px;">Recuperação de senha</h2>
+
+      <p>Olá, <strong>${escapeHtml(affiliateName)}</strong>.</p>
+
+      <p>
+        Recebemos uma solicitação de recuperação de senha para o seu painel de afiliado
+        <strong>OZONTECK</strong>.
+      </p>
+
+      <div style="background: #f3f4f6; padding: 16px; border-radius: 10px; margin: 18px 0;">
+        <p style="margin: 0 0 8px;"><strong>Nova senha temporária:</strong></p>
+        <p style="font-size: 22px; font-weight: 800; margin: 0; letter-spacing: 1px;">
+          ${escapeHtml(temporaryPassword)}
+        </p>
+      </div>
+
+      <p>
+        Acesse o painel pelo link abaixo:
+      </p>
+
+      <p>
+        <a href="${escapeHtml(loginUrl)}" target="_blank">
+          ${escapeHtml(loginUrl)}
+        </a>
+      </p>
+
+      <p style="color: #b91c1c;">
+        Por segurança, não compartilhe essa senha com ninguém.
+      </p>
+
+      <p style="margin-top: 24px;">Equipe OZONTECK</p>
+    </div>
+  `;
+
+  return sendAffiliateEmail({
+    affiliate,
+    type: "affiliate_password_reset",
+    to,
+    subject,
+    text,
+    html,
+  });
+}

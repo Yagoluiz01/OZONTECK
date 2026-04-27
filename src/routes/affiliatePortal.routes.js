@@ -1,6 +1,8 @@
 import express from "express";
 
 import {
+  checkEmail,
+  forgotPassword,
   login,
   me,
   orders,
@@ -14,6 +16,8 @@ import { requireAffiliateAuth } from "../middlewares/affiliateAuth.middleware.js
 const router = express.Router();
 
 router.post("/auth/login", login);
+router.post("/auth/forgot-password", forgotPassword);
+router.post("/auth/check-email", checkEmail);
 
 router.get("/me", requireAffiliateAuth, me);
 router.get("/summary", requireAffiliateAuth, summary);

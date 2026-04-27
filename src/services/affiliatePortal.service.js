@@ -1,6 +1,8 @@
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
+import crypto from "crypto";
 import { env } from "../config/env.js";
+import { notifyAffiliatePasswordReset } from "./affiliateNotification.service.js";
 
 const AFFILIATE_TOKEN_EXPIRES_IN = "7d";
 
@@ -402,4 +404,179 @@ export async function updateAffiliateProfile(affiliateId, payload = {}) {
   });
 
   return getAffiliateById(affiliateId);
+}
+
+
+function generateTemporaryPassword() {
+  const prefix = "OZ";
+  const random = crypto.randomBytes(4).toString("hex").toUpperCase();
+  const suffix = Math.floor(100 + Math.random() * 900);
+
+  return `${prefix}${random}@${suffix}`;
+}
+
+function isAffiliateActive(affiliate = {}) {
+  const normalizedStatus = String(affiliate.status || "active")
+    .trim()
+    .toLowerCase();
+
+  const activeStatuses = ["active", "ativo"];
+
+  return activeStatuses.includes(normalizedStatus) && affiliate.access_enabled !== false;
+}
+
+export async function requestAffiliatePasswordReset({ email } = {}) {
+  const normalizedEmail = normalizeEmail(email);
+
+  if (!normalizedEmail) {
+    const error = new Error("Informe o Gmail cadastrado.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const affiliates = await supabaseRequest(
+    `/affiliates?email=eq.${encodeURIComponent(
+      normalizedEmail
+    )}&select=id,full_name,email,phone,ref_code,coupon_code,status,commission_rate,password_hash,access_enabled,pix_key,pix_key_type,created_at&limit=1`
+  );
+
+  const affiliate = Array.isArray(affiliates) ? affiliates[0] : null;
+
+  /*
+    Resposta propositalmente genérica:
+    evita expor se um e-mail existe ou não no sistema.
+  */
+  if (!affiliate) {
+    return {
+      sent: false,
+      skipped: true,
+      reason: "affiliate_not_found",
+    };
+  }
+
+  if (!isAffiliateActive(affiliate)) {
+    return {
+      sent: false,
+      skipped: true,
+      reason: "affiliate_not_active",
+    };
+  }
+
+  const temporaryPassword = generateTemporaryPassword();
+  const passwordHash = await bcrypt.hash(temporaryPassword, 10);
+
+  await supabaseRequest(`/affiliates?id=eq.${encodeURIComponent(affiliate.id)}`, {
+    method: "PATCH",
+    body: {
+      password_hash: passwordHash,
+      updated_at: new Date().toISOString(),
+    },
+  });
+
+  const notification = await notifyAffiliatePasswordReset(
+    affiliate,
+    temporaryPassword
+  );
+
+  return {
+    sent: Boolean(notification?.sent),
+    skipped: Boolean(notification?.skipped),
+    notification,
+  };
+}
+
+export async function checkAffiliateAccessByEmail({ email } = {}) {
+  const normalizedEmail = normalizeEmail(email);
+
+  if (!normalizedEmail) {
+    const error = new Error("Informe o Gmail.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const affiliates = await supabaseRequest(
+    `/affiliates?email=eq.${encodeURIComponent(
+      normalizedEmail
+    )}&select=id,full_name,email,status,access_enabled,password_hash,ref_code&limit=1`
+  );
+
+  const affiliate = Array.isArray(affiliates) ? affiliates[0] : null;
+
+  if (affiliate) {
+    const active = isAffiliateActive(affiliate);
+
+    if (active) {
+      return {
+        exists: true,
+        type: "affiliate",
+        status: "approved",
+        shouldRedirectToLogin: true,
+        email: normalizedEmail,
+        message: "Seu cadastro já foi aprovado. Faça login para acessar seu painel.",
+      };
+    }
+
+    return {
+      exists: true,
+      type: "affiliate",
+      status: affiliate.status || "inactive",
+      shouldRedirectToLogin: false,
+      email: normalizedEmail,
+      message: "Seu cadastro existe, mas o acesso ao painel ainda não está ativo.",
+    };
+  }
+
+  const applications = await supabaseRequest(
+    `/affiliate_applications?email=eq.${encodeURIComponent(
+      normalizedEmail
+    )}&select=id,email,status,affiliate_id,created_at&order=created_at.desc&limit=1`
+  );
+
+  const application = Array.isArray(applications) ? applications[0] : null;
+
+  if (application) {
+    const status = String(application.status || "").toLowerCase();
+
+    if (status === "pending") {
+      return {
+        exists: true,
+        type: "application",
+        status: "pending",
+        shouldRedirectToLogin: false,
+        email: normalizedEmail,
+        message: "Seu cadastro de afiliado ainda está em análise.",
+      };
+    }
+
+    if (status === "approved") {
+      return {
+        exists: true,
+        type: "application",
+        status: "approved",
+        shouldRedirectToLogin: true,
+        email: normalizedEmail,
+        message: "Seu cadastro já foi aprovado. Faça login para acessar seu painel.",
+      };
+    }
+
+    if (status === "rejected") {
+      return {
+        exists: true,
+        type: "application",
+        status: "rejected",
+        shouldRedirectToLogin: false,
+        email: normalizedEmail,
+        message: "Sua solicitação de afiliado não foi aprovada.",
+      };
+    }
+  }
+
+  return {
+    exists: false,
+    type: "none",
+    status: "not_found",
+    shouldRedirectToLogin: false,
+    email: normalizedEmail,
+    message: "Nenhum cadastro encontrado para este Gmail.",
+  };
 }

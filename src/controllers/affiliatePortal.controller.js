@@ -1,8 +1,10 @@
 import {
+  checkAffiliateAccessByEmail,
   getAffiliateOrders,
   getAffiliatePayouts,
   getAffiliateSummary,
   loginAffiliate,
+  requestAffiliatePasswordReset,
   updateAffiliateProfile,
 } from "../services/affiliatePortal.service.js";
 
@@ -26,6 +28,33 @@ export async function login(req, res) {
       message: "Login realizado com sucesso.",
       token: result.token,
       affiliate: result.affiliate,
+    });
+  } catch (error) {
+    return sendError(res, error);
+  }
+}
+
+export async function forgotPassword(req, res) {
+  try {
+    await requestAffiliatePasswordReset(req.body || {});
+
+    return res.json({
+      success: true,
+      message:
+        "Se o Gmail estiver cadastrado e ativo, enviaremos uma nova senha temporária.",
+    });
+  } catch (error) {
+    return sendError(res, error);
+  }
+}
+
+export async function checkEmail(req, res) {
+  try {
+    const result = await checkAffiliateAccessByEmail(req.body || {});
+
+    return res.json({
+      success: true,
+      ...result,
     });
   } catch (error) {
     return sendError(res, error);
