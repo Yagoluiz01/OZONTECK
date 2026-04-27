@@ -1,6 +1,7 @@
 import nodemailer from "nodemailer";
 import { env } from "../config/env.js";
 
+
 function isEnabled() {
   return String(env.notificationsEnabled || "").toLowerCase() === "true";
 }
@@ -361,6 +362,57 @@ export async function notifyAffiliatePayoutPaid(affiliate, payout = {}) {
   return sendAffiliateEmail({
     affiliate,
     type: "affiliate_payout_paid",
+    to,
+    subject,
+    text,
+    html,
+  });
+}
+
+
+
+
+
+export async function notifyAffiliateCommissionCreated(affiliate, conversion = {}) {
+  const to = getAffiliateEmail(affiliate);
+  const affiliateName = getAffiliateName(affiliate);
+  const amount = formatMoney(conversion.commission_amount);
+  const orderNumber = conversion.order_number || conversion.orderNumber || "pedido indicado";
+
+  const subject = "Nova comissão gerada - OZONTECK";
+
+  const text = [
+    `Olá, ${affiliateName}.`,
+    "",
+    `Uma nova comissão foi gerada para você no programa de afiliados OZONTECK.`,
+    "",
+    `Pedido: ${orderNumber}`,
+    `Valor da comissão: ${amount}`,
+    "",
+    "Essa comissão ficará disponível conforme as regras de aprovação e pagamento do programa.",
+    "",
+    "Equipe OZONTECK",
+  ].join("\n");
+
+  const html = `
+    <div style="font-family: Arial, sans-serif; color: #111827; line-height: 1.6;">
+      <h2 style="margin: 0 0 12px;">Nova comissão gerada</h2>
+      <p>Olá, <strong>${escapeHtml(affiliateName)}</strong>.</p>
+      <p>Uma nova comissão foi gerada para você no programa de afiliados <strong>OZONTECK</strong>.</p>
+
+      <div style="background: #f3f4f6; padding: 14px; border-radius: 10px; margin: 18px 0;">
+        <p><strong>Pedido:</strong> ${escapeHtml(orderNumber)}</p>
+        <p><strong>Valor da comissão:</strong> ${escapeHtml(amount)}</p>
+      </div>
+
+      <p>Essa comissão ficará disponível conforme as regras de aprovação e pagamento do programa.</p>
+      <p style="margin-top: 24px;">Equipe OZONTECK</p>
+    </div>
+  `;
+
+  return sendAffiliateEmail({
+    affiliate,
+    type: "affiliate_commission_created",
     to,
     subject,
     text,

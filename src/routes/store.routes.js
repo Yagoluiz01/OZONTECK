@@ -4,7 +4,10 @@
   notifyOrderPaymentPending,
   notifyOrderPaymentFailed
 } from "../services/orderNotification.service.js";
-import { notifyAffiliateCreated } from "../services/affiliateNotification.service.js";
+import {
+  notifyAffiliateCreated,
+  notifyAffiliateCommissionCreated
+} from "../services/affiliateNotification.service.js";
 import express from "express";
 import { requireAdminAuth } from "../middlewares/auth.middleware.js";
 import crypto from "crypto";
@@ -468,16 +471,55 @@ async function createAffiliateConversionForPaidOrder(order) {
     body: JSON.stringify(payload)
   });
 
-  const createData = await createResponse.json().catch(() => []);
+      const createData = await createResponse.json().catch(() => []);
 
   if (!createResponse.ok || !Array.isArray(createData) || !createData[0]?.id) {
     throw new Error("Erro ao criar comissÃ£o do afiliado");
   }
 
+  const conversion = createData[0];
+
+  try {
+    const affiliateUrl = new URL(`${env.supabaseUrl}/rest/v1/affiliates`);
+    affiliateUrl.searchParams.set("select", "*");
+    affiliateUrl.searchParams.set("id", `eq.${order.affiliate_id}`);
+    affiliateUrl.searchParams.set("limit", "1");
+
+    const affiliateResponse = await fetch(affiliateUrl.toString(), {
+      method: "GET",
+      headers: {
+        apikey: env.supabaseServiceRoleKey,
+        Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
+        "Content-Type": "application/json",
+        Accept: "application/json"
+      }
+    });
+
+    const affiliateData = await affiliateResponse.json().catch(() => []);
+
+    if (affiliateResponse.ok && Array.isArray(affiliateData) && affiliateData[0]?.email) {
+      await notifyAffiliateCommissionCreated(affiliateData[0], {
+        ...conversion,
+        order_number: order.order_number || order.id
+      });
+    } else {
+      console.warn("NOTIFICAÇÃO DE COMISSÃO DO AFILIADO IGNORADA: afiliado não encontrado", {
+        affiliateId: order.affiliate_id,
+        orderId: order.id,
+        orderNumber: order.order_number
+      });
+    }
+  } catch (notificationError) {
+    console.error(
+      "ERRO AO ENVIAR NOTIFICAÇÃO DE COMISSÃO DO AFILIADO:",
+      notificationError
+    );
+  }
+
   return {
     created: true,
     skipped: false,
-    conversion: createData[0]
+    conversion
   };
 }
 
