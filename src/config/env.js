@@ -40,6 +40,14 @@ export const env = {
   frenetOriginZipCode: process.env.FRENET_ORIGIN_ZIP_CODE || "",
   frenetQuoteUrl: process.env.FRENET_QUOTE_URL || "https://api.frenet.com.br/shipping/quote",
 
-  frenetLabelUrl: process.env.FRENET_LABEL_URL || "",
-  frenetSandbox: process.env.FRENET_SANDBOX || ""
+   frenetLabelUrl: process.env.FRENET_LABEL_URL || "",
+  frenetSandbox: process.env.FRENET_SANDBOX || "",
+
+  smtpHost: process.env.SMTP_HOST || "",
+  smtpPort: Number(process.env.SMTP_PORT) || 587,
+  smtpUser: process.env.SMTP_USER || "",
+  smtpPass: process.env.SMTP_PASS || "",
+  smtpFromName: process.env.SMTP_FROM_NAME || "OZONTECK",
+  smtpFromEmail: process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER || "",
+  notificationsEnabled: process.env.NOTIFICATIONS_ENABLED || "false"
 };

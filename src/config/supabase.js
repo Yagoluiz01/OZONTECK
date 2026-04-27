@@ -12,5 +12,17 @@ export const supabase = createClient(
   }
 );
 
+
+export const supabaseAdmin = createClient(
+  env.supabaseUrl,
+  env.supabaseServiceRoleKey,
+  {
+    auth: {
+      autoRefreshToken: false,
+      persistSession: false,
+    },
+  }
+);
+
 export const supabaseAuth = supabase;
 export default supabase;

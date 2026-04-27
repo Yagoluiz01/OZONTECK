@@ -1,4 +1,5 @@
-﻿import express from "express";
+﻿import { notifyOrderCreatedPending, notifyOrderPaid } from "../services/orderNotification.service.js";
+import express from "express";
 import { requireAdminAuth } from "../middlewares/auth.middleware.js";
 import crypto from "crypto";
 import { env } from "../config/env.js";
@@ -1871,6 +1872,13 @@ router.post("/orders", async (req, res) => {
       });
     }
 
+    try {
+      await notifyOrderCreatedPending(createdOrder);
+    } catch (notificationError) {
+      console.error("ERRO AO ENVIAR NOTIFICAÇÃO DE PEDIDO PENDENTE:", notificationError);
+    }
+
+
    if (isPaymentSimulationEnabled()) {
   const simulatedPaymentUrl = new URL(
     "https://ozonteck-loja.onrender.com/pages-html/pagamento-simulado.html"
@@ -2117,12 +2125,18 @@ router.post("/payments/mercado-pago/webhook", async (req, res) => {
         };
       }
 
-        if (!alreadyPaidBeforeWebhook) {
+                if (!alreadyPaidBeforeWebhook) {
           metaPurchaseResult = await sendMetaPurchaseEvent({
             order: updatedOrder,
             items: orderItems,
             payment
           });
+
+          try {
+            await notifyOrderPaid(updatedOrder);
+          } catch (notificationError) {
+            console.error("ERRO AO ENVIAR NOTIFICAÇÃO DE PEDIDO PAGO:", notificationError);
+          }
         } else {
           metaPurchaseResult = {
             sent: false,
@@ -2289,14 +2303,21 @@ router.post("/payments/simulate/:orderNumber", async (req, res) => {
     };
   }
 
-  metaPurchaseResult = await sendMetaPurchaseEvent({
+   metaPurchaseResult = await sendMetaPurchaseEvent({
     order: updatedOrder,
     items: orderItems,
     payment: {
       id: `simulation_${updatedOrder.order_number}`
     }
   });
+
+  try {
+    await notifyOrderPaid(updatedOrder);
+  } catch (notificationError) {
+    console.error("ERRO AO ENVIAR NOTIFICAÇÃO DE PEDIDO PAGO NA SIMULAÇÃO:", notificationError);
+  }
 } else {
+
   affiliateConversionResult = {
     created: false,
     skipped: true,
