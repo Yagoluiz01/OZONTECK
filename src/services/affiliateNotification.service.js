@@ -1,7 +1,6 @@
 import nodemailer from "nodemailer";
 import { env } from "../config/env.js";
 
-
 function isEnabled() {
   return String(env.notificationsEnabled || "").toLowerCase() === "true";
 }
@@ -89,6 +88,24 @@ function buildAffiliateLink(affiliate = {}) {
   }
 }
 
+function buildAffiliatePanelLink() {
+  const baseUrl =
+    env.storeBaseUrl ||
+    env.publicStoreUrl ||
+    "https://ozonteck-loja.onrender.com";
+
+  try {
+    const url = new URL(baseUrl);
+
+    url.pathname = "/pages-html/afiliado-login.html";
+    url.search = "";
+
+    return url.toString();
+  } catch {
+    return "https://ozonteck-loja.onrender.com/pages-html/afiliado-login.html";
+  }
+}
+
 function escapeHtml(value) {
   return String(value || "")
     .replaceAll("&", "&amp;")
@@ -166,7 +183,7 @@ async function sendAffiliateEmail({
 
   const transporter = createTransporter();
 
-    await transporter.sendMail({
+  await transporter.sendMail({
     from: `"${env.smtpFromName || "OZONTECK"}" <${env.smtpFromEmail}>`,
     to: recipient,
     subject,
@@ -235,6 +252,7 @@ export async function notifyAffiliateApproved(affiliate) {
   const couponCode = getCouponCode(affiliate);
   const commissionRate = getCommissionRate(affiliate);
   const affiliateLink = buildAffiliateLink(affiliate);
+  const panelLink = buildAffiliatePanelLink();
 
   const subject = "Você foi aprovado no programa de afiliados OZONTECK";
 
@@ -248,6 +266,7 @@ export async function notifyAffiliateApproved(affiliate) {
     `Sua comissão: ${commissionRate}`,
     "",
     `Seu link de divulgação: ${affiliateLink}`,
+    `Acesse seu painel de afiliado: ${panelLink}`,
     "",
     "Agora você já pode divulgar a OZONTECK e acompanhar seus resultados pelo painel.",
     "",
@@ -259,19 +278,36 @@ export async function notifyAffiliateApproved(affiliate) {
   const html = `
     <div style="font-family: Arial, sans-serif; color: #111827; line-height: 1.6;">
       <h2 style="margin: 0 0 12px;">Afiliado aprovado</h2>
+
       <p>Olá, <strong>${escapeHtml(affiliateName)}</strong>.</p>
-      <p>Parabéns! Seu cadastro no programa de afiliados <strong>OZONTECK</strong> foi aprovado.</p>
+
+      <p>
+        Parabéns! Seu cadastro no programa de afiliados
+        <strong>OZONTECK</strong> foi aprovado.
+      </p>
 
       <div style="background: #f3f4f6; padding: 14px; border-radius: 10px; margin: 18px 0;">
         ${refCode ? `<p><strong>Código de indicação:</strong> ${escapeHtml(refCode)}</p>` : ""}
         ${couponCode ? `<p><strong>Cupom:</strong> ${escapeHtml(couponCode)}</p>` : ""}
         <p><strong>Comissão:</strong> ${escapeHtml(commissionRate)}</p>
+
         <p><strong>Link de divulgação:</strong><br />
-          <a href="${escapeHtml(affiliateLink)}" target="_blank">${escapeHtml(affiliateLink)}</a>
+          <a href="${escapeHtml(affiliateLink)}" target="_blank">
+            ${escapeHtml(affiliateLink)}
+          </a>
+        </p>
+
+        <p><strong>Painel do afiliado:</strong><br />
+          <a href="${escapeHtml(panelLink)}" target="_blank">
+            ${escapeHtml(panelLink)}
+          </a>
         </p>
       </div>
 
-      <p>Agora você já pode divulgar a OZONTECK e acompanhar seus resultados pelo painel.</p>
+      <p>
+        Agora você já pode divulgar a OZONTECK e acompanhar seus resultados pelo painel.
+      </p>
+
       <p style="margin-top: 24px;">Equipe OZONTECK</p>
     </div>
   `;
@@ -321,12 +357,16 @@ export async function notifyAffiliateRejected(application = {}) {
     type: "affiliate_rejected",
     to,
     subject,
-    text,
     html,
+    text,
   });
 }
 
-export async function notifyAffiliatePayoutPaid(affiliate, payout = {}, receiptFile = null) {
+export async function notifyAffiliatePayoutPaid(
+  affiliate,
+  payout = {},
+  receiptFile = null
+) {
   const to = getAffiliateEmail(affiliate);
   const affiliateName = getAffiliateName(affiliate);
   const amount = formatMoney(payout.amount);
@@ -399,22 +439,19 @@ export async function notifyAffiliatePayoutPaid(affiliate, payout = {}, receiptF
   });
 }
 
-
-
-
-
 export async function notifyAffiliateCommissionCreated(affiliate, conversion = {}) {
   const to = getAffiliateEmail(affiliate);
   const affiliateName = getAffiliateName(affiliate);
   const amount = formatMoney(conversion.commission_amount);
-  const orderNumber = conversion.order_number || conversion.orderNumber || "pedido indicado";
+  const orderNumber =
+    conversion.order_number || conversion.orderNumber || "pedido indicado";
 
   const subject = "Nova comissão gerada - OZONTECK";
 
   const text = [
     `Olá, ${affiliateName}.`,
     "",
-    `Uma nova comissão foi gerada para você no programa de afiliados OZONTECK.`,
+    "Uma nova comissão foi gerada para você no programa de afiliados OZONTECK.",
     "",
     `Pedido: ${orderNumber}`,
     `Valor da comissão: ${amount}`,
@@ -450,13 +487,10 @@ export async function notifyAffiliateCommissionCreated(affiliate, conversion = {
   });
 }
 
-
-
 export async function notifyAffiliatePasswordReset(affiliate, temporaryPassword) {
   const to = getAffiliateEmail(affiliate);
   const affiliateName = getAffiliateName(affiliate);
-
-  const loginUrl = "https://ozonteck-loja.onrender.com/pages-html/afiliado-login.html";
+  const loginUrl = buildAffiliatePanelLink();
 
   const subject = "Recuperação de senha do painel de afiliado OZONTECK";
 
@@ -492,9 +526,7 @@ export async function notifyAffiliatePasswordReset(affiliate, temporaryPassword)
         </p>
       </div>
 
-      <p>
-        Acesse o painel pelo link abaixo:
-      </p>
+      <p>Acesse o painel pelo link abaixo:</p>
 
       <p>
         <a href="${escapeHtml(loginUrl)}" target="_blank">

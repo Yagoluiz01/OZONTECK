@@ -259,6 +259,13 @@ function buildAffiliatePayload(input = {}, isUpdate = false) {
   );
   const pixKey = cleanText(input.pix_key || input.pixKey);
   const notes = cleanText(input.notes);
+  const passwordHash = cleanText(input.password_hash || input.passwordHash);
+  const accessEnabled =
+    input.access_enabled !== undefined
+      ? Boolean(input.access_enabled)
+      : input.accessEnabled !== undefined
+        ? Boolean(input.accessEnabled)
+        : undefined;
 
   const payload = {};
 
@@ -268,6 +275,14 @@ function buildAffiliatePayload(input = {}, isUpdate = false) {
   if (!isUpdate || refCode) payload.ref_code = refCode;
   if (!isUpdate || couponCode) payload.coupon_code = couponCode || null;
   if (!isUpdate || status) payload.status = status;
+
+  if (!isUpdate || passwordHash) {
+    if (passwordHash) payload.password_hash = passwordHash;
+  }
+
+  if (accessEnabled !== undefined) {
+    payload.access_enabled = accessEnabled;
+  }
 
   if (
     !isUpdate ||
@@ -600,6 +615,8 @@ export async function approveAffiliateApplication(id, input = {}) {
     email: application.email,
     phone: application.phone || null,
     pix_key: application.pix_key || null,
+    password_hash: application.password_hash || null,
+    access_enabled: true,
     ref_code: refCode,
     coupon_code: couponCode || null,
     commission_rate: commissionRate,
@@ -631,7 +648,6 @@ export async function approveAffiliateApplication(id, input = {}) {
         affiliate_id: affiliate.id,
         approved_at: new Date().toISOString(),
         rejected_at: null,
-        affiliate_id: affiliate.id,
         admin_notes:
           cleanText(input.admin_notes || input.adminNotes) || null,
         updated_at: new Date().toISOString(),

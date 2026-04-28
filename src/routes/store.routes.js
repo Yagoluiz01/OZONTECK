@@ -1,4 +1,4 @@
-﻿import {
+import {
   notifyOrderCreatedPending,
   notifyOrderPaid,
   notifyOrderPaymentPending,
@@ -9,6 +9,7 @@ import {
   notifyAffiliateCommissionCreated
 } from "../services/affiliateNotification.service.js";
 import express from "express";
+import bcrypt from "bcryptjs";
 import { requireAdminAuth } from "../middlewares/auth.middleware.js";
 import crypto from "crypto";
 import { env } from "../config/env.js";
@@ -273,6 +274,10 @@ async function createAffiliateApplication(input = {}) {
   const email = normalizeEmail(input.email);
   const phone = cleanText(input.phone || input.telefone);
   const pixKey = cleanText(input.pix_key || input.pixKey);
+  const password = String(input.password || "").trim();
+  const passwordConfirm = String(
+    input.password_confirm || input.passwordConfirm || ""
+  ).trim();
 
   if (!fullName) {
     throw new Error("Nome completo é obrigatório.");
@@ -298,6 +303,32 @@ async function createAffiliateApplication(input = {}) {
     throw new Error("Chave Pix é obrigatória.");
   }
 
+  if (!password) {
+    throw new Error("Senha é obrigatória.");
+  }
+
+  if (password.length < 8) {
+    throw new Error("A senha precisa ter pelo menos 8 caracteres.");
+  }
+
+  if (!/[A-Z]/.test(password)) {
+    throw new Error("A senha precisa ter pelo menos uma letra maiúscula.");
+  }
+
+  if (!/[a-z]/.test(password)) {
+    throw new Error("A senha precisa ter pelo menos uma letra minúscula.");
+  }
+
+  if (!/[0-9]/.test(password)) {
+    throw new Error("A senha precisa ter pelo menos um número.");
+  }
+
+  if (passwordConfirm && password !== passwordConfirm) {
+    throw new Error("As senhas não conferem.");
+  }
+
+  const passwordHash = await bcrypt.hash(password, 10);
+
   const existingPending = await findAffiliateApplicationByEmail(email);
 
   if (existingPending) {
@@ -317,6 +348,7 @@ async function createAffiliateApplication(input = {}) {
     email,
     phone,
     pix_key: pixKey,
+    password_hash: passwordHash,
     instagram: null,
     message: null,
     desired_ref_code: generatedCodes.refCode,
