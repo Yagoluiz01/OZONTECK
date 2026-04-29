@@ -7,6 +7,7 @@ import {
   getAffiliateById,
   createAffiliate,
   updateAffiliate,
+  updateAffiliateCommissionBulk,
   deleteAffiliate,
   listAffiliateConversions,
   listAffiliatePayouts,
@@ -42,6 +43,43 @@ function fail(res, error, status = 500) {
   });
 }
 
+
+function normalizeCommissionRate(value, fallback = 10) {
+  const raw = String(value ?? "")
+    .trim()
+    .replace("%", "")
+    .replace(",", ".");
+
+  const number = Number(raw);
+
+  if (!Number.isFinite(number)) {
+    return fallback;
+  }
+
+  if (number < 0 || number > 100) {
+    throw new Error("A porcentagem de comissão precisa estar entre 0 e 100.");
+  }
+
+  return Number(number.toFixed(2));
+}
+
+function sanitizeAffiliatePayload(input = {}, { defaultCommission = false } = {}) {
+  const payload = { ...(input || {}) };
+  const hasCommission = Object.prototype.hasOwnProperty.call(
+    payload,
+    "commission_rate"
+  );
+
+  if (hasCommission || defaultCommission) {
+    payload.commission_rate = normalizeCommissionRate(
+      payload.commission_rate,
+      10
+    );
+  }
+
+  return payload;
+}
+
 /**
  * SOLICITAÇÕES DE AFILIADOS
  */
@@ -56,7 +94,10 @@ router.get("/applications", async (req, res) => {
 
 router.post("/applications/:id/approve", async (req, res) => {
   try {
-    const result = await approveAffiliateApplication(req.params.id, req.body || {});
+    const result = await approveAffiliateApplication(
+      req.params.id,
+      sanitizeAffiliatePayload(req.body || {}, { defaultCommission: true })
+    );
 
     return ok(
       res,
@@ -110,6 +151,21 @@ router.get("/", async (req, res) => {
 });
 
 /**
+ * ALTERAR COMISSÃO EM MASSA
+ */
+router.patch("/bulk-commission", async (req, res) => {
+  try {
+    const result = await updateAffiliateCommissionBulk(
+      sanitizeAffiliatePayload(req.body || {})
+    );
+
+    return ok(res, result, result.message || "Comissão atualizada com sucesso.");
+  } catch (error) {
+    return fail(res, error, 400);
+  }
+});
+
+/**
  * BUSCAR AFILIADO POR ID
  */
 router.get("/:id", async (req, res) => {
@@ -131,7 +187,9 @@ router.get("/:id", async (req, res) => {
  */
 router.post("/", async (req, res) => {
   try {
-    const affiliate = await createAffiliate(req.body || {});
+    const affiliate = await createAffiliate(
+      sanitizeAffiliatePayload(req.body || {}, { defaultCommission: true })
+    );
     return ok(res, { affiliate }, "Afiliado criado com sucesso.");
   } catch (error) {
     return fail(res, error, 400);
@@ -143,7 +201,10 @@ router.post("/", async (req, res) => {
  */
 router.patch("/:id", async (req, res) => {
   try {
-    const affiliate = await updateAffiliate(req.params.id, req.body || {});
+    const affiliate = await updateAffiliate(
+      req.params.id,
+      sanitizeAffiliatePayload(req.body || {})
+    );
 
     if (!affiliate) {
       return fail(res, new Error("Afiliado não encontrado."), 404);

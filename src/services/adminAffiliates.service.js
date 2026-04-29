@@ -610,6 +610,18 @@ export async function approveAffiliateApplication(id, input = {}) {
     10
   );
 
+  const recruiterAffiliateId = cleanText(
+    input.recruiter_affiliate_id ||
+      input.recruiterAffiliateId ||
+      application.recruiter_affiliate_id
+  );
+
+  const recruiterRefCode = normalizeCode(
+    input.recruiter_ref_code ||
+      input.recruiterRefCode ||
+      application.recruiter_ref_code
+  );
+
   const affiliatePayload = {
     full_name: application.full_name,
     email: application.email,
@@ -620,6 +632,8 @@ export async function approveAffiliateApplication(id, input = {}) {
     ref_code: refCode,
     coupon_code: couponCode || null,
     commission_rate: commissionRate,
+    recruiter_affiliate_id: recruiterAffiliateId || null,
+    recruiter_ref_code: recruiterRefCode || null,
     status: "active",
     notes: cleanText(
       input.notes ||
@@ -705,6 +719,61 @@ export async function rejectAffiliateApplication(id, input = {}) {
   }
 
   return rejectedApplication;
+}
+
+export async function updateAffiliateCommissionBulk(input = {}) {
+  const commissionRate = toNumber(
+    input.commission_rate ?? input.commissionRate,
+    NaN
+  );
+  const status = cleanText(input.status);
+
+  if (!Number.isFinite(commissionRate)) {
+    throw new Error("Informe uma porcentagem de comissão válida.");
+  }
+
+  if (commissionRate < 0 || commissionRate > 100) {
+    throw new Error("A comissão precisa estar entre 0 e 100.");
+  }
+
+  if (status && !["active", "inactive", "blocked"].includes(status)) {
+    throw new Error("Status inválido para atualização em massa.");
+  }
+
+  const params = new URLSearchParams();
+
+  if (status) {
+    params.set("status", `eq.${status}`);
+  }
+
+  const query = params.toString();
+  const path = query ? `/affiliates?${query}` : "/affiliates";
+
+  const updatedRows = await supabaseRequest(path, {
+    method: "PATCH",
+    headers: {
+      Prefer: "return=representation",
+    },
+    body: JSON.stringify({
+      commission_rate: Number(commissionRate.toFixed(2)),
+    }),
+  });
+
+  const updated = Array.isArray(updatedRows) ? updatedRows.length : 0;
+  const scopeLabel = status
+    ? status === "active"
+      ? "afiliados ativos"
+      : status === "inactive"
+        ? "afiliados inativos"
+        : "afiliados bloqueados"
+    : "todos os afiliados";
+
+  return {
+    updated,
+    commission_rate: Number(commissionRate.toFixed(2)),
+    status: status || "all",
+    message: `Comissão de ${Number(commissionRate).toFixed(2)}% aplicada para ${updated} ${scopeLabel}.`,
+  };
 }
 
 export async function deleteAffiliate(id) {

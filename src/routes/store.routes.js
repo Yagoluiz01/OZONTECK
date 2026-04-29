@@ -328,6 +328,28 @@ async function createAffiliateApplication(input = {}) {
     throw new Error("As senhas não conferem.");
   }
 
+  const recruiterRefCode = normalizeAffiliateCode(
+    input.recruiter_ref_code ||
+      input.recruiterRefCode ||
+      input.recruiter ||
+      input.recrutador ||
+      input.indicado_por
+  );
+
+  let recruiterAffiliate = null;
+
+  if (recruiterRefCode) {
+    recruiterAffiliate = await findActiveAffiliateByRef(recruiterRefCode);
+
+    if (!recruiterAffiliate?.id) {
+      throw new Error("Código do afiliado recrutador não encontrado ou inativo.");
+    }
+
+    if (normalizeEmail(recruiterAffiliate.email) === email) {
+      throw new Error("Você não pode usar seu próprio código como recrutador.");
+    }
+  }
+
   const passwordHash = await bcrypt.hash(password, 10);
 
   const existingPending = await findAffiliateApplicationByEmail(email);
@@ -354,6 +376,8 @@ async function createAffiliateApplication(input = {}) {
     message: null,
     desired_ref_code: generatedCodes.refCode,
     desired_coupon_code: generatedCodes.couponCode,
+    recruiter_ref_code: recruiterAffiliate?.ref_code || recruiterRefCode || null,
+    recruiter_affiliate_id: recruiterAffiliate?.id || null,
     status: "pending",
     admin_notes: null,
   };
@@ -500,7 +524,37 @@ async function createAffiliateConversionForPaidOrder(order) {
   }
 
   const orderTotal = Number(order.total_amount || 0) || 0;
-  const commissionRate = Number(order.affiliate_commission_rate || 0) || 0;
+  let commissionRate = Number(order.affiliate_commission_rate || 0) || 0;
+
+  if (commissionRate <= 0 && order.affiliate_id) {
+    const affiliateRateUrl = new URL(`${env.supabaseUrl}/rest/v1/affiliates`);
+    affiliateRateUrl.searchParams.set("select", "commission_rate");
+    affiliateRateUrl.searchParams.set("id", `eq.${order.affiliate_id}`);
+    affiliateRateUrl.searchParams.set("limit", "1");
+
+    const affiliateRateResponse = await fetch(affiliateRateUrl.toString(), {
+      method: "GET",
+      headers: {
+        apikey: env.supabaseServiceRoleKey,
+        Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
+        "Content-Type": "application/json",
+        Accept: "application/json"
+      }
+    });
+
+    const affiliateRateData = await affiliateRateResponse
+      .json()
+      .catch(() => []);
+
+    if (
+      affiliateRateResponse.ok &&
+      Array.isArray(affiliateRateData) &&
+      affiliateRateData[0]?.commission_rate
+    ) {
+      commissionRate = Number(affiliateRateData[0].commission_rate || 0) || 0;
+    }
+  }
+
   const commissionAmount = Number(
     ((orderTotal * commissionRate) / 100).toFixed(2)
   );
