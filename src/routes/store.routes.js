@@ -488,18 +488,104 @@ async function createActivationOfferSafely(order, source = "unknown") {
 
 
 
-async function createAffiliateConversionForPaidOrder(order) {
-  if (!order?.id || !order?.affiliate_id) {
+function getRecruitmentBonusAmount(affiliate = {}) {
+  const configured =
+    process.env.AFFILIATE_RECRUITMENT_BONUS_AMOUNT ||
+    process.env.RECRUITMENT_BONUS_AMOUNT ||
+    affiliate.recruitment_bonus_amount ||
+    10;
+
+  const amount = Number(configured);
+
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return 10;
+  }
+
+  return Number(amount.toFixed(2));
+}
+
+async function findAffiliateById(affiliateId) {
+  const id = String(affiliateId || "").trim();
+
+  if (!id) {
+    return null;
+  }
+
+  const url = new URL(`${env.supabaseUrl}/rest/v1/affiliates`);
+  url.searchParams.set("select", "*");
+  url.searchParams.set("id", `eq.${id}`);
+  url.searchParams.set("limit", "1");
+
+  const response = await fetch(url.toString(), {
+    method: "GET",
+    headers: {
+      apikey: env.supabaseServiceRoleKey,
+      Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
+      "Content-Type": "application/json",
+      Accept: "application/json"
+    }
+  });
+
+  const data = await response.json().catch(() => []);
+
+  if (!response.ok || !Array.isArray(data) || !data[0]?.id) {
+    return null;
+  }
+
+  return data[0];
+}
+
+async function createRecruitmentBonusForPaidOrder(order, recruitedAffiliate, orderTotal) {
+  if (!order?.id || !recruitedAffiliate?.id) {
     return {
       created: false,
       skipped: true,
-      reason: "order_without_affiliate"
+      reason: "missing_recruited_affiliate"
+    };
+  }
+
+  const recruiterAffiliateId = String(
+    recruitedAffiliate.recruiter_affiliate_id || ""
+  ).trim();
+
+  if (!recruiterAffiliateId) {
+    return {
+      created: false,
+      skipped: true,
+      reason: "affiliate_without_recruiter"
+    };
+  }
+
+  if (recruiterAffiliateId === String(recruitedAffiliate.id)) {
+    return {
+      created: false,
+      skipped: true,
+      reason: "self_recruitment_blocked"
+    };
+  }
+
+  const recruiterAffiliate = await findAffiliateById(recruiterAffiliateId);
+
+  if (!recruiterAffiliate?.id) {
+    return {
+      created: false,
+      skipped: true,
+      reason: "recruiter_not_found"
+    };
+  }
+
+  if (String(recruiterAffiliate.status || "").toLowerCase() !== "active") {
+    return {
+      created: false,
+      skipped: true,
+      reason: "recruiter_not_active"
     };
   }
 
   const checkUrl = new URL(`${env.supabaseUrl}/rest/v1/affiliate_conversions`);
   checkUrl.searchParams.set("select", "id");
-  checkUrl.searchParams.set("order_id", `eq.${order.id}`);
+  checkUrl.searchParams.set("conversion_type", "eq.recruitment_bonus");
+  checkUrl.searchParams.set("recruited_affiliate_id", `eq.${recruitedAffiliate.id}`);
   checkUrl.searchParams.set("limit", "1");
 
   const checkResponse = await fetch(checkUrl.toString(), {
@@ -518,41 +604,129 @@ async function createAffiliateConversionForPaidOrder(order) {
     return {
       created: false,
       skipped: true,
-      reason: "conversion_already_exists",
+      reason: "recruitment_bonus_already_exists",
       conversionId: checkData[0].id
     };
   }
 
+  const bonusAmount = getRecruitmentBonusAmount(recruiterAffiliate);
+
+  const payload = {
+    affiliate_id: recruiterAffiliate.id,
+    order_id: order.id,
+    customer_id: null,
+    ref_code: recruiterAffiliate.ref_code || "",
+    coupon_code: recruiterAffiliate.coupon_code || "",
+    order_total: Number(orderTotal || order.total_amount || 0) || 0,
+    commission_rate: 0,
+    commission_amount: bonusAmount,
+    conversion_type: "recruitment_bonus",
+    recruited_affiliate_id: recruitedAffiliate.id,
+    recruitment_bonus_amount: bonusAmount,
+    status: "approved",
+    approved_at: new Date().toISOString(),
+    released_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+    metadata: {
+      source: "affiliate_recruitment_bonus",
+      order_id: order.id,
+      order_number: order.order_number || "",
+      recruited_affiliate_id: recruitedAffiliate.id,
+      recruited_affiliate_name: recruitedAffiliate.full_name || "",
+      recruited_affiliate_email: recruitedAffiliate.email || "",
+      recruited_affiliate_ref_code: recruitedAffiliate.ref_code || ""
+    },
+    notes: `Bônus de recrutamento criado automaticamente pela primeira venda paga do afiliado ${recruitedAffiliate.full_name || recruitedAffiliate.ref_code || recruitedAffiliate.id}.`
+  };
+
+  const createResponse = await fetch(`${env.supabaseUrl}/rest/v1/affiliate_conversions`, {
+    method: "POST",
+    headers: {
+      apikey: env.supabaseServiceRoleKey,
+      Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
+      "Content-Type": "application/json",
+      Prefer: "return=representation"
+    },
+    body: JSON.stringify(payload)
+  });
+
+  const createData = await createResponse.json().catch(() => []);
+
+  if (!createResponse.ok || !Array.isArray(createData) || !createData[0]?.id) {
+    console.error("ERRO SUPABASE RECRUITMENT BONUS:", createData);
+    throw new Error("Erro ao criar bônus de recrutamento do afiliado");
+  }
+
+  const conversion = createData[0];
+
+  try {
+    await notifyAffiliateCommissionCreated(recruiterAffiliate, {
+      ...conversion,
+      order_number: order.order_number || order.id
+    });
+  } catch (notificationError) {
+    console.error(
+      "ERRO AO ENVIAR NOTIFICAÇÃO DE BÔNUS DE RECRUTAMENTO:",
+      notificationError
+    );
+  }
+
+  return {
+    created: true,
+    skipped: false,
+    conversion
+  };
+}
+
+async function createAffiliateConversionForPaidOrder(order) {
+  if (!order?.id || !order?.affiliate_id) {
+    return {
+      created: false,
+      skipped: true,
+      reason: "order_without_affiliate"
+    };
+  }
+
   const orderTotal = Number(order.total_amount || 0) || 0;
+  const sellerAffiliate = await findAffiliateById(order.affiliate_id);
+
+  const checkUrl = new URL(`${env.supabaseUrl}/rest/v1/affiliate_conversions`);
+  checkUrl.searchParams.set("select", "id");
+  checkUrl.searchParams.set("order_id", `eq.${order.id}`);
+  checkUrl.searchParams.set("conversion_type", "eq.sale_commission");
+  checkUrl.searchParams.set("limit", "1");
+
+  const checkResponse = await fetch(checkUrl.toString(), {
+    method: "GET",
+    headers: {
+      apikey: env.supabaseServiceRoleKey,
+      Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
+      "Content-Type": "application/json",
+      Accept: "application/json"
+    }
+  });
+
+  const checkData = await checkResponse.json().catch(() => []);
+
+  if (checkResponse.ok && Array.isArray(checkData) && checkData[0]?.id) {
+    const recruitmentBonusResult = await createRecruitmentBonusForPaidOrder(
+      order,
+      sellerAffiliate,
+      orderTotal
+    );
+
+    return {
+      created: false,
+      skipped: true,
+      reason: "sale_commission_already_exists",
+      conversionId: checkData[0].id,
+      recruitmentBonus: recruitmentBonusResult
+    };
+  }
+
   let commissionRate = Number(order.affiliate_commission_rate || 0) || 0;
 
-  if (commissionRate <= 0 && order.affiliate_id) {
-    const affiliateRateUrl = new URL(`${env.supabaseUrl}/rest/v1/affiliates`);
-    affiliateRateUrl.searchParams.set("select", "commission_rate");
-    affiliateRateUrl.searchParams.set("id", `eq.${order.affiliate_id}`);
-    affiliateRateUrl.searchParams.set("limit", "1");
-
-    const affiliateRateResponse = await fetch(affiliateRateUrl.toString(), {
-      method: "GET",
-      headers: {
-        apikey: env.supabaseServiceRoleKey,
-        Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
-        "Content-Type": "application/json",
-        Accept: "application/json"
-      }
-    });
-
-    const affiliateRateData = await affiliateRateResponse
-      .json()
-      .catch(() => []);
-
-    if (
-      affiliateRateResponse.ok &&
-      Array.isArray(affiliateRateData) &&
-      affiliateRateData[0]?.commission_rate
-    ) {
-      commissionRate = Number(affiliateRateData[0].commission_rate || 0) || 0;
-    }
+  if (commissionRate <= 0 && sellerAffiliate?.commission_rate) {
+    commissionRate = Number(sellerAffiliate.commission_rate || 0) || 0;
   }
 
   const commissionAmount = Number(
@@ -571,15 +745,16 @@ async function createAffiliateConversionForPaidOrder(order) {
     affiliate_id: order.affiliate_id,
     order_id: order.id,
     customer_id: null,
-    ref_code: order.affiliate_ref_code || "",
-    coupon_code: order.affiliate_coupon_code || "",
+    ref_code: order.affiliate_ref_code || sellerAffiliate?.ref_code || "",
+    coupon_code: order.affiliate_coupon_code || sellerAffiliate?.coupon_code || "",
     order_total: orderTotal,
     commission_rate: commissionRate,
     commission_amount: commissionAmount,
+    conversion_type: "sale_commission",
     status: "approved",
     approved_at: new Date().toISOString(),
     released_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
-    notes: `ComissÃ£o criada automaticamente pelo pedido ${order.order_number || order.id}.`
+    notes: `Comissão criada automaticamente pelo pedido ${order.order_number || order.id}.`
   };
 
   const createResponse = await fetch(`${env.supabaseUrl}/rest/v1/affiliate_conversions`, {
@@ -593,34 +768,17 @@ async function createAffiliateConversionForPaidOrder(order) {
     body: JSON.stringify(payload)
   });
 
-      const createData = await createResponse.json().catch(() => []);
+  const createData = await createResponse.json().catch(() => []);
 
   if (!createResponse.ok || !Array.isArray(createData) || !createData[0]?.id) {
-    throw new Error("Erro ao criar comissÃ£o do afiliado");
+    throw new Error("Erro ao criar comissão do afiliado");
   }
 
   const conversion = createData[0];
 
   try {
-    const affiliateUrl = new URL(`${env.supabaseUrl}/rest/v1/affiliates`);
-    affiliateUrl.searchParams.set("select", "*");
-    affiliateUrl.searchParams.set("id", `eq.${order.affiliate_id}`);
-    affiliateUrl.searchParams.set("limit", "1");
-
-    const affiliateResponse = await fetch(affiliateUrl.toString(), {
-      method: "GET",
-      headers: {
-        apikey: env.supabaseServiceRoleKey,
-        Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
-        "Content-Type": "application/json",
-        Accept: "application/json"
-      }
-    });
-
-    const affiliateData = await affiliateResponse.json().catch(() => []);
-
-    if (affiliateResponse.ok && Array.isArray(affiliateData) && affiliateData[0]?.email) {
-      await notifyAffiliateCommissionCreated(affiliateData[0], {
+    if (sellerAffiliate?.email) {
+      await notifyAffiliateCommissionCreated(sellerAffiliate, {
         ...conversion,
         order_number: order.order_number || order.id
       });
@@ -638,10 +796,17 @@ async function createAffiliateConversionForPaidOrder(order) {
     );
   }
 
+  const recruitmentBonusResult = await createRecruitmentBonusForPaidOrder(
+    order,
+    sellerAffiliate,
+    orderTotal
+  );
+
   return {
     created: true,
     skipped: false,
-    conversion
+    conversion,
+    recruitmentBonus: recruitmentBonusResult
   };
 }
 
