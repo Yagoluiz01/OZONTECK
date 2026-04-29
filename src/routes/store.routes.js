@@ -1,4 +1,4 @@
-import {
+﻿import {
   notifyOrderCreatedPending,
   notifyOrderPaid,
   notifyOrderPaymentPending,
@@ -19,6 +19,7 @@ import {
 } from "../services/melhorEnvio.service.js";
 import { generateAutomaticShippingLabel } from "../services/shipping.service.js";
 import { processPaidOrder } from "../jobs/processPaidOrder.js";
+import { createActivationOfferForPaidOrder } from "../services/customerActivation.service.js";
 
 const router = express.Router();
 
@@ -427,6 +428,41 @@ async function findActiveAffiliateByRef(refCode) {
 
   return data[0];
 }
+
+async function createActivationOfferSafely(order, source = "unknown") {
+  try {
+    const result = await createActivationOfferForPaidOrder(order);
+
+    console.log("CUSTOMER ACTIVATION OFFER RESULT:", {
+      source,
+      orderId: order?.id || null,
+      orderNumber: order?.order_number || null,
+      created: result?.created || false,
+      skipped: result?.skipped || false,
+      reason: result?.reason || "",
+    });
+
+    return result;
+  } catch (error) {
+    console.error("ERRO AO CRIAR CONDIÇÃO DE ATIVAÇÃO:", {
+      source,
+      orderId: order?.id || null,
+      orderNumber: order?.order_number || null,
+      error: error?.message || String(error),
+    });
+
+    return {
+      success: false,
+      created: false,
+      skipped: false,
+      reason: "activation_offer_unexpected_error",
+      error: error?.message || String(error),
+    };
+  }
+}
+
+
+
 
 async function createAffiliateConversionForPaidOrder(order) {
   if (!order?.id || !order?.affiliate_id) {
@@ -2184,6 +2220,7 @@ router.post("/payments/mercado-pago/webhook", async (req, res) => {
     let labelResult = null;
     let metaPurchaseResult = null;
     let affiliateConversionResult = null;
+    let activationOfferResult = null;
 
     if (paymentStatus === "approved") {
       try {
@@ -2194,21 +2231,28 @@ router.post("/payments/mercado-pago/webhook", async (req, res) => {
 
         const orderItems = await findOrderItems(updatedOrder.id);
 
-        const alreadyPaidBeforeWebhook =
-          String(previousOrder?.payment_status || "").trim().toLowerCase() === "paid";
 
-          if (!alreadyPaidBeforeWebhook) {
-        try {
-          affiliateConversionResult = await createAffiliateConversionForPaidOrder(updatedOrder);
-        } catch (affiliateError) {
-          console.error("ERRO AO CRIAR COMISSÃƒO DO AFILIADO:", affiliateError);
-          affiliateConversionResult = {
-            created: false,
-            skipped: false,
-            error: affiliateError.message || "Erro ao criar comissÃ£o do afiliado"
-          };
-        }
-      } else {
+        activationOfferResult = await createActivationOfferSafely(
+  updatedOrder,
+  "mercado_pago_webhook"
+);
+
+const alreadyPaidBeforeWebhook =
+  String(previousOrder?.payment_status || "").trim().toLowerCase() === "paid";
+
+if (!alreadyPaidBeforeWebhook) {
+  try {
+    affiliateConversionResult = await createAffiliateConversionForPaidOrder(updatedOrder);
+  } catch (affiliateError) {
+    console.error("ERRO AO CRIAR COMISSÃO DO AFILIADO:", affiliateError);
+
+    affiliateConversionResult = {
+      created: false,
+      skipped: false,
+      error: affiliateError.message || "Erro ao criar comissão do afiliado",
+    };
+  }
+} else {
         affiliateConversionResult = {
           created: false,
           skipped: true,
@@ -2292,7 +2336,8 @@ router.post("/payments/mercado-pago/webhook", async (req, res) => {
   externalReference,
   label: labelResult,
   metaPurchase: metaPurchaseResult,
-  affiliateConversion: affiliateConversionResult
+  affiliateConversion: affiliateConversionResult,
+  activationOffer: activationOfferResult
 });
   } catch (error) {
     console.error("ERRO NO WEBHOOK DO MERCADO PAGO:", error);
@@ -2374,8 +2419,9 @@ router.post("/payments/simulate/:orderNumber", async (req, res) => {
       directOrderUpdate.data.length
     ) {
       const updatedOrder = directOrderUpdate.data[0];
-      let metaPurchaseResult = null;
-      let affiliateConversionResult = null;
+        let metaPurchaseResult = null;
+        let affiliateConversionResult = null;
+        let activationOfferResult = null;
 
       if ((status === "approved" || status === "paid") && updatedOrder?.id) {
         try {
@@ -2386,18 +2432,23 @@ router.post("/payments/simulate/:orderNumber", async (req, res) => {
 
           if (!alreadyPaidBeforeSimulation) {
   try {
-    affiliateConversionResult = await createAffiliateConversionForPaidOrder(updatedOrder);
-  } catch (affiliateError) {
-    console.error("ERRO AO CRIAR COMISSÃƒO DO AFILIADO NA SIMULAÃ‡ÃƒO:", affiliateError);
+  affiliateConversionResult = await createAffiliateConversionForPaidOrder(updatedOrder);
+} catch (affiliateError) {
+  console.error("ERRO AO CRIAR COMISSÃO DO AFILIADO NA SIMULAÇÃO:", affiliateError);
 
-    affiliateConversionResult = {
-      created: false,
-      skipped: false,
-      error: affiliateError.message || "Erro ao criar comissÃ£o do afiliado na simulaÃ§Ã£o"
-    };
-  }
+  affiliateConversionResult = {
+    created: false,
+    skipped: false,
+    error: affiliateError.message || "Erro ao criar comissão do afiliado na simulação",
+  };
+}
 
-   metaPurchaseResult = await sendMetaPurchaseEvent({
+activationOfferResult = await createActivationOfferSafely(
+  updatedOrder,
+  "payment_simulation"
+);
+
+metaPurchaseResult = await sendMetaPurchaseEvent({
     order: updatedOrder,
     items: orderItems,
     payment: {
@@ -2441,12 +2492,14 @@ router.post("/payments/simulate/:orderNumber", async (req, res) => {
         }
       }
 
-      return res.status(200).json({
-        success: true,
-        message: "Pagamento simulado com sucesso",
-        order: updatedOrder,
-        metaPurchase: metaPurchaseResult
-      });
+     return res.status(200).json({
+  success: true,
+  message: "Pagamento simulado com sucesso",
+  order: updatedOrder,
+  metaPurchase: metaPurchaseResult,
+  affiliateConversion: affiliateConversionResult,
+  activationOffer: activationOfferResult
+});
     }
 
     const findUrl = new URL(`${env.supabaseUrl}/rest/v1/orders`);
@@ -2491,6 +2544,7 @@ router.post("/payments/simulate/:orderNumber", async (req, res) => {
     const updatedOrder = fallbackUpdate.data[0];
     let metaPurchaseResult = null;
     let affiliateConversionResult = null;
+    let activationOfferResult = null;
 
 
         async function notifySimulationPaymentStatus(order) {
@@ -2517,23 +2571,34 @@ router.post("/payments/simulate/:orderNumber", async (req, res) => {
       try {
         const orderItems = await findOrderItems(updatedOrder.id);
 
-        const alreadyPaidBeforeSimulation =
-          String(previousOrder?.payment_status || "").trim().toLowerCase() === "paid";
+          activationOfferResult = await createActivationOfferSafely(
+            updatedOrder,
+            "payment_simulation_fallback"
+          );
 
-        if (!alreadyPaidBeforeSimulation) {
+
+    const alreadyPaidBeforeSimulation =
+  String(previousOrder?.payment_status || "").trim().toLowerCase() === "paid";
+
+activationOfferResult = await createActivationOfferSafely(
+  updatedOrder,
+  "payment_simulation"
+);
+
+if (!alreadyPaidBeforeSimulation) {
   try {
     affiliateConversionResult = await createAffiliateConversionForPaidOrder(updatedOrder);
   } catch (affiliateError) {
-    console.error("ERRO AO CRIAR COMISSÃƒO DO AFILIADO NA SIMULAÃ‡ÃƒO:", affiliateError);
+    console.error("ERRO AO CRIAR COMISSÃO DO AFILIADO NA SIMULAÇÃO:", affiliateError);
 
     affiliateConversionResult = {
       created: false,
       skipped: false,
-      error: affiliateError.message || "Erro ao criar comissÃ£o do afiliado na simulaÃ§Ã£o"
+      error: affiliateError.message || "Erro ao criar comissão do afiliado na simulação",
     };
   }
 
-     metaPurchaseResult = await sendMetaPurchaseEvent({
+  metaPurchaseResult = await sendMetaPurchaseEvent({
     order: updatedOrder,
     items: orderItems,
     payment: {
@@ -2541,7 +2606,11 @@ router.post("/payments/simulate/:orderNumber", async (req, res) => {
     }
   });
 
-  await notifySimulationPaymentStatus(updatedOrder);
+  try {
+    await notifyOrderPaid(updatedOrder);
+  } catch (notificationError) {
+    console.error("ERRO AO ENVIAR NOTIFICAÇÃO DE PEDIDO PAGO NA SIMULAÇÃO:", notificationError);
+  }
 } else {
 
   affiliateConversionResult = {
@@ -2582,11 +2651,13 @@ router.post("/payments/simulate/:orderNumber", async (req, res) => {
 
 
     return res.status(200).json({
-      success: true,
-      message: "Pagamento simulado com sucesso",
-      order: updatedOrder,
-      metaPurchase: metaPurchaseResult
-    });
+  success: true,
+  message: "Pagamento simulado com sucesso",
+  order: updatedOrder,
+  metaPurchase: metaPurchaseResult,
+  affiliateConversion: affiliateConversionResult,
+  activationOffer: activationOfferResult
+});
   } catch (error) {
     console.error("ERRO AO SIMULAR PAGAMENTO:", error);
 
