@@ -267,6 +267,14 @@ function buildAffiliatePayload(input = {}, isUpdate = false) {
         ? Boolean(input.accessEnabled)
         : undefined;
 
+        const recruiterAffiliateId = cleanText(
+  input.recruiter_affiliate_id || input.recruiterAffiliateId
+);
+
+const recruiterRefCode = normalizeCode(
+  input.recruiter_ref_code || input.recruiterRefCode
+);
+
   const payload = {};
 
   if (!isUpdate || fullName) payload.full_name = fullName;
@@ -294,6 +302,22 @@ function buildAffiliatePayload(input = {}, isUpdate = false) {
 
   if (!isUpdate || pixKey) payload.pix_key = pixKey || null;
   if (!isUpdate || notes) payload.notes = notes || null;
+
+  if (
+  !isUpdate ||
+  input.recruiter_affiliate_id !== undefined ||
+  input.recruiterAffiliateId !== undefined
+) {
+  payload.recruiter_affiliate_id = recruiterAffiliateId || null;
+}
+
+if (
+  !isUpdate ||
+  input.recruiter_ref_code !== undefined ||
+  input.recruiterRefCode !== undefined
+) {
+  payload.recruiter_ref_code = recruiterRefCode || null;
+}
 
   if (!isUpdate) {
     if (!payload.full_name) throw new Error("Nome do afiliado é obrigatório.");
