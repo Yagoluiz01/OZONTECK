@@ -8,6 +8,9 @@ import {
   createAffiliate,
   updateAffiliate,
   updateAffiliateCommissionBulk,
+  listAffiliateNetwork,
+  listAffiliateNetworkApplications,
+  getAffiliateNetwork,
   deleteAffiliate,
   listAffiliateConversions,
   listAffiliatePayouts,
@@ -160,6 +163,32 @@ router.patch("/bulk-commission", async (req, res) => {
     );
 
     return ok(res, result, result.message || "Comissão atualizada com sucesso.");
+  } catch (error) {
+    return fail(res, error, 400);
+  }
+});
+
+
+/**
+ * REDE DE AFILIADOS
+ */
+router.get("/network", async (req, res) => {
+  try {
+    const [network, applications] = await Promise.all([
+      listAffiliateNetwork(req.query || {}),
+      listAffiliateNetworkApplications(req.query || {}),
+    ]);
+
+    return ok(res, { network, applications });
+  } catch (error) {
+    return fail(res, error);
+  }
+});
+
+router.get("/:id/network", async (req, res) => {
+  try {
+    const result = await getAffiliateNetwork(req.params.id);
+    return ok(res, result);
   } catch (error) {
     return fail(res, error, 400);
   }

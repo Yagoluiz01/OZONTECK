@@ -3,6 +3,7 @@ import {
   getAffiliateOrders,
   getAffiliatePayouts,
   getAffiliateSummary,
+  getAffiliateNetwork,
   loginAffiliate,
   requestAffiliatePasswordReset,
   updateAffiliateProfile,
@@ -106,6 +107,19 @@ export async function payouts(req, res) {
     return res.json({
       success: true,
       payouts: result,
+    });
+  } catch (error) {
+    return sendError(res, error);
+  }
+}
+
+export async function network(req, res) {
+  try {
+    const result = await getAffiliateNetwork(req.affiliateId);
+
+    return res.json({
+      success: true,
+      ...result,
     });
   } catch (error) {
     return sendError(res, error);

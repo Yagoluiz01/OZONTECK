@@ -377,6 +377,68 @@ export async function getAffiliatePayouts(affiliateId) {
   }));
 }
 
+export async function getAffiliateNetwork(affiliateId) {
+  const affiliate = await getAffiliateById(affiliateId);
+
+  const [networkRows, applicationRows] = await Promise.all([
+    supabaseRequest(
+      `/affiliate_network_view?recruiter_affiliate_id=eq.${encodeURIComponent(affiliateId)}&select=*&order=recruited_created_at.desc`
+    ),
+    supabaseRequest(
+      `/affiliate_network_applications_view?recruiter_affiliate_id=eq.${encodeURIComponent(affiliateId)}&select=*&order=created_at.desc`
+    ),
+  ]);
+
+  const recruited = Array.isArray(networkRows) ? networkRows : [];
+  const applications = Array.isArray(applicationRows) ? applicationRows : [];
+
+  const pendingApplications = applications.filter((item) =>
+    String(item.status || "").toLowerCase() === "pending"
+  );
+
+  const activated = recruited.filter((item) => item.network_status === "activated");
+
+  const summary = {
+    recruited_total: recruited.length,
+    pending_total: pendingApplications.length,
+    active_total: recruited.filter((item) => item.recruited_status === "active").length,
+    activated_total: activated.length,
+    recruited_total_sales: recruited.reduce((sum, item) => sum + normalizeMoney(item.recruited_total_sales), 0),
+    recruited_total_commission: recruited.reduce((sum, item) => sum + normalizeMoney(item.recruited_total_commission), 0),
+    recruitment_bonus_total: recruited.reduce((sum, item) => sum + normalizeMoney(item.recruiter_bonus_from_recruited), 0),
+  };
+
+  return {
+    affiliate,
+    summary,
+    recruited: recruited.map((item) => ({
+      id: item.recruited_affiliate_id,
+      full_name: item.recruited_name,
+      email: maskEmail(item.recruited_email),
+      phone: item.recruited_phone || null,
+      ref_code: item.recruited_ref_code,
+      coupon_code: item.recruited_coupon_code,
+      status: item.recruited_status,
+      network_status: item.network_status,
+      total_sales: normalizeMoney(item.recruited_total_sales),
+      total_commission: normalizeMoney(item.recruited_total_commission),
+      total_conversions: Number(item.recruited_total_conversions || 0),
+      bonus_from_recruited: normalizeMoney(item.recruiter_bonus_from_recruited),
+      created_at: item.recruited_created_at || null,
+    })),
+    applications: pendingApplications.map((item) => ({
+      id: item.application_id,
+      full_name: item.full_name,
+      email: maskEmail(item.email),
+      phone: item.phone || null,
+      desired_ref_code: item.desired_ref_code,
+      desired_coupon_code: item.desired_coupon_code,
+      status: item.status,
+      created_at: item.created_at || null,
+    })),
+  };
+}
+
 export async function updateAffiliateProfile(affiliateId, payload = {}) {
   const allowedPixTypes = ["cpf", "cnpj", "email", "phone", "random"];
   const pixKey = String(payload.pix_key || "").trim();

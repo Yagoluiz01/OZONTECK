@@ -800,6 +800,92 @@ export async function updateAffiliateCommissionBulk(input = {}) {
   };
 }
 
+export async function listAffiliateNetwork(filters = {}) {
+  const recruiterAffiliateId = cleanText(filters.recruiter_affiliate_id || filters.recruiterAffiliateId);
+  const recruiterRefCode = normalizeCode(filters.recruiter_ref_code || filters.recruiterRefCode);
+
+  const params = new URLSearchParams();
+  params.set("select", "*");
+  params.set("order", "recruited_created_at.desc");
+
+  if (recruiterAffiliateId) {
+    params.set("recruiter_affiliate_id", `eq.${recruiterAffiliateId}`);
+  }
+
+  if (recruiterRefCode) {
+    params.set("recruiter_ref_code", `eq.${recruiterRefCode}`);
+  }
+
+  const rows = await supabaseRequest(`/affiliate_network_view?${params.toString()}`);
+  return Array.isArray(rows) ? rows : [];
+}
+
+export async function listAffiliateNetworkApplications(filters = {}) {
+  const recruiterAffiliateId = cleanText(filters.recruiter_affiliate_id || filters.recruiterAffiliateId);
+  const recruiterRefCode = normalizeCode(filters.recruiter_ref_code || filters.recruiterRefCode);
+  const status = cleanText(filters.status);
+
+  const params = new URLSearchParams();
+  params.set("select", "*");
+  params.set("order", "created_at.desc");
+
+  if (recruiterAffiliateId) {
+    params.set("recruiter_affiliate_id", `eq.${recruiterAffiliateId}`);
+  }
+
+  if (recruiterRefCode) {
+    params.set("recruiter_ref_code", `eq.${recruiterRefCode}`);
+  }
+
+  if (status) {
+    params.set("status", `eq.${status}`);
+  }
+
+  const rows = await supabaseRequest(`/affiliate_network_applications_view?${params.toString()}`);
+  return Array.isArray(rows) ? rows : [];
+}
+
+export async function getAffiliateNetwork(affiliateId) {
+  const affiliate = await getAffiliateById(affiliateId);
+
+  if (!affiliate?.id) {
+    throw new Error("Afiliado não encontrado para consultar rede.");
+  }
+
+  const [recruited, applications] = await Promise.all([
+    listAffiliateNetwork({ recruiter_affiliate_id: affiliate.id }),
+    listAffiliateNetworkApplications({ recruiter_affiliate_id: affiliate.id }),
+  ]);
+
+  const approvedApplications = applications.filter((item) =>
+    String(item.status || "").toLowerCase() === "approved"
+  );
+
+  const pendingApplications = applications.filter((item) =>
+    String(item.status || "").toLowerCase() === "pending"
+  );
+
+  const activated = recruited.filter((item) => item.network_status === "activated");
+
+  const summary = {
+    recruited_total: recruited.length,
+    pending_total: pendingApplications.length,
+    approved_applications_total: approvedApplications.length,
+    active_total: recruited.filter((item) => item.recruited_status === "active").length,
+    activated_total: activated.length,
+    recruited_total_sales: recruited.reduce((sum, item) => sum + Number(item.recruited_total_sales || 0), 0),
+    recruited_total_commission: recruited.reduce((sum, item) => sum + Number(item.recruited_total_commission || 0), 0),
+    recruitment_bonus_total: recruited.reduce((sum, item) => sum + Number(item.recruiter_bonus_from_recruited || 0), 0),
+  };
+
+  return {
+    affiliate,
+    summary,
+    recruited,
+    applications,
+  };
+}
+
 export async function deleteAffiliate(id) {
   const affiliateId = cleanText(id);
 
