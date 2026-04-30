@@ -948,3 +948,130 @@ export async function deleteAffiliate(id) {
 
   return deleted?.[0] || affiliate;
 }
+
+export async function listAffiliateLevels() {
+  const params = new URLSearchParams();
+  params.set("select", "*");
+  params.set("order", "level_order.asc");
+
+  const rows = await supabaseRequest(`/affiliate_levels?${params.toString()}`);
+  return Array.isArray(rows) ? rows : [];
+}
+
+export async function listAffiliateGoalOverview(filters = {}) {
+  const search = cleanText(filters.search);
+  const status = cleanText(filters.status);
+  const levelName = cleanText(filters.level_name || filters.levelName);
+  const affiliateId = cleanText(filters.affiliate_id || filters.affiliateId);
+
+  const params = new URLSearchParams();
+  params.set("select", "*");
+  params.set("order", "full_name.asc");
+
+  if (affiliateId) {
+    params.set("affiliate_id", `eq.${affiliateId}`);
+  }
+
+  if (status) {
+    params.set("status", `eq.${status}`);
+  }
+
+  if (levelName) {
+    params.set("current_level_name", `eq.${levelName}`);
+  }
+
+  if (search) {
+    params.set(
+      "or",
+      `(full_name.ilike.*${search}*,email.ilike.*${search}*)`
+    );
+  }
+
+  const rows = await supabaseRequest(`/affiliate_goal_overview?${params.toString()}`);
+  return Array.isArray(rows) ? rows : [];
+}
+
+export async function listAffiliateBonusOverview(filters = {}) {
+  const search = cleanText(filters.search);
+  const status = cleanText(filters.status);
+  const affiliateId = cleanText(filters.affiliate_id || filters.affiliateId);
+  const levelName = cleanText(filters.level_name || filters.levelName);
+
+  const params = new URLSearchParams();
+  params.set("select", "*");
+  params.set("order", "released_at.desc");
+
+  if (affiliateId) {
+    params.set("affiliate_id", `eq.${affiliateId}`);
+  }
+
+  if (status) {
+    params.set("status", `eq.${status}`);
+  }
+
+  if (levelName) {
+    params.set("level_name", `eq.${levelName}`);
+  }
+
+  if (search) {
+    params.set(
+      "or",
+      `(full_name.ilike.*${search}*,email.ilike.*${search}*,level_name.ilike.*${search}*)`
+    );
+  }
+
+  const rows = await supabaseRequest(`/affiliate_bonus_overview?${params.toString()}`);
+  return Array.isArray(rows) ? rows : [];
+}
+
+export async function processAffiliateLevelProgress(id) {
+  const affiliateId = cleanText(id);
+
+  if (!affiliateId) {
+    throw new Error("ID do afiliado é obrigatório.");
+  }
+
+  const rows = await supabaseRequest("/rpc/process_affiliate_level_progress", {
+    method: "POST",
+    headers: {
+      Prefer: "return=representation",
+    },
+    body: JSON.stringify({
+      p_affiliate_id: affiliateId,
+    }),
+  });
+
+  return Array.isArray(rows) ? rows[0] : rows;
+}
+
+export async function updateAffiliateLevelBonusStatus(id, input = {}) {
+  const bonusId = cleanText(id || input.id || input.bonus_id || input.bonusId);
+  const status = cleanText(input.status).toLowerCase();
+  const adminNotes = cleanText(input.admin_notes || input.adminNotes || input.notes);
+
+  if (!bonusId) {
+    throw new Error("ID do bônus é obrigatório.");
+  }
+
+  if (!status) {
+    throw new Error("Informe o novo status do bônus.");
+  }
+
+  if (!["pending", "approved", "paid", "cancelled"].includes(status)) {
+    throw new Error("Status inválido. Use pending, approved, paid ou cancelled.");
+  }
+
+  const rows = await supabaseRequest("/rpc/update_affiliate_level_bonus_status", {
+    method: "POST",
+    headers: {
+      Prefer: "return=representation",
+    },
+    body: JSON.stringify({
+      p_bonus_id: bonusId,
+      p_status: status,
+      p_admin_notes: adminNotes || null,
+    }),
+  });
+
+  return Array.isArray(rows) ? rows[0] : rows;
+}

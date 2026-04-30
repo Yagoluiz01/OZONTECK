@@ -18,6 +18,11 @@ import {
   listAffiliateApplications,
   approveAffiliateApplication,
   rejectAffiliateApplication,
+  listAffiliateLevels,
+  listAffiliateGoalOverview,
+  listAffiliateBonusOverview,
+  processAffiliateLevelProgress,
+  updateAffiliateLevelBonusStatus,
 } from "../services/adminAffiliates.service.js";
 
 const router = express.Router();
@@ -189,6 +194,62 @@ router.get("/:id/network", async (req, res) => {
   try {
     const result = await getAffiliateNetwork(req.params.id);
     return ok(res, result);
+  } catch (error) {
+    return fail(res, error, 400);
+  }
+});
+
+/**
+ * METAS, NÍVEIS E BÔNUS EVOLUTIVOS
+ */
+router.get("/levels", async (req, res) => {
+  try {
+    const levels = await listAffiliateLevels();
+    return ok(res, { levels });
+  } catch (error) {
+    return fail(res, error);
+  }
+});
+
+router.get("/goals/overview", async (req, res) => {
+  try {
+    const goals = await listAffiliateGoalOverview(req.query || {});
+    return ok(res, { goals });
+  } catch (error) {
+    return fail(res, error);
+  }
+});
+
+router.get("/level-bonuses", async (req, res) => {
+  try {
+    const bonuses = await listAffiliateBonusOverview(req.query || {});
+    return ok(res, { bonuses });
+  } catch (error) {
+    return fail(res, error);
+  }
+});
+
+router.patch("/level-bonuses/:bonusId/status", async (req, res) => {
+  try {
+    const result = await updateAffiliateLevelBonusStatus(
+      req.params.bonusId,
+      req.body || {}
+    );
+
+    return ok(
+      res,
+      { result },
+      result?.message || "Status do bônus atualizado com sucesso."
+    );
+  } catch (error) {
+    return fail(res, error, 400);
+  }
+});
+
+router.post("/:id/process-level-progress", async (req, res) => {
+  try {
+    const result = await processAffiliateLevelProgress(req.params.id);
+    return ok(res, { result }, result?.message || "Progresso processado.");
   } catch (error) {
     return fail(res, error, 400);
   }

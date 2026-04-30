@@ -259,7 +259,29 @@ export async function getAffiliateById(affiliateId) {
 export async function getAffiliateSummary(affiliateId) {
   const affiliate = await getAffiliateById(affiliateId);
 
-  const [orders, payouts] = await Promise.all([
+  /*
+    Processa a evolução do afiliado antes de montar o resumo.
+    Segurança:
+    - A função do banco só libera bônus se a meta realmente foi batida.
+    - Se ainda não bateu a meta, ela apenas retorna "Meta ainda não concluída".
+    - Não cria bônus duplicado por causa da trava unique no banco.
+  */
+  try {
+    await supabaseRequest("/rpc/process_affiliate_level_progress", {
+      method: "POST",
+      body: {
+        p_affiliate_id: affiliateId,
+      },
+    });
+  } catch (error) {
+    console.error("AFFILIATE LEVEL PROCESS ERROR:", {
+      affiliateId,
+      message: error?.message,
+      details: error?.details,
+    });
+  }
+
+  const [orders, payouts, goalRows, bonusRows] = await Promise.all([
     supabaseRequest(
       `/orders?affiliate_id=eq.${encodeURIComponent(
         affiliateId
@@ -270,10 +292,22 @@ export async function getAffiliateSummary(affiliateId) {
         affiliateId
       )}&select=id,amount,status,created_at`
     ),
+    supabaseRequest(
+      `/affiliate_goal_overview?affiliate_id=eq.${encodeURIComponent(
+        affiliateId
+      )}&select=*&limit=1`
+    ),
+    supabaseRequest(
+      `/affiliate_bonus_overview?affiliate_id=eq.${encodeURIComponent(
+        affiliateId
+      )}&select=*&order=released_at.desc&limit=50`
+    ),
   ]);
 
   const safeOrders = Array.isArray(orders) ? orders : [];
   const safePayouts = Array.isArray(payouts) ? payouts : [];
+  const goal = Array.isArray(goalRows) ? goalRows[0] : null;
+  const bonuses = Array.isArray(bonusRows) ? bonusRows : [];
 
   const summary = safeOrders.reduce(
     (acc, order) => {
@@ -325,9 +359,60 @@ export async function getAffiliateSummary(affiliateId) {
     0
   );
 
+  const level_goal = goal
+    ? {
+        affiliate_id: goal.affiliate_id,
+        current_level_order: Number(goal.current_level_order || 1),
+        current_level_name: goal.current_level_name || "Iniciante",
+        current_goal: Number(goal.current_goal || 3),
+        paid_conversions: Number(goal.paid_conversions || 0),
+        progress_percent: Number(goal.progress_percent || 0),
+        remaining_to_goal: Number(goal.remaining_to_goal || 0),
+        current_bonus_amount: normalizeMoney(goal.current_bonus_amount),
+        current_bonus_type: goal.current_bonus_type || "money",
+        next_level_order: goal.next_level_order || null,
+        next_level_name: goal.next_level_name || null,
+        pending_bonus_amount: normalizeMoney(goal.pending_bonus_amount),
+        paid_bonus_amount: normalizeMoney(goal.paid_bonus_amount),
+        total_bonus_amount: normalizeMoney(goal.total_bonus_amount),
+      }
+    : {
+        affiliate_id: affiliateId,
+        current_level_order: 1,
+        current_level_name: "Iniciante",
+        current_goal: 3,
+        paid_conversions: 0,
+        progress_percent: 0,
+        remaining_to_goal: 3,
+        current_bonus_amount: 20,
+        current_bonus_type: "money",
+        next_level_order: 2,
+        next_level_name: "Bronze",
+        pending_bonus_amount: 0,
+        paid_bonus_amount: 0,
+        total_bonus_amount: 0,
+      };
+
+  const level_bonuses = bonuses.map((bonus) => ({
+    id: bonus.id,
+    affiliate_id: bonus.affiliate_id,
+    level_order: Number(bonus.level_order || 0),
+    level_name: bonus.level_name,
+    bonus_amount: normalizeMoney(bonus.bonus_amount),
+    bonus_type: bonus.bonus_type || "money",
+    status: bonus.status || "pending",
+    released_at: bonus.released_at || null,
+    approved_at: bonus.approved_at || null,
+    paid_at: bonus.paid_at || null,
+    admin_notes: bonus.admin_notes || null,
+    created_at: bonus.created_at || null,
+  }));
+
   return {
     affiliate,
     summary,
+    level_goal,
+    level_bonuses,
   };
 }
 

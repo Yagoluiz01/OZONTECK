@@ -81,6 +81,8 @@ export async function summary(req, res) {
       success: true,
       affiliate: result.affiliate,
       summary: result.summary,
+      level_goal: result.level_goal,
+      level_bonuses: result.level_bonuses,
     });
   } catch (error) {
     return sendError(res, error);
