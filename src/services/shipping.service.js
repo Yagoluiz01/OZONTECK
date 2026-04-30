@@ -44,9 +44,13 @@ function buildFailureResult(order, error = "", extra = {}) {
 
 function getStoreOriginZipCode() {
   return onlyDigits(
-    process.env.STORE_ORIGIN_ZIP_CODE ||
+    process.env.MELHOR_ENVIO_ORIGIN_ZIP_CODE ||
+      process.env.MELHOR_ENVIO_FROM_POSTAL_CODE ||
+      process.env.MELHOR_ENVIO_POSTAL_CODE ||
+      process.env.STORE_ORIGIN_ZIP_CODE ||
       process.env.FRENET_ORIGIN_ZIP_CODE ||
       env.frenetOriginZipCode ||
+      process.env.ORIGIN_ZIP_CODE ||
       ""
   );
 }
