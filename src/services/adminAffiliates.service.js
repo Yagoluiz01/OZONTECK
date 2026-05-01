@@ -594,8 +594,8 @@ export async function createAffiliatePayout(input = {}) {
     );
 
     await safeAffiliatePush("affiliate_payout_paid", affiliateId, {
-      title: "Pagamento enviado ✅",
-      body: `Seu pagamento de comissão no valor de ${formatMoneyBR(amount)} foi registrado pela OZONTECK.`,
+      title: "💰 Pago",
+      body: `Pagamento de ${formatMoneyBR(amount)} registrado pela OZONTECK.`,
       url: "/pages-html/afiliado-painel.html",
       data: {
         type: "affiliate_payout_paid",
@@ -739,9 +739,16 @@ export async function approveAffiliateApplication(id, input = {}) {
     }
   );
 
-  await safeAffiliateNotification("affiliate_approved", () =>
-    notifyAffiliateApproved(affiliate)
-  );
+  setTimeout(() => {
+    safeAffiliateNotification("affiliate_approved", () =>
+      notifyAffiliateApproved(affiliate)
+    ).catch((error) => {
+      console.error(
+        "ERRO AO ENVIAR NOTIFICAÇÃO DE APROVAÇÃO EM SEGUNDO PLANO:",
+        error
+      );
+    });
+  }, 0);
 
   return {
     application: updatedApplications?.[0] || null,
@@ -1100,8 +1107,8 @@ export async function processAffiliateLevelProgress(id) {
     !["no_change", "unchanged", "skipped"].includes(String(result?.status || result?.result || "").toLowerCase())
   ) {
     await safeAffiliatePush("affiliate_level_progress", resultAffiliateId, {
-      title: "Sua evolução foi atualizada 🚀",
-      body: "Sua meta de afiliado foi processada. Abra o painel para acompanhar seu nível e bônus.",
+      title: "🎯 Meta",
+      body: "Sua evolução foi atualizada. Abra o painel para ver nível e bônus.",
       url: "/pages-html/afiliado-painel.html",
       data: {
         type: "affiliate_level_progress",
@@ -1150,7 +1157,7 @@ export async function updateAffiliateLevelBonusStatus(id, input = {}) {
 
   if (affiliateId && ["approved", "paid"].includes(status)) {
     await safeAffiliatePush("affiliate_level_bonus_status", affiliateId, {
-      title: status === "paid" ? "Bônus pago ✅" : "Bônus aprovado 🎯",
+      title: status === "paid" ? "💰 Bônus pago" : "🎁 Bônus",
       body:
         status === "paid"
           ? `Seu bônus ${levelName ? `do nível ${levelName} ` : ""}foi marcado como pago. Valor: ${formatMoneyBR(bonusAmount)}.`
