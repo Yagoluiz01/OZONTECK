@@ -371,6 +371,15 @@ async function createAffiliateApplication(input = {}) {
       input.indicado_por
   );
 
+  const existingPending = await findAffiliateApplicationByEmail(email);
+
+  if (existingPending) {
+    return {
+      alreadyExists: true,
+      application: existingPending,
+    };
+  }
+
   let recruiterAffiliate = null;
 
   if (recruiterRefCode) {
@@ -385,21 +394,13 @@ async function createAffiliateApplication(input = {}) {
     }
   }
 
-  const passwordHash = await bcrypt.hash(password, 10);
-
-  const existingPending = await findAffiliateApplicationByEmail(email);
-
-  if (existingPending) {
-    return {
-      alreadyExists: true,
-      application: existingPending,
-    };
-  }
-
-  const generatedCodes = await generateUniqueAffiliateCodes({
-    fullName,
-    email,
-  });
+  const [passwordHash, generatedCodes] = await Promise.all([
+    bcrypt.hash(password, 10),
+    generateUniqueAffiliateCodes({
+      fullName,
+      email,
+    }),
+  ]);
 
   const payload = {
     full_name: fullName,
@@ -441,14 +442,14 @@ async function createAffiliateApplication(input = {}) {
 
   const application = data[0];
 
-  try {
-    await notifyAffiliateCreated(application);
-  } catch (notificationError) {
-    console.error(
-      "ERRO AO ENVIAR NOTIFICAÇÃO DE SOLICITAÇÃO DE AFILIADO:",
-      notificationError
-    );
-  }
+  setTimeout(() => {
+    notifyAffiliateCreated(application).catch((notificationError) => {
+      console.error(
+        "ERRO AO ENVIAR NOTIFICAÇÃO DE SOLICITAÇÃO DE AFILIADO:",
+        notificationError
+      );
+    });
+  }, 0);
 
   return {
     alreadyExists: false,
@@ -464,7 +465,7 @@ async function findActiveAffiliateByRef(refCode) {
   }
 
   const url = new URL(`${env.supabaseUrl}/rest/v1/affiliates`);
-  url.searchParams.set("select", "*");
+  url.searchParams.set("select", "id,email,ref_code,status");
   url.searchParams.set("ref_code", `eq.${cleanRefCode}`);
   url.searchParams.set("status", "eq.active");
   url.searchParams.set("limit", "1");
@@ -706,8 +707,8 @@ async function createRecruitmentBonusForPaidOrder(order, recruitedAffiliate, ord
   }
 
   await safeAffiliatePush("recruitment_bonus_created", recruiterAffiliate.id, {
-    title: "Bônus de recrutamento aprovado 🎉",
-    body: `Você ganhou ${formatMoneyBR(bonusAmount)} porque ${recruitedAffiliate.full_name || "um afiliado da sua rede"} ativou com uma venda paga.`,
+    title: "🎁 Bônus",
+    body: `Você ganhou ${formatMoneyBR(bonusAmount)} pela ativação de ${recruitedAffiliate.full_name || "um afiliado da sua rede"}.`,
     url: "/pages-html/afiliado-painel.html",
     data: {
       type: "recruitment_bonus_created",
@@ -845,8 +846,8 @@ async function createAffiliateConversionForPaidOrder(order) {
   }
 
   await safeAffiliatePush("sale_commission_created", order.affiliate_id, {
-    title: "Nova venda indicada 🚀",
-    body: `O pedido ${order.order_number || order.id} gerou uma comissão de ${formatMoneyBR(commissionAmount)} para você.`,
+    title: "🚀 Venda",
+    body: `Pedido ${order.order_number || order.id}: comissão de ${formatMoneyBR(commissionAmount)} gerada.`,
     url: "/pages-html/afiliado-painel.html",
     data: {
       type: "sale_commission_created",
