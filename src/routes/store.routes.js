@@ -1,4 +1,4 @@
-﻿import {
+import {
   notifyOrderCreatedPending,
   notifyOrderPaid,
   notifyOrderPaymentPending,
@@ -8,6 +8,7 @@ import {
   notifyAffiliateCreated,
   notifyAffiliateCommissionCreated
 } from "../services/affiliateNotification.service.js";
+import { sendPushToAffiliate } from "../services/affiliatePush.service.js";
 import express from "express";
 import bcrypt from "bcryptjs";
 import { requireAdminAuth } from "../middlewares/auth.middleware.js";
@@ -22,6 +23,40 @@ import { processPaidOrder } from "../jobs/processPaidOrder.js";
 import { createActivationOfferForPaidOrder } from "../services/customerActivation.service.js";
 
 const router = express.Router();
+
+
+async function safeAffiliatePush(label, affiliateId, notification) {
+  try {
+    if (!affiliateId) {
+      return {
+        sent: 0,
+        failed: 0,
+        skipped: true,
+        reason: "missing_affiliate_id",
+      };
+    }
+
+    return await sendPushToAffiliate(affiliateId, notification);
+  } catch (error) {
+    console.error(`ERRO AO ENVIAR PUSH DE AFILIADO (${label}):`, error);
+    return {
+      sent: 0,
+      failed: 1,
+      skipped: false,
+      error: error?.message || "Erro ao enviar push de afiliado",
+    };
+  }
+}
+
+function formatMoneyBR(value) {
+  const number = Number(value || 0);
+
+  return number.toLocaleString("pt-BR", {
+    style: "currency",
+    currency: "BRL",
+  });
+}
+
 
 function slugify(text) {
   return String(text || "")
@@ -670,6 +705,19 @@ async function createRecruitmentBonusForPaidOrder(order, recruitedAffiliate, ord
     );
   }
 
+  await safeAffiliatePush("recruitment_bonus_created", recruiterAffiliate.id, {
+    title: "Bônus de recrutamento aprovado 🎉",
+    body: `Você ganhou ${formatMoneyBR(bonusAmount)} porque ${recruitedAffiliate.full_name || "um afiliado da sua rede"} ativou com uma venda paga.`,
+    url: "/pages-html/afiliado-painel.html",
+    data: {
+      type: "recruitment_bonus_created",
+      affiliate_id: recruiterAffiliate.id,
+      recruited_affiliate_id: recruitedAffiliate.id,
+      conversion_id: conversion.id || null,
+      order_id: order.id,
+    },
+  });
+
   return {
     created: true,
     skipped: false,
@@ -795,6 +843,20 @@ async function createAffiliateConversionForPaidOrder(order) {
       notificationError
     );
   }
+
+  await safeAffiliatePush("sale_commission_created", order.affiliate_id, {
+    title: "Nova venda indicada 🚀",
+    body: `O pedido ${order.order_number || order.id} gerou uma comissão de ${formatMoneyBR(commissionAmount)} para você.`,
+    url: "/pages-html/afiliado-painel.html",
+    data: {
+      type: "sale_commission_created",
+      affiliate_id: order.affiliate_id,
+      conversion_id: conversion.id || null,
+      order_id: order.id,
+      order_number: order.order_number || null,
+      commission_amount: commissionAmount,
+    },
+  });
 
   const recruitmentBonusResult = await createRecruitmentBonusForPaidOrder(
     order,

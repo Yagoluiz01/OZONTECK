@@ -1,4 +1,5 @@
 import { env } from "../config/env.js";
+import { sendPushToAffiliate } from "./affiliatePush.service.js";
 
 import {
   notifyAffiliateCreated,
@@ -123,6 +124,39 @@ async function safeAffiliateNotification(label, callback) {
       error: error?.message || "Erro ao enviar notificação de afiliado",
     };
   }
+}
+
+
+async function safeAffiliatePush(label, affiliateId, notification) {
+  try {
+    if (!affiliateId) {
+      return {
+        sent: 0,
+        failed: 0,
+        skipped: true,
+        reason: "missing_affiliate_id",
+      };
+    }
+
+    return await sendPushToAffiliate(affiliateId, notification);
+  } catch (error) {
+    console.error(`ERRO AO ENVIAR PUSH DE AFILIADO (${label}):`, error);
+    return {
+      sent: 0,
+      failed: 1,
+      skipped: false,
+      error: error?.message || "Erro ao enviar push de afiliado",
+    };
+  }
+}
+
+function formatMoneyBR(value) {
+  const number = Number(value || 0);
+
+  return number.toLocaleString("pt-BR", {
+    style: "currency",
+    currency: "BRL",
+  });
 }
 
 function normalizeCode(value) {
@@ -558,6 +592,18 @@ export async function createAffiliatePayout(input = {}) {
     await safeAffiliateNotification("affiliate_payout_paid", () =>
       notifyAffiliatePayoutPaid(affiliate, payout, receiptFile)
     );
+
+    await safeAffiliatePush("affiliate_payout_paid", affiliateId, {
+      title: "Pagamento enviado ✅",
+      body: `Seu pagamento de comissão no valor de ${formatMoneyBR(amount)} foi registrado pela OZONTECK.`,
+      url: "/pages-html/afiliado-painel.html",
+      data: {
+        type: "affiliate_payout_paid",
+        affiliate_id: affiliateId,
+        payout_id: payout.id || null,
+        amount,
+      },
+    });
   }
 
   return payout;
@@ -1041,7 +1087,31 @@ export async function processAffiliateLevelProgress(id) {
     }),
   });
 
-  return Array.isArray(rows) ? rows[0] : rows;
+  const result = Array.isArray(rows) ? rows[0] : rows;
+  const resultAffiliateId =
+    result?.affiliate_id ||
+    result?.affiliateId ||
+    result?.p_affiliate_id ||
+    affiliateId;
+
+  if (
+    result &&
+    resultAffiliateId &&
+    !["no_change", "unchanged", "skipped"].includes(String(result?.status || result?.result || "").toLowerCase())
+  ) {
+    await safeAffiliatePush("affiliate_level_progress", resultAffiliateId, {
+      title: "Sua evolução foi atualizada 🚀",
+      body: "Sua meta de afiliado foi processada. Abra o painel para acompanhar seu nível e bônus.",
+      url: "/pages-html/afiliado-painel.html",
+      data: {
+        type: "affiliate_level_progress",
+        affiliate_id: resultAffiliateId,
+        result,
+      },
+    });
+  }
+
+  return result;
 }
 
 export async function updateAffiliateLevelBonusStatus(id, input = {}) {
@@ -1073,5 +1143,28 @@ export async function updateAffiliateLevelBonusStatus(id, input = {}) {
     }),
   });
 
-  return Array.isArray(rows) ? rows[0] : rows;
+  const result = Array.isArray(rows) ? rows[0] : rows;
+  const affiliateId = result?.affiliate_id || result?.affiliateId || result?.affiliate;
+  const bonusAmount = result?.bonus_amount || result?.amount || result?.current_bonus_amount || 0;
+  const levelName = result?.level_name || result?.current_level_name || result?.level || "";
+
+  if (affiliateId && ["approved", "paid"].includes(status)) {
+    await safeAffiliatePush("affiliate_level_bonus_status", affiliateId, {
+      title: status === "paid" ? "Bônus pago ✅" : "Bônus aprovado 🎯",
+      body:
+        status === "paid"
+          ? `Seu bônus ${levelName ? `do nível ${levelName} ` : ""}foi marcado como pago. Valor: ${formatMoneyBR(bonusAmount)}.`
+          : `Seu bônus ${levelName ? `do nível ${levelName} ` : ""}foi aprovado. Valor: ${formatMoneyBR(bonusAmount)}.`,
+      url: "/pages-html/afiliado-painel.html",
+      data: {
+        type: "affiliate_level_bonus_status",
+        affiliate_id: affiliateId,
+        bonus_id: bonusId,
+        status,
+        amount: bonusAmount,
+      },
+    });
+  }
+
+  return result;
 }
