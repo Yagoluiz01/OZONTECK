@@ -19,6 +19,10 @@ function formatMoneyBR(value) {
   });
 }
 
+function getAffiliateTrainingGroupUrl() {
+  return String(process.env.AFFILIATE_TRAINING_GROUP_URL || "").trim();
+}
+
 export async function notifyAffiliateCreated(application = {}) {
   return createAdminNotification({
     type: "affiliate_application_created",
@@ -65,10 +69,14 @@ export async function notifyAffiliateCommissionCreated(affiliate = {}, conversio
 }
 
 export async function notifyAffiliateApproved(affiliate = {}) {
+  const trainingGroupUrl = getAffiliateTrainingGroupUrl();
+
   return createAdminNotification({
     type: "affiliate_approved",
     title: "Afiliado aprovado",
-    message: `${getAffiliateName(affiliate)} foi aprovado como afiliado OZONTECK.`,
+    message: trainingGroupUrl
+      ? `${getAffiliateName(affiliate)} foi aprovado como afiliado OZONTECK.\n\nGrupo de treinamento: ${trainingGroupUrl}`
+      : `${getAffiliateName(affiliate)} foi aprovado como afiliado OZONTECK.`,
     entity_type: "affiliate",
     entity_id: affiliate.id || affiliate.affiliate_id || null,
     priority: "high",
@@ -81,6 +89,7 @@ export async function notifyAffiliateApproved(affiliate = {}) {
       coupon_code: affiliate.coupon_code || "",
       commission_rate: affiliate.commission_rate || 0,
       status: affiliate.status || "active",
+      training_group_url: trainingGroupUrl,
     },
   });
 }
