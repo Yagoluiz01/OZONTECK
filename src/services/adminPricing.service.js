@@ -43,6 +43,25 @@ function roundMoney(value) {
   return Number(toNumber(value, 0).toFixed(2));
 }
 
+function normalizePercent(value) {
+  const percent = toNumber(value, 0);
+
+  if (percent < 0) return 0;
+  if (percent > 100) return 100;
+
+  return percent;
+}
+
+function getAutoPercent(value, fallback) {
+  const number = Number(value);
+
+  if (!Number.isFinite(number) || number <= 0) {
+    return fallback;
+  }
+
+  return number;
+}
+
 async function supabaseFetch(path, options = {}) {
   ensureSupabaseConfig();
 
@@ -71,50 +90,237 @@ async function supabaseFetch(path, options = {}) {
   return json;
 }
 
+function calculatePriceForCommission({
+  baseCost,
+  gatewayFeePercent,
+  taxPercent,
+  commissionPercent,
+  marginPercent,
+}) {
+  const variablePercent =
+    normalizePercent(gatewayFeePercent) / 100 +
+    normalizePercent(taxPercent) / 100 +
+    normalizePercent(commissionPercent) / 100 +
+    normalizePercent(marginPercent) / 100;
+
+  if (variablePercent >= 1) {
+    return 0;
+  }
+
+  return roundMoney(baseCost / (1 - variablePercent));
+}
+
+function calculateProfitForPrice({
+  price,
+  baseCost,
+  gatewayFeePercent,
+  taxPercent,
+  commissionPercent,
+}) {
+  const gatewayValue = roundMoney(
+    price * (normalizePercent(gatewayFeePercent) / 100)
+  );
+
+  const taxValue = roundMoney(price * (normalizePercent(taxPercent) / 100));
+
+  const commissionValue = roundMoney(
+    price * (normalizePercent(commissionPercent) / 100)
+  );
+
+  const profit = roundMoney(
+    price - baseCost - gatewayValue - taxValue - commissionValue
+  );
+
+  const marginPercent = price > 0 ? roundMoney((profit / price) * 100) : 0;
+
+  return {
+    gateway_value: gatewayValue,
+    tax_value: taxValue,
+    commission_value: commissionValue,
+    profit,
+    margin_percent: marginPercent,
+  };
+}
+
+function buildRiskStatus({
+  suggestedPrice,
+  priceWithMaxCommission,
+  profitWithMaxCommission,
+  marginWithMaxCommissionPercent,
+  minimumCompanyMarginPercent,
+  maxAffiliateCommissionPercent,
+  specialAffiliateCommissionPercent,
+}) {
+  if (!suggestedPrice || suggestedPrice <= 0) {
+    return {
+      status: "invalid",
+      risk_message:
+        "Precificação inválida. Verifique se a soma de taxas, comissão e margem não passou de 100%.",
+    };
+  }
+
+  if (maxAffiliateCommissionPercent >= 50 && priceWithMaxCommission <= 0) {
+    return {
+      status: "danger",
+      risk_message:
+        "A comissão máxima informada é muito alta para a margem atual. Aumente o preço, reduza custos ou reduza comissão.",
+    };
+  }
+
+  if (profitWithMaxCommission <= 0) {
+    return {
+      status: "loss",
+      risk_message:
+        "Com a comissão máxima, este produto pode dar prejuízo. Não aplique comissão especial sem revisar o preço.",
+    };
+  }
+
+  if (marginWithMaxCommissionPercent < minimumCompanyMarginPercent) {
+    return {
+      status: "attention",
+      risk_message:
+        "Com a comissão máxima, a margem da empresa fica abaixo do mínimo definido.",
+    };
+  }
+
+  if (specialAffiliateCommissionPercent > maxAffiliateCommissionPercent) {
+    return {
+      status: "attention",
+      risk_message:
+        "A comissão especial está maior que a comissão máxima segura definida para este produto.",
+    };
+  }
+
+  return {
+    status: "healthy",
+    risk_message:
+      "Precificação saudável. O produto suporta os custos e a comissão configurada.",
+  };
+}
+
 function calculatePricing(input) {
   const costPrice = roundMoney(input.cost_price);
   const packagingCost = roundMoney(input.packaging_cost);
   const trafficCost = roundMoney(input.traffic_cost);
-  const gatewayFeePercent = toNumber(input.gateway_fee_percent);
-  const taxPercent = toNumber(input.tax_percent);
+  const gatewayFeePercent = normalizePercent(input.gateway_fee_percent);
+  const taxPercent = normalizePercent(input.tax_percent);
   const otherCosts = roundMoney(input.other_costs);
-  const desiredMarginPercent = toNumber(input.desired_margin_percent);
+  const desiredMarginPercent = normalizePercent(input.desired_margin_percent);
   const averageShippingCost = roundMoney(input.average_shipping_cost);
   const shippingPolicy = input.shipping_policy || "customer_paid";
 
-  const baseCost = costPrice + packagingCost + trafficCost + otherCosts;
-
-  const variablePercent =
-    gatewayFeePercent / 100 + taxPercent / 100;
-
-  const minimumPrice =
-    variablePercent >= 1 ? 0 : roundMoney(baseCost / (1 - variablePercent));
-
-  const safeMarginPercent = Math.max(desiredMarginPercent, 15);
-
-  const safePrice =
-    variablePercent >= 1
-      ? 0
-      : roundMoney(baseCost / (1 - variablePercent - safeMarginPercent / 100));
-
-  const suggestedPrice =
-    variablePercent >= 1
-      ? 0
-      : roundMoney(
-          baseCost / (1 - variablePercent - desiredMarginPercent / 100)
-        );
-
-  const gatewayValue = roundMoney(suggestedPrice * (gatewayFeePercent / 100));
-  const taxValue = roundMoney(suggestedPrice * (taxPercent / 100));
-
-  const unitProfit = roundMoney(
-    suggestedPrice - baseCost - gatewayValue - taxValue
+  const affiliateCommissionPercent = normalizePercent(
+    getAutoPercent(input.affiliate_commission_percent, 10)
   );
 
-  const realMarginPercent =
-    suggestedPrice > 0
-      ? roundMoney((unitProfit / suggestedPrice) * 100)
-      : 0;
+  const maxAffiliateCommissionPercent = normalizePercent(
+    getAutoPercent(input.max_affiliate_commission_percent, 50)
+  );
+
+  const specialAffiliateCommissionPercent = normalizePercent(
+    getAutoPercent(input.special_affiliate_commission_percent, 50)
+  );
+
+  const minimumCompanyMarginPercent = normalizePercent(
+    getAutoPercent(input.minimum_company_margin_percent, 15)
+  );
+
+  const commissionScenarioPercent = normalizePercent(
+    getAutoPercent(input.commission_scenario_percent, 50)
+  );
+
+  const baseCost = roundMoney(
+    costPrice + packagingCost + trafficCost + otherCosts
+  );
+
+  const basicVariablePercent = gatewayFeePercent / 100 + taxPercent / 100;
+
+  const minimumPrice =
+    basicVariablePercent >= 1
+      ? 0
+      : roundMoney(baseCost / (1 - basicVariablePercent));
+
+  const safeMarginPercent = Math.max(
+    desiredMarginPercent,
+    minimumCompanyMarginPercent,
+    15
+  );
+
+  const safePrice = calculatePriceForCommission({
+    baseCost,
+    gatewayFeePercent,
+    taxPercent,
+    commissionPercent: affiliateCommissionPercent,
+    marginPercent: safeMarginPercent,
+  });
+
+  const suggestedPrice = calculatePriceForCommission({
+    baseCost,
+    gatewayFeePercent,
+    taxPercent,
+    commissionPercent: affiliateCommissionPercent,
+    marginPercent: desiredMarginPercent,
+  });
+
+  const priceWithDefaultCommission = suggestedPrice;
+
+  const priceWithMaxCommission = calculatePriceForCommission({
+    baseCost,
+    gatewayFeePercent,
+    taxPercent,
+    commissionPercent: maxAffiliateCommissionPercent,
+    marginPercent: minimumCompanyMarginPercent,
+  });
+
+  const priceWithSpecialCommission = calculatePriceForCommission({
+    baseCost,
+    gatewayFeePercent,
+    taxPercent,
+    commissionPercent: specialAffiliateCommissionPercent,
+    marginPercent: minimumCompanyMarginPercent,
+  });
+
+  const defaultProfitData = calculateProfitForPrice({
+    price: priceWithDefaultCommission,
+    baseCost,
+    gatewayFeePercent,
+    taxPercent,
+    commissionPercent: affiliateCommissionPercent,
+  });
+
+  const maxProfitData = calculateProfitForPrice({
+    price: priceWithMaxCommission,
+    baseCost,
+    gatewayFeePercent,
+    taxPercent,
+    commissionPercent: maxAffiliateCommissionPercent,
+  });
+
+  const specialProfitData = calculateProfitForPrice({
+    price: priceWithSpecialCommission,
+    baseCost,
+    gatewayFeePercent,
+    taxPercent,
+    commissionPercent: specialAffiliateCommissionPercent,
+  });
+
+  const suggestedProfitData = calculateProfitForPrice({
+    price: suggestedPrice,
+    baseCost,
+    gatewayFeePercent,
+    taxPercent,
+    commissionPercent: affiliateCommissionPercent,
+  });
+
+  const risk = buildRiskStatus({
+    suggestedPrice,
+    priceWithMaxCommission,
+    profitWithMaxCommission: maxProfitData.profit,
+    marginWithMaxCommissionPercent: maxProfitData.margin_percent,
+    minimumCompanyMarginPercent,
+    maxAffiliateCommissionPercent,
+    specialAffiliateCommissionPercent,
+  });
 
   return {
     cost_price: roundMoney(costPrice),
@@ -126,12 +332,40 @@ function calculatePricing(input) {
     average_shipping_cost: roundMoney(averageShippingCost),
     shipping_policy: shippingPolicy,
     desired_margin_percent: roundMoney(desiredMarginPercent),
+
+    affiliate_commission_percent: roundMoney(affiliateCommissionPercent),
+    max_affiliate_commission_percent: roundMoney(maxAffiliateCommissionPercent),
+    special_affiliate_commission_percent: roundMoney(
+      specialAffiliateCommissionPercent
+    ),
+    minimum_company_margin_percent: roundMoney(minimumCompanyMarginPercent),
+    commission_scenario_percent: roundMoney(commissionScenarioPercent),
+
     cost_total: roundMoney(baseCost),
     minimum_price: roundMoney(minimumPrice),
     safe_price: roundMoney(safePrice),
     suggested_price: roundMoney(suggestedPrice),
-    unit_profit: roundMoney(unitProfit),
-    real_margin_percent: roundMoney(realMarginPercent),
+    unit_profit: roundMoney(suggestedProfitData.profit),
+    real_margin_percent: roundMoney(suggestedProfitData.margin_percent),
+
+    price_with_default_commission: roundMoney(priceWithDefaultCommission),
+    price_with_max_commission: roundMoney(priceWithMaxCommission),
+    price_with_special_commission: roundMoney(priceWithSpecialCommission),
+
+    profit_with_default_commission: roundMoney(defaultProfitData.profit),
+    profit_with_max_commission: roundMoney(maxProfitData.profit),
+    profit_with_special_commission: roundMoney(specialProfitData.profit),
+
+    margin_with_default_commission_percent: roundMoney(
+      defaultProfitData.margin_percent
+    ),
+    margin_with_max_commission_percent: roundMoney(maxProfitData.margin_percent),
+    margin_with_special_commission_percent: roundMoney(
+      specialProfitData.margin_percent
+    ),
+
+    status: risk.status,
+    risk_message: risk.risk_message,
   };
 }
 
@@ -157,6 +391,7 @@ async function createPricingHistory({
     pricing_id: pricingId,
     event_type: eventType,
     current_product_price: roundMoney(currentProductPrice),
+
     cost_price: roundMoney(pricingData.cost_price),
     packaging_cost: roundMoney(pricingData.packaging_cost),
     traffic_cost: roundMoney(pricingData.traffic_cost),
@@ -166,12 +401,60 @@ async function createPricingHistory({
     average_shipping_cost: roundMoney(pricingData.average_shipping_cost),
     shipping_policy: pricingData.shipping_policy || "customer_paid",
     desired_margin_percent: roundMoney(pricingData.desired_margin_percent),
+
+    affiliate_commission_percent: roundMoney(
+      pricingData.affiliate_commission_percent
+    ),
+    max_affiliate_commission_percent: roundMoney(
+      pricingData.max_affiliate_commission_percent
+    ),
+    special_affiliate_commission_percent: roundMoney(
+      pricingData.special_affiliate_commission_percent
+    ),
+    minimum_company_margin_percent: roundMoney(
+      pricingData.minimum_company_margin_percent
+    ),
+    commission_scenario_percent: roundMoney(
+      pricingData.commission_scenario_percent
+    ),
+
     cost_total: roundMoney(pricingData.cost_total),
     minimum_price: roundMoney(pricingData.minimum_price),
     safe_price: roundMoney(pricingData.safe_price),
     suggested_price: roundMoney(pricingData.suggested_price),
     unit_profit: roundMoney(pricingData.unit_profit),
     real_margin_percent: roundMoney(pricingData.real_margin_percent),
+
+    price_with_default_commission: roundMoney(
+      pricingData.price_with_default_commission
+    ),
+    price_with_max_commission: roundMoney(pricingData.price_with_max_commission),
+    price_with_special_commission: roundMoney(
+      pricingData.price_with_special_commission
+    ),
+
+    profit_with_default_commission: roundMoney(
+      pricingData.profit_with_default_commission
+    ),
+    profit_with_max_commission: roundMoney(
+      pricingData.profit_with_max_commission
+    ),
+    profit_with_special_commission: roundMoney(
+      pricingData.profit_with_special_commission
+    ),
+
+    margin_with_default_commission_percent: roundMoney(
+      pricingData.margin_with_default_commission_percent
+    ),
+    margin_with_max_commission_percent: roundMoney(
+      pricingData.margin_with_max_commission_percent
+    ),
+    margin_with_special_commission_percent: roundMoney(
+      pricingData.margin_with_special_commission_percent
+    ),
+
+    status: pricingData.status || "pending",
+    risk_message: pricingData.risk_message || null,
     notes: notes || null,
   };
 
@@ -292,6 +575,23 @@ export async function applySuggestedPriceToProduct(productId) {
   }
 
   const suggestedPrice = roundMoney(pricing.suggested_price);
+
+  if (!suggestedPrice || suggestedPrice <= 0) {
+    throw new Error(
+      "Preço sugerido inválido. Calcule e salve a precificação antes de aplicar."
+    );
+  }
+
+  if (
+    pricing.status === "loss" ||
+    pricing.status === "danger" ||
+    pricing.status === "invalid"
+  ) {
+    throw new Error(
+      pricing.risk_message ||
+        "Este produto está com risco financeiro. Ajuste a precificação antes de aplicar."
+    );
+  }
 
   const updatedProduct = await supabaseFetch(`products?id=eq.${productId}`, {
     method: "PATCH",

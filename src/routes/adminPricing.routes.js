@@ -57,6 +57,23 @@ router.get("/product/:productId", async (req, res) => {
   }
 });
 
+/**
+ * Mantém compatibilidade com o frontend atual:
+ * /api/admin/pricing/product/:productId/history
+ */
+router.get("/product/:productId/history", async (req, res) => {
+  try {
+    const history = await getPricingHistoryByProductId(req.params.productId);
+    return ok(res, { history });
+  } catch (error) {
+    return fail(res, error);
+  }
+});
+
+/**
+ * Mantém compatibilidade com rota antiga:
+ * /api/admin/pricing/history/:productId
+ */
 router.get("/history/:productId", async (req, res) => {
   try {
     const history = await getPricingHistoryByProductId(req.params.productId);
