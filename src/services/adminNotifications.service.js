@@ -1,4 +1,5 @@
 import { supabaseAdmin } from "../config/supabase.js";
+import { sendPushToAdmins } from "./adminPush.service.js";
 
 function normalizePriority(value) {
   const priority = String(value || "normal").toLowerCase();
@@ -47,6 +48,15 @@ export async function createAdminNotification(payload = {}) {
     console.error("[ADMIN_NOTIFICATION_CREATE_ERROR]", error);
     throw new Error(error.message || "Erro ao criar notificação.");
   }
+
+  /*
+   * Push para celular.
+   * Importante: não usa await para não travar venda, comissão, pedido ou afiliado.
+   * Se o push falhar, a notificação interna do admin continua salva normalmente.
+   */
+  sendPushToAdmins(data).catch((pushError) => {
+    console.error("[ADMIN_NOTIFICATION_PUSH_ERROR]", pushError);
+  });
 
   return {
     success: true,
