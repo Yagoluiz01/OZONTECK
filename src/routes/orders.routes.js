@@ -5,6 +5,7 @@ import {
   generateAutomaticShippingLabel,
   syncSpecificMelhorEnvioLabelNow
 } from "../services/shipping.service.js";
+import { createActivationOfferForPaidOrder } from "../services/customerActivation.service.js";
 
 const router = express.Router();
 
@@ -341,6 +342,62 @@ async function fetchOrderRawById(orderId) {
   };
 }
 
+async function fetchOrderItemsCountMap(orderIds = []) {
+  const cleanIds = Array.from(
+    new Set(
+      orderIds
+        .map((id) => String(id || "").trim())
+        .filter(Boolean)
+    )
+  );
+
+  const counts = new Map();
+
+  if (!cleanIds.length) {
+    return counts;
+  }
+
+  const headers = {
+    apikey: env.supabaseServiceRoleKey,
+    Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
+    "Content-Type": "application/json",
+    Accept: "application/json",
+  };
+
+  const chunkSize = 80;
+
+  for (let index = 0; index < cleanIds.length; index += chunkSize) {
+    const chunk = cleanIds.slice(index, index + chunkSize);
+    const url = new URL(`${env.supabaseUrl}/rest/v1/order_items`);
+    url.searchParams.set("select", "order_id");
+    url.searchParams.set("order_id", `in.(${chunk.join(",")})`);
+
+    const response = await fetch(url.toString(), {
+      method: "GET",
+      headers,
+    });
+
+    const data = await response.json().catch(() => []);
+
+    if (!response.ok || !Array.isArray(data)) {
+      console.error("ERRO AO BUSCAR CONTAGEM DE ITENS DOS PEDIDOS:", data);
+      continue;
+    }
+
+    data.forEach((item) => {
+      const orderId = String(item?.order_id || "").trim();
+
+      if (!orderId) {
+        return;
+      }
+
+      counts.set(orderId, (counts.get(orderId) || 0) + 1);
+    });
+  }
+
+  return counts;
+}
+
 async function updateOrderRecord(orderId, payload) {
   const url = new URL(`${env.supabaseUrl}/rest/v1/orders`);
   url.searchParams.set("id", `eq.${orderId}`);
@@ -366,8 +423,41 @@ async function updateOrderRecord(orderId, payload) {
   };
 }
 
-async function addTimelineEvent(orderId, label, description) {
-  return callRpc("add_order_timeline_event", {
+async function createActivationOfferSafely(order, source = "orders_routes") {
+  try {
+    const result = await createActivationOfferForPaidOrder(order);
+
+    console.log("CUSTOMER ACTIVATION OFFER RESULT:", {
+      source,
+      orderId: order?.id || null,
+      orderNumber: order?.order_number || null,
+      created: result?.created || false,
+      skipped: result?.skipped || false,
+      reason: result?.reason || "",
+    });
+
+    return result;
+  } catch (error) {
+    console.error("ERRO AO CRIAR CONDIÇÃO DE ATIVAÇÃO:", {
+      source,
+      orderId: order?.id || null,
+      orderNumber: order?.order_number || null,
+      error: error?.message || String(error),
+    });
+
+    return {
+      success: false,
+      created: false,
+      skipped: false,
+      reason: "activation_offer_unexpected_error",
+      error: error?.message || String(error),
+    };
+  }
+}
+
+
+async function addTimelineEvent(orderId, label, description) {   
+  return callRpc("add_order_timeline_event", { 
     p_order_id: orderId,
     p_event_label: label,
     p_event_description: description,
@@ -525,63 +615,61 @@ router.get("/", requireAuth, async (req, res) => {
       );
     }
 
-    const normalizedOrders = await Promise.all(
-      orders.map(async (order) => {
-        const items = await fetchOrderItemsFromRpc(order.id);
-
-        return {
-          id: order.id,
-          order_number: order.order_number,
-          customer_name: order.customer_name,
-          customer_email: order.customer_email,
-          customer_phone: order.customer_phone || "",
-          created_at: order.created_at,
-          payment_status: order.payment_status || "pending",
-          payment_raw_status: order.payment_raw_status || "",
-          total_amount: Number(order.total_amount || 0),
-          subtotal: Number(order.subtotal || 0),
-          shipping_amount: Number(order.shipping_amount || 0),
-          discount_amount: Number(order.discount_amount || 0),
-          order_status: order.order_status || "pending",
-          tracking_code: order.tracking_code || "",
-          shipping_tracking_code:
-            order.shipping_tracking_code || order.tracking_code || "",
-          shipping_carrier: order.shipping_carrier || "",
-          shipping_label_status: order.shipping_label_status || "pending",
-          shipping_label_url: order.shipping_label_url || "",
-          shipping_label_pdf_url: order.shipping_label_pdf_url || "",
-          shipping_shipment_id: order.shipping_shipment_id || "",
-          shipping_label_generated_at: order.shipping_label_generated_at || "",
-          shipping_label_error: order.shipping_label_error || "",
-
-          number: order.order_number,
-          customerName: order.customer_name,
-          customerEmail: order.customer_email,
-          customerPhone: order.customer_phone || "",
-          date: formatDate(order.created_at),
-          paymentStatus: order.payment_status || "pending",
-          paymentLabel: mapPaymentStatusLabel(order.payment_status),
-          total: formatCurrency(order.total_amount),
-          status: order.order_status || "pending",
-          statusLabel: mapOrderStatusLabel(order.order_status),
-          trackingCode: order.tracking_code || "",
-          shippingTrackingCode:
-            order.shipping_tracking_code || order.tracking_code || "",
-          shippingCarrier: order.shipping_carrier || "",
-          shippingLabelStatus: order.shipping_label_status || "pending",
-          shippingLabelStatusLabel: mapLabelStatusLabel(order.shipping_label_status),
-          shippingLabelUrl: order.shipping_label_url || "",
-          shippingLabelPdfUrl: order.shipping_label_pdf_url || "",
-          shippingShipmentId: order.shipping_shipment_id || "",
-          shippingLabelGeneratedAt: order.shipping_label_generated_at
-            ? formatDate(order.shipping_label_generated_at)
-            : "",
-          shippingLabelError: order.shipping_label_error || "",
-          addressLine: buildAddressLine(order),
-          itemsCount: items.length,
-        };
-      })
+    const orderItemCounts = await fetchOrderItemsCountMap(
+      orders.map((order) => order.id)
     );
+
+    const normalizedOrders = orders.map((order) => ({
+      id: order.id,
+      order_number: order.order_number,
+      customer_name: order.customer_name,
+      customer_email: order.customer_email,
+      customer_phone: order.customer_phone || "",
+      created_at: order.created_at,
+      payment_status: order.payment_status || "pending",
+      payment_raw_status: order.payment_raw_status || "",
+      total_amount: Number(order.total_amount || 0),
+      subtotal: Number(order.subtotal || 0),
+      shipping_amount: Number(order.shipping_amount || 0),
+      discount_amount: Number(order.discount_amount || 0),
+      order_status: order.order_status || "pending",
+      tracking_code: order.tracking_code || "",
+      shipping_tracking_code:
+        order.shipping_tracking_code || order.tracking_code || "",
+      shipping_carrier: order.shipping_carrier || "",
+      shipping_label_status: order.shipping_label_status || "pending",
+      shipping_label_url: order.shipping_label_url || "",
+      shipping_label_pdf_url: order.shipping_label_pdf_url || "",
+      shipping_shipment_id: order.shipping_shipment_id || "",
+      shipping_label_generated_at: order.shipping_label_generated_at || "",
+      shipping_label_error: order.shipping_label_error || "",
+
+      number: order.order_number,
+      customerName: order.customer_name,
+      customerEmail: order.customer_email,
+      customerPhone: order.customer_phone || "",
+      date: formatDate(order.created_at),
+      paymentStatus: order.payment_status || "pending",
+      paymentLabel: mapPaymentStatusLabel(order.payment_status),
+      total: formatCurrency(order.total_amount),
+      status: order.order_status || "pending",
+      statusLabel: mapOrderStatusLabel(order.order_status),
+      trackingCode: order.tracking_code || "",
+      shippingTrackingCode:
+        order.shipping_tracking_code || order.tracking_code || "",
+      shippingCarrier: order.shipping_carrier || "",
+      shippingLabelStatus: order.shipping_label_status || "pending",
+      shippingLabelStatusLabel: mapLabelStatusLabel(order.shipping_label_status),
+      shippingLabelUrl: order.shipping_label_url || "",
+      shippingLabelPdfUrl: order.shipping_label_pdf_url || "",
+      shippingShipmentId: order.shipping_shipment_id || "",
+      shippingLabelGeneratedAt: order.shipping_label_generated_at
+        ? formatDate(order.shipping_label_generated_at)
+        : "",
+      shippingLabelError: order.shipping_label_error || "",
+      addressLine: buildAddressLine(order),
+      itemsCount: orderItemCounts.get(String(order.id || "")) || 0,
+    }));
 
     return res.status(200).json({
       success: true,
@@ -809,16 +897,20 @@ router.put("/:id/tracking", requireAuth, async (req, res) => {
     }
 
     const refreshedOrderResponse = await fetchOrderRawById(id);
-    const refreshedOrder = refreshedOrderResponse.data[0] || null;
+const refreshedOrder = refreshedOrderResponse.data[0] || null;
 
-    if (!refreshedOrderResponse.ok || !refreshedOrder) {
-      return res.status(500).json({
-        success: false,
-        message: "Pedido atualizado, mas houve erro ao recarregar os dados",
-      });
-    }
+if (!refreshedOrderResponse.ok || !refreshedOrder) {
+  return res.status(500).json({
+    success: false,
+    message: "Pedido atualizado, mas houve erro ao recarregar os dados",
+  });
+}
 
-    const normalizedOrder = await buildOrderDetails(refreshedOrder);
+if (normalizedStatus === "paid") {
+  await createActivationOfferSafely(refreshedOrder, "admin_order_update_paid");
+}
+
+const normalizedOrder = await buildOrderDetails(refreshedOrder);
 
     return res.status(200).json({
       success: true,
