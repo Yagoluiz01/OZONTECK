@@ -2,6 +2,15 @@ import express from "express";
 import jwt from "jsonwebtoken";
 import { env } from "../config/env.js";
 import {
+  notifyOrderPaid,
+  notifyOrderShipped,
+  notifyOrderDelivered,
+  notifyOrderCancelled,
+  notifyOrderTrackingUpdated,
+  notifyOrderLabelGenerated,
+  notifyOrderLabelError,
+} from "../services/orderNotification.service.js";
+import {
   generateAutomaticShippingLabel,
   syncSpecificMelhorEnvioLabelNow
 } from "../services/shipping.service.js";
@@ -825,6 +834,8 @@ router.put("/:id/tracking", requireAuth, async (req, res) => {
       });
     }
 
+    const updatedOrder = updateResponse.data[0];
+
     const statusLabel = mapOrderStatusLabel(normalizedStatus);
     const eventLabel =
       normalizedStatus === "shipped"
@@ -833,6 +844,8 @@ router.put("/:id/tracking", requireAuth, async (req, res) => {
         ? "Pedido entregue"
         : normalizedStatus === "paid"
         ? "Pagamento confirmado"
+        : normalizedStatus === "cancelled"
+        ? "Pedido cancelado"
         : `Status alterado para ${statusLabel}`;
 
     const timelineParts = [];
@@ -897,20 +910,85 @@ router.put("/:id/tracking", requireAuth, async (req, res) => {
     }
 
     const refreshedOrderResponse = await fetchOrderRawById(id);
-const refreshedOrder = refreshedOrderResponse.data[0] || null;
+    const refreshedOrder = refreshedOrderResponse.data[0] || null;
 
-if (!refreshedOrderResponse.ok || !refreshedOrder) {
-  return res.status(500).json({
-    success: false,
-    message: "Pedido atualizado, mas houve erro ao recarregar os dados",
-  });
-}
+    if (!refreshedOrderResponse.ok || !refreshedOrder) {
+      return res.status(500).json({
+        success: false,
+        message: "Pedido atualizado, mas houve erro ao recarregar os dados",
+      });
+    }
 
-if (normalizedStatus === "paid") {
-  await createActivationOfferSafely(refreshedOrder, "admin_order_update_paid");
-}
+    if (normalizedStatus === "paid") {
+      await createActivationOfferSafely(refreshedOrder, "admin_order_update_paid");
+    }
 
-const normalizedOrder = await buildOrderDetails(refreshedOrder);
+    setTimeout(() => {
+      const previousStatus = String(existingOrder.order_status || "")
+        .trim()
+        .toLowerCase();
+
+      const newStatus = String(refreshedOrder.order_status || "")
+        .trim()
+        .toLowerCase();
+
+      const previousTracking = String(
+        existingOrder.shipping_tracking_code || existingOrder.tracking_code || ""
+      ).trim();
+
+      const newTracking = String(
+        refreshedOrder.shipping_tracking_code || refreshedOrder.tracking_code || ""
+      ).trim();
+
+      const previousLabelStatus = String(existingOrder.shipping_label_status || "")
+        .trim()
+        .toLowerCase();
+
+      const newLabelStatus = String(refreshedOrder.shipping_label_status || "")
+        .trim()
+        .toLowerCase();
+
+      Promise.resolve()
+        .then(async () => {
+          if (previousStatus !== newStatus) {
+            if (newStatus === "paid") {
+              await notifyOrderPaid(refreshedOrder);
+            }
+
+            if (newStatus === "shipped") {
+              await notifyOrderShipped(refreshedOrder);
+            }
+
+            if (newStatus === "delivered") {
+              await notifyOrderDelivered(refreshedOrder);
+            }
+
+            if (newStatus === "cancelled") {
+              await notifyOrderCancelled(refreshedOrder);
+            }
+          }
+
+          if (newTracking && newTracking !== previousTracking) {
+            await notifyOrderTrackingUpdated(refreshedOrder);
+          }
+
+          if (newLabelStatus === "generated" && previousLabelStatus !== "generated") {
+            await notifyOrderLabelGenerated(refreshedOrder);
+          }
+
+          if (newLabelStatus === "error" && previousLabelStatus !== "error") {
+            await notifyOrderLabelError(refreshedOrder);
+          }
+        })
+        .catch((notificationError) => {
+          console.error(
+            "ERRO AO ENVIAR NOTIFICAÇÃO DE ATUALIZAÇÃO DO PEDIDO:",
+            notificationError
+          );
+        });
+    }, 0);
+
+    const normalizedOrder = await buildOrderDetails(refreshedOrder);
 
     return res.status(200).json({
       success: true,
@@ -925,258 +1003,6 @@ const normalizedOrder = await buildOrderDetails(refreshedOrder);
     return res.status(500).json({
       success: false,
       message: error.message || "Erro interno ao atualizar rastreio",
-    });
-  }
-});
-
-router.put("/:id/manual-label", requireAuth, async (req, res) => {
-  try {
-    const { id } = req.params;
-    const {
-      shippingCarrier = "",
-      trackingCode = "",
-      shippingTrackingCode = "",
-      shippingLabelUrl = "",
-      shippingLabelPdfUrl = "",
-      shippingShipmentId = "",
-      shippingLabelStatus = "generated",
-      note = "",
-      adminNotes = "",
-    } = req.body || {};
-
-    if (!id) {
-      return res.status(400).json({
-        success: false,
-        message: "ID do pedido é obrigatório",
-      });
-    }
-
-    const allowedLabelStatuses = [
-      "pending",
-      "cart_created",
-      "generated",
-      "fallback",
-      "error",
-    ];
-
-    const normalizedLabelStatus = String(shippingLabelStatus || "generated")
-      .trim()
-      .toLowerCase();
-
-    if (!allowedLabelStatuses.includes(normalizedLabelStatus)) {
-      return res.status(400).json({
-        success: false,
-        message: "Status da etiqueta inválido",
-      });
-    }
-
-    const orderResponse = await fetchOrderRawById(id);
-    const existingOrder = orderResponse.data[0] || null;
-
-    if (!orderResponse.ok || !existingOrder) {
-      return res.status(404).json({
-        success: false,
-        message: "Pedido não encontrado",
-      });
-    }
-
-    const normalizedTrackingCode = String(
-      shippingTrackingCode || trackingCode || ""
-    ).trim();
-
-    const updatePayload = {
-      shipping_carrier:
-        String(shippingCarrier || "").trim() ||
-        String(existingOrder.shipping_carrier || "").trim(),
-      shipping_tracking_code:
-        normalizedTrackingCode ||
-        String(existingOrder.shipping_tracking_code || "").trim(),
-      tracking_code:
-        normalizedTrackingCode ||
-        String(existingOrder.tracking_code || "").trim(),
-      shipping_label_url:
-        String(shippingLabelUrl || "").trim() ||
-        String(existingOrder.shipping_label_url || "").trim(),
-      shipping_label_pdf_url:
-        String(shippingLabelPdfUrl || "").trim() ||
-        String(existingOrder.shipping_label_pdf_url || "").trim(),
-      shipping_shipment_id:
-        String(shippingShipmentId || "").trim() ||
-        String(existingOrder.shipping_shipment_id || "").trim(),
-      shipping_label_status: normalizedLabelStatus,
-      shipping_label_generated_at: new Date().toISOString(),
-      shipping_label_error: normalizedLabelStatus === "error"
-        ? "Etiqueta/manual com pendência"
-        : "",
-      admin_notes: String(adminNotes || "").trim(),
-    };
-
-    const existingRaw =
-      existingOrder.shipping_label_raw &&
-      typeof existingOrder.shipping_label_raw === "object"
-        ? existingOrder.shipping_label_raw
-        : {};
-
-    updatePayload.shipping_label_raw = {
-      ...existingRaw,
-      manual_update: true,
-      manual_updated_at: new Date().toISOString(),
-      manual_label_status: normalizedLabelStatus,
-      manual_label_url: updatePayload.shipping_label_url,
-      manual_label_pdf_url: updatePayload.shipping_label_pdf_url,
-      manual_tracking_code: updatePayload.shipping_tracking_code,
-      manual_shipment_id: updatePayload.shipping_shipment_id,
-      manual_carrier: updatePayload.shipping_carrier,
-      manual_note: String(note || "").trim(),
-    };
-
-    const updateResponse = await updateOrderRecord(id, updatePayload);
-
-    if (!updateResponse.ok || !updateResponse.data[0]) {
-      return res.status(500).json({
-        success: false,
-        message: "Erro ao vincular etiqueta manualmente",
-        details: updateResponse.data,
-      });
-    }
-
-    const timelineParts = [];
-
-    timelineParts.push(
-      `Etiqueta vinculada manualmente: ${mapLabelStatusLabel(normalizedLabelStatus)}.`
-    );
-
-    if (String(updatePayload.shipping_carrier || "").trim()) {
-      timelineParts.push(
-        `Transportadora: ${String(updatePayload.shipping_carrier).trim()}.`
-      );
-    }
-
-    if (String(updatePayload.shipping_tracking_code || "").trim()) {
-      timelineParts.push(
-        `Código de rastreio: ${String(updatePayload.shipping_tracking_code).trim()}.`
-      );
-    }
-
-    if (String(updatePayload.shipping_shipment_id || "").trim()) {
-      timelineParts.push(
-        `ID do envio/carrinho: ${String(updatePayload.shipping_shipment_id).trim()}.`
-      );
-    }
-
-    if (String(updatePayload.shipping_label_pdf_url || "").trim()) {
-      timelineParts.push(
-        `PDF da etiqueta: ${String(updatePayload.shipping_label_pdf_url).trim()}.`
-      );
-    }
-
-    if (String(note || "").trim()) {
-      timelineParts.push(String(note).trim());
-    }
-
-    if (String(adminNotes || "").trim()) {
-      timelineParts.push(`Observação interna: ${String(adminNotes).trim()}`);
-    }
-
-    const eventResponse = await addTimelineEvent(
-      id,
-      "Etiqueta vinculada manualmente",
-      timelineParts.join(" ")
-    );
-
-    if (!eventResponse.ok) {
-      return res.status(500).json({
-        success: false,
-        message: "Etiqueta vinculada, mas houve erro ao registrar timeline",
-        details: eventResponse.data,
-      });
-    }
-
-    const refreshedOrderResponse = await fetchOrderRawById(id);
-    const refreshedOrder = refreshedOrderResponse.data[0] || null;
-
-    if (!refreshedOrderResponse.ok || !refreshedOrder) {
-      return res.status(500).json({
-        success: false,
-        message: "Etiqueta vinculada, mas houve erro ao recarregar os dados",
-      });
-    }
-
-    const normalizedOrder = await buildOrderDetails(refreshedOrder);
-
-    return res.status(200).json({
-      success: true,
-      message: "Etiqueta vinculada manualmente com sucesso",
-      order: normalizedOrder,
-    });
-  } catch (error) {
-    console.error("ERRO AO VINCULAR ETIQUETA MANUAL:", error);
-
-    return res.status(500).json({
-      success: false,
-      message: error.message || "Erro interno ao vincular etiqueta manual",
-    });
-  }
-});
-
-router.post("/:id/sync-melhor-envio-now", requireAuth, async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    if (!id) {
-      return res.status(400).json({
-        success: false,
-        message: "ID do pedido é obrigatório",
-      });
-    }
-
-    const orderResponse = await fetchOrderRawById(id);
-    const existingOrder = orderResponse.data[0] || null;
-
-    if (!orderResponse.ok || !existingOrder) {
-      return res.status(404).json({
-        success: false,
-        message: "Pedido não encontrado",
-      });
-    }
-
-    if (!String(existingOrder.shipping_shipment_id || "").trim()) {
-      return res.status(400).json({
-        success: false,
-        message: "Pedido sem ID de envio/carrinho para sincronização",
-      });
-    }
-
-    const syncResult = await syncSpecificMelhorEnvioLabelNow(existingOrder);
-
-    const refreshedOrderResponse = await fetchOrderRawById(id);
-    const refreshedOrder = refreshedOrderResponse.data[0] || null;
-
-    if (!refreshedOrderResponse.ok || !refreshedOrder) {
-      return res.status(500).json({
-        success: false,
-        message: "Sincronização executada, mas houve erro ao recarregar o pedido",
-      });
-    }
-
-    const normalizedOrder = await buildOrderDetails(refreshedOrder);
-
-    const generatedNow = syncResult?.status === "generated";
-
-    return res.status(200).json({
-      success: true,
-      message: generatedNow
-        ? "Etiqueta sincronizada com sucesso"
-        : "Sincronização executada, mas a etiqueta ainda não está disponível no Melhor Envio",
-      sync: syncResult,
-      order: normalizedOrder,
-    });
-  } catch (error) {
-    console.error("ERRO AO SINCRONIZAR ETIQUETA AGORA:", error);
-
-    return res.status(500).json({
-      success: false,
-      message: error.message || "Erro interno ao sincronizar etiqueta agora",
     });
   }
 });
