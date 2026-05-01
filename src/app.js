@@ -5,6 +5,7 @@ import morgan from "morgan";
 import path from "path";
 import { fileURLToPath } from "url";
 import rateLimit from "express-rate-limit";
+import adminNotificationsRoutes from "./routes/adminNotifications.routes.js";
 
 import { env } from "./config/env.js";
 import authRoutes from "./routes/auth.routes.js";
@@ -163,6 +164,7 @@ app.use("/api/store", storeRoutes);
 app.use("/api/admin/financial", adminFinancialRoutes);
 app.use("/api/admin/pricing", adminPricingRoutes);
 app.use("/api/admin/affiliates", adminAffiliatesRoutes);
+app.use("/api/admin/notifications", adminNotificationsRoutes);
 
 app.use("/api/auth", authRoutes);
 app.use("/api/products", productsRoutes);
@@ -176,6 +178,7 @@ app.use("/api/store", storeRoutes);
 app.use("/api/affiliate", affiliatePortalRoutes);
 
 app.use("/api/admin/financial", adminFinancialRoutes);
+app.use("/api/admin/notifications", adminNotificationsRoutes);
 
 app.use((req, res) => {
   return res.status(404).json({
