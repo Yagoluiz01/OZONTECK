@@ -24,6 +24,7 @@ import {
   processAffiliateLevelProgress,
   updateAffiliateLevelBonusStatus,
 } from "../services/adminAffiliates.service.js";
+import { notifyAffiliateApproved } from "../services/affiliateNotification.service.js";
 
 const router = express.Router();
 
@@ -50,7 +51,6 @@ function fail(res, error, status = 500) {
     message: error?.message || "Erro interno.",
   });
 }
-
 
 function normalizeCommissionRate(value, fallback = 10) {
   const raw = String(value ?? "")
@@ -106,6 +106,30 @@ router.post("/applications/:id/approve", async (req, res) => {
       req.params.id,
       sanitizeAffiliatePayload(req.body || {}, { defaultCommission: true })
     );
+
+    const approvedAffiliate =
+      result?.affiliate ||
+      result?.createdAffiliate ||
+      result?.data?.affiliate ||
+      result?.result?.affiliate ||
+      null;
+
+    if (approvedAffiliate) {
+      notifyAffiliateApproved(approvedAffiliate).catch((error) => {
+        console.error("BREVO EMAIL APPROVE ROUTE ERROR:", {
+          message: error?.message,
+          affiliate_id:
+            approvedAffiliate?.id || approvedAffiliate?.affiliate_id || null,
+          email: approvedAffiliate?.email || "",
+        });
+      });
+    } else {
+      console.log("BREVO EMAIL APPROVE ROUTE SKIPPED:", {
+        reason: "approved_affiliate_not_found_in_result",
+        application_id: req.params.id,
+        resultKeys: result ? Object.keys(result) : [],
+      });
+    }
 
     return ok(
       res,
@@ -172,7 +196,6 @@ router.patch("/bulk-commission", async (req, res) => {
     return fail(res, error, 400);
   }
 });
-
 
 /**
  * REDE DE AFILIADOS
@@ -306,7 +329,6 @@ router.patch("/:id", async (req, res) => {
   }
 });
 
-
 /**
  * EXCLUIR AFILIADO
  */
@@ -319,10 +341,6 @@ router.delete("/:id", async (req, res) => {
     return fail(res, error, 400);
   }
 });
-
-
-
-
 
 /**
  * CONVERSÕES / COMISSÕES
