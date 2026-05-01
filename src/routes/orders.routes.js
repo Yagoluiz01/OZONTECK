@@ -1036,6 +1036,22 @@ router.post("/:id/sync-melhor-envio-now", requireAuth, async (req, res) => {
       });
     }
 
+    const previousLabelStatus = String(existingOrder.shipping_label_status || "")
+      .trim()
+      .toLowerCase();
+
+    const previousLabelUrl = String(
+      existingOrder.shipping_label_pdf_url ||
+        existingOrder.shipping_label_url ||
+        ""
+    ).trim();
+
+    const previousTracking = String(
+      existingOrder.shipping_tracking_code ||
+        existingOrder.tracking_code ||
+        ""
+    ).trim();
+
     const syncResult = await syncSpecificMelhorEnvioLabelNow(existingOrder);
 
     const refreshedOrderResponse = await fetchOrderRawById(id);
@@ -1048,8 +1064,65 @@ router.post("/:id/sync-melhor-envio-now", requireAuth, async (req, res) => {
       });
     }
 
+    const generatedNow = syncResult?.status === "generated";
+
+    const currentLabelStatus = String(refreshedOrder.shipping_label_status || "")
+      .trim()
+      .toLowerCase();
+
+    const currentLabelUrl = String(
+      refreshedOrder.shipping_label_pdf_url ||
+        refreshedOrder.shipping_label_url ||
+        ""
+    ).trim();
+
+    const currentTracking = String(
+      refreshedOrder.shipping_tracking_code ||
+        refreshedOrder.tracking_code ||
+        ""
+    ).trim();
+
+    const labelWasFoundNow =
+      generatedNow &&
+      (
+        previousLabelStatus !== "generated" ||
+        !previousLabelUrl ||
+        !previousTracking
+      ) &&
+      (
+        currentLabelStatus === "generated" ||
+        currentLabelUrl ||
+        currentTracking
+      );
+
+    const labelHasError =
+      syncResult?.status === "error" ||
+      currentLabelStatus === "error";
+
+    if (labelWasFoundNow) {
+      setTimeout(() => {
+        notifyOrderLabelGenerated(refreshedOrder).catch((notificationError) => {
+          console.error(
+            "ERRO AO ENVIAR NOTIFICAÇÃO DE ETIQUETA ENCONTRADA:",
+            notificationError
+          );
+        });
+      }, 0);
+    }
+
+    if (labelHasError && previousLabelStatus !== "error") {
+      setTimeout(() => {
+        notifyOrderLabelError(refreshedOrder).catch((notificationError) => {
+          console.error(
+            "ERRO AO ENVIAR NOTIFICAÇÃO DE ERRO NA ETIQUETA:",
+            notificationError
+          );
+        });
+      }, 0);
+    }
+
     const normalizedOrder = await buildOrderDetails(refreshedOrder);
-    const generatedNow = String(syncResult?.status || "").trim().toLowerCase() === "generated";
+    
 
     return res.status(200).json({
       success: true,
