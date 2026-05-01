@@ -1,55 +1,17 @@
-import nodemailer from "nodemailer";
-import { env } from "../config/env.js";
-
-function isEnabled() {
-  return String(env.notificationsEnabled || "").toLowerCase() === "true";
-}
-
-function hasEmailConfig() {
-  return Boolean(env.smtpHost && env.smtpUser && env.smtpPass && env.smtpFromEmail);
-}
-
-function normalizeEmail(email) {
-  return String(email || "").trim().toLowerCase();
-}
+import { createAdminNotification } from "./adminNotifications.service.js";
 
 function getAffiliateName(affiliate = {}) {
   return (
     affiliate.full_name ||
-    affiliate.fullName ||
     affiliate.name ||
-    "Afiliado OZONTECK"
+    affiliate.email ||
+    affiliate.ref_code ||
+    "Afiliado"
   );
 }
 
-function getAffiliateEmail(affiliate = {}) {
-  return normalizeEmail(affiliate.email);
-}
-
-function getRefCode(affiliate = {}) {
-  return String(affiliate.ref_code || affiliate.refCode || "").trim();
-}
-
-function getCouponCode(affiliate = {}) {
-  return String(affiliate.coupon_code || affiliate.couponCode || "").trim();
-}
-
-function getCommissionRate(affiliate = {}) {
-  const value = Number(affiliate.commission_rate ?? affiliate.commissionRate ?? 0);
-
-  if (!Number.isFinite(value)) {
-    return "0%";
-  }
-
-  return `${value.toFixed(2).replace(".", ",")}%`;
-}
-
-function formatMoney(value) {
+function formatMoneyBR(value) {
   const number = Number(value || 0);
-
-  if (!Number.isFinite(number)) {
-    return "R$ 0,00";
-  }
 
   return number.toLocaleString("pt-BR", {
     style: "currency",
@@ -57,497 +19,134 @@ function formatMoney(value) {
   });
 }
 
-function buildAffiliateLink(affiliate = {}) {
-  const refCode = getRefCode(affiliate);
-
-  const baseUrl =
-    env.storeBaseUrl ||
-    env.publicStoreUrl ||
-    "https://ozonteck-loja.onrender.com/pages-html/index.html";
-
-  try {
-    const url = new URL(baseUrl);
-
-    if (!url.pathname || url.pathname === "/") {
-      url.pathname = "/pages-html/index.html";
-    }
-
-    if (refCode) {
-      url.searchParams.set("ref", refCode);
-    }
-
-    return url.toString();
-  } catch {
-    const fallback = "https://ozonteck-loja.onrender.com/pages-html/index.html";
-
-    if (!refCode) {
-      return fallback;
-    }
-
-    return `${fallback}?ref=${encodeURIComponent(refCode)}`;
-  }
-}
-
-function buildAffiliatePanelLink() {
-  const baseUrl =
-    env.storeBaseUrl ||
-    env.publicStoreUrl ||
-    "https://ozonteck-loja.onrender.com";
-
-  try {
-    const url = new URL(baseUrl);
-
-    url.pathname = "/pages-html/afiliado-login.html";
-    url.search = "";
-
-    return url.toString();
-  } catch {
-    return "https://ozonteck-loja.onrender.com/pages-html/afiliado-login.html";
-  }
-}
-
-function escapeHtml(value) {
-  return String(value || "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
-
-function createTransporter() {
-  return nodemailer.createTransport({
-    host: env.smtpHost,
-    port: Number(env.smtpPort || 587),
-    secure: Number(env.smtpPort || 587) === 465,
-    auth: {
-      user: env.smtpUser,
-      pass: env.smtpPass,
+export async function notifyAffiliateCreated(application = {}) {
+  return createAdminNotification({
+    type: "affiliate_application_created",
+    title: "Nova solicitação de afiliado",
+    message: `${getAffiliateName(application)} enviou uma solicitação para ser afiliado.`,
+    entity_type: "affiliate_application",
+    entity_id: application.id || null,
+    priority: "high",
+    metadata: {
+      full_name: application.full_name || "",
+      email: application.email || "",
+      phone: application.phone || "",
+      status: application.status || "pending",
+      desired_ref_code: application.desired_ref_code || "",
+      desired_coupon_code: application.desired_coupon_code || "",
+      recruiter_ref_code: application.recruiter_ref_code || "",
+      recruiter_affiliate_id: application.recruiter_affiliate_id || null,
     },
   });
 }
 
-async function sendAffiliateEmail({
-  affiliate,
-  type,
-  to,
-  subject,
-  text,
-  html,
-  attachments = [],
-}) {
-  const channel = "email";
-  const recipient = normalizeEmail(to);
-
-  if (!isEnabled()) {
-    console.log("AFFILIATE NOTIFICATION SKIPPED:", {
-      type,
-      channel,
-      reason: "notifications_disabled",
-    });
-
-    return {
-      sent: false,
-      skipped: true,
-      reason: "notifications_disabled",
-    };
-  }
-
-  if (!hasEmailConfig()) {
-    console.log("AFFILIATE NOTIFICATION SKIPPED:", {
-      type,
-      channel,
-      reason: "smtp_not_configured",
-    });
-
-    return {
-      sent: false,
-      skipped: true,
-      reason: "smtp_not_configured",
-    };
-  }
-
-  if (!recipient) {
-    console.log("AFFILIATE NOTIFICATION SKIPPED:", {
-      type,
-      channel,
-      reason: "missing_recipient",
-    });
-
-    return {
-      sent: false,
-      skipped: true,
-      reason: "missing_recipient",
-    };
-  }
-
-  const transporter = createTransporter();
-
-  await transporter.sendMail({
-    from: `"${env.smtpFromName || "OZONTECK"}" <${env.smtpFromEmail}>`,
-    to: recipient,
-    subject,
-    text,
-    html,
-    attachments,
-  });
-
-  console.log("NOTIFICAÇÃO DE AFILIADO ENVIADA:", {
-    type,
-    channel: "E-mail",
-    to: recipient,
-    affiliateId: affiliate?.id || null,
-    affiliateName: getAffiliateName(affiliate),
-  });
-
-  return {
-    sent: true,
-    skipped: false,
-    type,
-    channel,
-    to: recipient,
-  };
-}
-
-export async function notifyAffiliateCreated(affiliate) {
-  const to = getAffiliateEmail(affiliate);
-  const affiliateName = getAffiliateName(affiliate);
-
-  const subject = "Cadastro de afiliado recebido - OZONTECK";
-
-  const text = [
-    `Olá, ${affiliateName}.`,
-    "",
-    "Seu cadastro no programa de afiliados OZONTECK foi recebido com sucesso.",
-    "",
-    "Nossa equipe irá analisar suas informações e, quando estiver tudo certo, você poderá começar a divulgar seus links de indicação.",
-    "",
-    "Equipe OZONTECK",
-  ].join("\n");
-
-  const html = `
-    <div style="font-family: Arial, sans-serif; color: #111827; line-height: 1.6;">
-      <h2 style="margin: 0 0 12px;">Cadastro de afiliado recebido</h2>
-      <p>Olá, <strong>${escapeHtml(affiliateName)}</strong>.</p>
-      <p>Seu cadastro no programa de afiliados <strong>OZONTECK</strong> foi recebido com sucesso.</p>
-      <p>Nossa equipe irá analisar suas informações e, quando estiver tudo certo, você poderá começar a divulgar seus links de indicação.</p>
-      <p style="margin-top: 24px;">Equipe OZONTECK</p>
-    </div>
-  `;
-
-  return sendAffiliateEmail({
-    affiliate,
-    type: "affiliate_created",
-    to,
-    subject,
-    text,
-    html,
+export async function notifyAffiliateCommissionCreated(affiliate = {}, conversion = {}) {
+  return createAdminNotification({
+    type: "affiliate_commission_created",
+    title: "Comissão de afiliado gerada",
+    message: `${getAffiliateName(affiliate)} recebeu uma comissão de ${formatMoneyBR(
+      conversion.commission_amount
+    )}.`,
+    entity_type: "affiliate_conversion",
+    entity_id: conversion.id || null,
+    priority: "high",
+    metadata: {
+      affiliate_id: affiliate.id || conversion.affiliate_id || null,
+      affiliate_name: getAffiliateName(affiliate),
+      affiliate_email: affiliate.email || "",
+      order_id: conversion.order_id || null,
+      order_number: conversion.order_number || "",
+      conversion_type: conversion.conversion_type || "",
+      commission_amount: conversion.commission_amount || 0,
+      commission_rate: conversion.commission_rate || 0,
+      status: conversion.status || "",
+    },
   });
 }
 
-export async function notifyAffiliateApproved(affiliate) {
-  const to = getAffiliateEmail(affiliate);
-  const affiliateName = getAffiliateName(affiliate);
-  const refCode = getRefCode(affiliate);
-  const couponCode = getCouponCode(affiliate);
-  const commissionRate = getCommissionRate(affiliate);
-  const affiliateLink = buildAffiliateLink(affiliate);
-  const panelLink = buildAffiliatePanelLink();
-
-  const subject = "Você foi aprovado no programa de afiliados OZONTECK";
-
-  const text = [
-    `Olá, ${affiliateName}.`,
-    "",
-    "Parabéns! Seu cadastro no programa de afiliados OZONTECK foi aprovado.",
-    "",
-    refCode ? `Seu código de indicação: ${refCode}` : "",
-    couponCode ? `Seu cupom: ${couponCode}` : "",
-    `Sua comissão: ${commissionRate}`,
-    "",
-    `Seu link de divulgação: ${affiliateLink}`,
-    `Acesse seu painel de afiliado: ${panelLink}`,
-    "",
-    "Agora você já pode divulgar a OZONTECK e acompanhar seus resultados pelo painel.",
-    "",
-    "Equipe OZONTECK",
-  ]
-    .filter(Boolean)
-    .join("\n");
-
-  const html = `
-    <div style="font-family: Arial, sans-serif; color: #111827; line-height: 1.6;">
-      <h2 style="margin: 0 0 12px;">Afiliado aprovado</h2>
-
-      <p>Olá, <strong>${escapeHtml(affiliateName)}</strong>.</p>
-
-      <p>
-        Parabéns! Seu cadastro no programa de afiliados
-        <strong>OZONTECK</strong> foi aprovado.
-      </p>
-
-      <div style="background: #f3f4f6; padding: 14px; border-radius: 10px; margin: 18px 0;">
-        ${refCode ? `<p><strong>Código de indicação:</strong> ${escapeHtml(refCode)}</p>` : ""}
-        ${couponCode ? `<p><strong>Cupom:</strong> ${escapeHtml(couponCode)}</p>` : ""}
-        <p><strong>Comissão:</strong> ${escapeHtml(commissionRate)}</p>
-
-        <p><strong>Link de divulgação:</strong><br />
-          <a href="${escapeHtml(affiliateLink)}" target="_blank">
-            ${escapeHtml(affiliateLink)}
-          </a>
-        </p>
-
-        <p><strong>Painel do afiliado:</strong><br />
-          <a href="${escapeHtml(panelLink)}" target="_blank">
-            ${escapeHtml(panelLink)}
-          </a>
-        </p>
-      </div>
-
-      <p>
-        Agora você já pode divulgar a OZONTECK e acompanhar seus resultados pelo painel.
-      </p>
-
-      <p style="margin-top: 24px;">Equipe OZONTECK</p>
-    </div>
-  `;
-
-  return sendAffiliateEmail({
-    affiliate,
+export async function notifyAffiliateApproved(affiliate = {}) {
+  return createAdminNotification({
     type: "affiliate_approved",
-    to,
-    subject,
-    text,
-    html,
+    title: "Afiliado aprovado",
+    message: `${getAffiliateName(affiliate)} foi aprovado como afiliado OZONTECK.`,
+    entity_type: "affiliate",
+    entity_id: affiliate.id || affiliate.affiliate_id || null,
+    priority: "high",
+    metadata: {
+      affiliate_id: affiliate.id || affiliate.affiliate_id || null,
+      full_name: affiliate.full_name || "",
+      email: affiliate.email || "",
+      phone: affiliate.phone || "",
+      ref_code: affiliate.ref_code || "",
+      coupon_code: affiliate.coupon_code || "",
+      commission_rate: affiliate.commission_rate || 0,
+      status: affiliate.status || "active",
+    },
+  });
+}
+
+
+export async function notifyAffiliatePayoutPaid(affiliate = {}, payout = {}) {
+  return createAdminNotification({
+    type: "affiliate_payout_paid",
+    title: "Comissão de afiliado paga",
+    message: `${getAffiliateName(affiliate)} teve pagamento de comissão registrado no valor de ${formatMoneyBR(
+      payout.amount || payout.paid_amount || payout.total_amount
+    )}.`,
+    entity_type: "affiliate_payout",
+    entity_id: payout.id || null,
+    priority: "high",
+    metadata: {
+      affiliate_id: affiliate.id || affiliate.affiliate_id || payout.affiliate_id || null,
+      affiliate_name: getAffiliateName(affiliate),
+      affiliate_email: affiliate.email || "",
+      payout_id: payout.id || null,
+      amount: payout.amount || payout.paid_amount || payout.total_amount || 0,
+      payment_reference: payout.payment_reference || "",
+      receipt_url: payout.receipt_url || payout.receipt_path || "",
+      status: payout.status || "paid",
+      paid_at: payout.paid_at || payout.created_at || "",
+    },
   });
 }
 
 export async function notifyAffiliateRejected(application = {}) {
-  const affiliate = application;
-  const to = getAffiliateEmail(application);
-  const affiliateName = getAffiliateName(application);
-
-  const subject = "Atualização sobre sua solicitação de afiliado OZONTECK";
-
-  const text = [
-    `Olá, ${affiliateName}.`,
-    "",
-    "Agradecemos seu interesse em participar do programa de afiliados OZONTECK.",
-    "",
-    "No momento, sua solicitação não foi aprovada.",
-    "",
-    "Você pode entrar em contato com nossa equipe caso queira mais informações ou tentar novamente no futuro.",
-    "",
-    "Equipe OZONTECK",
-  ].join("\n");
-
-  const html = `
-    <div style="font-family: Arial, sans-serif; color: #111827; line-height: 1.6;">
-      <h2 style="margin: 0 0 12px;">Atualização sobre sua solicitação</h2>
-      <p>Olá, <strong>${escapeHtml(affiliateName)}</strong>.</p>
-      <p>Agradecemos seu interesse em participar do programa de afiliados <strong>OZONTECK</strong>.</p>
-      <p>No momento, sua solicitação não foi aprovada.</p>
-      <p>Você pode entrar em contato com nossa equipe caso queira mais informações ou tentar novamente no futuro.</p>
-      <p style="margin-top: 24px;">Equipe OZONTECK</p>
-    </div>
-  `;
-
-  return sendAffiliateEmail({
-    affiliate,
+  return createAdminNotification({
     type: "affiliate_rejected",
-    to,
-    subject,
-    html,
-    text,
+    title: "Solicitação de afiliado recusada",
+    message: `${getAffiliateName(application)} teve a solicitação de afiliado recusada.`,
+    entity_type: "affiliate_application",
+    entity_id: application.id || null,
+    priority: "normal",
+    metadata: {
+      application_id: application.id || null,
+      full_name: application.full_name || "",
+      email: application.email || "",
+      phone: application.phone || "",
+      status: application.status || "rejected",
+      desired_ref_code: application.desired_ref_code || "",
+      desired_coupon_code: application.desired_coupon_code || "",
+      rejected_at: application.rejected_at || application.updated_at || "",
+    },
   });
 }
 
-export async function notifyAffiliatePayoutPaid(
-  affiliate,
-  payout = {},
-  receiptFile = null
-) {
-  const to = getAffiliateEmail(affiliate);
-  const affiliateName = getAffiliateName(affiliate);
-  const amount = formatMoney(payout.amount);
-
-  const subject = "Pagamento de comissão registrado - OZONTECK";
-
-  const text = [
-    `Olá, ${affiliateName}.`,
-    "",
-    `Registramos o pagamento da sua comissão no valor de ${amount}.`,
-    "",
-    payout.payment_method ? `Método de pagamento: ${payout.payment_method}` : "",
-    payout.payment_reference ? `Referência: ${payout.payment_reference}` : "",
-    receiptFile ? "O comprovante do pagamento está anexado neste e-mail." : "",
-    "",
-    "Obrigado por fazer parte do programa de afiliados OZONTECK.",
-    "",
-    "Equipe OZONTECK",
-  ]
-    .filter(Boolean)
-    .join("\n");
-
-  const html = `
-    <div style="font-family: Arial, sans-serif; color: #111827; line-height: 1.6;">
-      <h2 style="margin: 0 0 12px;">Pagamento de comissão registrado</h2>
-      <p>Olá, <strong>${escapeHtml(affiliateName)}</strong>.</p>
-      <p>Registramos o pagamento da sua comissão no valor de <strong>${escapeHtml(amount)}</strong>.</p>
-
-      ${
-        payout.payment_method
-          ? `<p><strong>Método de pagamento:</strong> ${escapeHtml(payout.payment_method)}</p>`
-          : ""
-      }
-
-      ${
-        payout.payment_reference
-          ? `<p><strong>Referência:</strong> ${escapeHtml(payout.payment_reference)}</p>`
-          : ""
-      }
-
-      ${
-        receiptFile
-          ? `<p>O comprovante do pagamento está anexado neste e-mail.</p>`
-          : ""
-      }
-
-      <p>Obrigado por fazer parte do programa de afiliados OZONTECK.</p>
-      <p style="margin-top: 24px;">Equipe OZONTECK</p>
-    </div>
-  `;
-
-  const attachments = [];
-
-  if (receiptFile?.buffer?.length) {
-    attachments.push({
-      filename: receiptFile.originalname || "comprovante-comissao",
-      content: receiptFile.buffer,
-      contentType: receiptFile.mimetype || "application/octet-stream",
-    });
-  }
-
-  return sendAffiliateEmail({
-    affiliate,
-    type: "affiliate_payout_paid",
-    to,
-    subject,
-    text,
-    html,
-    attachments,
-  });
-}
-
-export async function notifyAffiliateCommissionCreated(affiliate, conversion = {}) {
-  const to = getAffiliateEmail(affiliate);
-  const affiliateName = getAffiliateName(affiliate);
-  const amount = formatMoney(conversion.commission_amount);
-  const orderNumber =
-    conversion.order_number || conversion.orderNumber || "pedido indicado";
-
-  const subject = "Nova comissão gerada - OZONTECK";
-
-  const text = [
-    `Olá, ${affiliateName}.`,
-    "",
-    "Uma nova comissão foi gerada para você no programa de afiliados OZONTECK.",
-    "",
-    `Pedido: ${orderNumber}`,
-    `Valor da comissão: ${amount}`,
-    "",
-    "Essa comissão ficará disponível conforme as regras de aprovação e pagamento do programa.",
-    "",
-    "Equipe OZONTECK",
-  ].join("\n");
-
-  const html = `
-    <div style="font-family: Arial, sans-serif; color: #111827; line-height: 1.6;">
-      <h2 style="margin: 0 0 12px;">Nova comissão gerada</h2>
-      <p>Olá, <strong>${escapeHtml(affiliateName)}</strong>.</p>
-      <p>Uma nova comissão foi gerada para você no programa de afiliados <strong>OZONTECK</strong>.</p>
-
-      <div style="background: #f3f4f6; padding: 14px; border-radius: 10px; margin: 18px 0;">
-        <p><strong>Pedido:</strong> ${escapeHtml(orderNumber)}</p>
-        <p><strong>Valor da comissão:</strong> ${escapeHtml(amount)}</p>
-      </div>
-
-      <p>Essa comissão ficará disponível conforme as regras de aprovação e pagamento do programa.</p>
-      <p style="margin-top: 24px;">Equipe OZONTECK</p>
-    </div>
-  `;
-
-  return sendAffiliateEmail({
-    affiliate,
-    type: "affiliate_commission_created",
-    to,
-    subject,
-    text,
-    html,
-  });
-}
-
-export async function notifyAffiliatePasswordReset(affiliate, temporaryPassword) {
-  const to = getAffiliateEmail(affiliate);
-  const affiliateName = getAffiliateName(affiliate);
-  const loginUrl = buildAffiliatePanelLink();
-
-  const subject = "Recuperação de senha do painel de afiliado OZONTECK";
-
-  const text = [
-    `Olá, ${affiliateName}.`,
-    "",
-    "Recebemos uma solicitação de recuperação de senha para o seu painel de afiliado OZONTECK.",
-    "",
-    `Sua nova senha temporária é: ${temporaryPassword}`,
-    "",
-    `Acesse o painel por este link: ${loginUrl}`,
-    "",
-    "Por segurança, não compartilhe essa senha com ninguém.",
-    "",
-    "Equipe OZONTECK",
-  ].join("\n");
-
-  const html = `
-    <div style="font-family: Arial, sans-serif; color: #111827; line-height: 1.6;">
-      <h2 style="margin: 0 0 12px;">Recuperação de senha</h2>
-
-      <p>Olá, <strong>${escapeHtml(affiliateName)}</strong>.</p>
-
-      <p>
-        Recebemos uma solicitação de recuperação de senha para o seu painel de afiliado
-        <strong>OZONTECK</strong>.
-      </p>
-
-      <div style="background: #f3f4f6; padding: 16px; border-radius: 10px; margin: 18px 0;">
-        <p style="margin: 0 0 8px;"><strong>Nova senha temporária:</strong></p>
-        <p style="font-size: 22px; font-weight: 800; margin: 0; letter-spacing: 1px;">
-          ${escapeHtml(temporaryPassword)}
-        </p>
-      </div>
-
-      <p>Acesse o painel pelo link abaixo:</p>
-
-      <p>
-        <a href="${escapeHtml(loginUrl)}" target="_blank">
-          ${escapeHtml(loginUrl)}
-        </a>
-      </p>
-
-      <p style="color: #b91c1c;">
-        Por segurança, não compartilhe essa senha com ninguém.
-      </p>
-
-      <p style="margin-top: 24px;">Equipe OZONTECK</p>
-    </div>
-  `;
-
-  return sendAffiliateEmail({
-    affiliate,
+export async function notifyAffiliatePasswordReset(affiliate = {}) {
+  return createAdminNotification({
     type: "affiliate_password_reset",
-    to,
-    subject,
-    text,
-    html,
+    title: "Senha de afiliado redefinida",
+    message: `${getAffiliateName(affiliate)} redefiniu ou solicitou redefinição de senha no painel de afiliado.`,
+    entity_type: "affiliate",
+    entity_id: affiliate.id || affiliate.affiliate_id || null,
+    priority: "normal",
+    metadata: {
+      affiliate_id: affiliate.id || affiliate.affiliate_id || null,
+      full_name: affiliate.full_name || "",
+      email: affiliate.email || "",
+      phone: affiliate.phone || "",
+      ref_code: affiliate.ref_code || "",
+      status: affiliate.status || "",
+      reset_at: affiliate.reset_at || affiliate.updated_at || new Date().toISOString(),
+    },
   });
 }
