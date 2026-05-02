@@ -24,7 +24,7 @@ import {
   processAffiliateLevelProgress,
   updateAffiliateLevelBonusStatus,
 } from "../services/adminAffiliates.service.js";
-import { notifyAffiliateApproved } from "../services/affiliateNotification.service.js";
+
 
 const router = express.Router();
 
@@ -107,29 +107,7 @@ router.post("/applications/:id/approve", async (req, res) => {
       sanitizeAffiliatePayload(req.body || {}, { defaultCommission: true })
     );
 
-    const approvedAffiliate =
-      result?.affiliate ||
-      result?.createdAffiliate ||
-      result?.data?.affiliate ||
-      result?.result?.affiliate ||
-      null;
-
-    if (approvedAffiliate) {
-      notifyAffiliateApproved(approvedAffiliate).catch((error) => {
-        console.error("BREVO EMAIL APPROVE ROUTE ERROR:", {
-          message: error?.message,
-          affiliate_id:
-            approvedAffiliate?.id || approvedAffiliate?.affiliate_id || null,
-          email: approvedAffiliate?.email || "",
-        });
-      });
-    } else {
-      console.log("BREVO EMAIL APPROVE ROUTE SKIPPED:", {
-        reason: "approved_affiliate_not_found_in_result",
-        application_id: req.params.id,
-        resultKeys: result ? Object.keys(result) : [],
-      });
-    }
+    
 
     return ok(
       res,
