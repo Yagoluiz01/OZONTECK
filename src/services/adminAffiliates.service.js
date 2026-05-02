@@ -288,10 +288,16 @@ function buildAffiliatePayload(input = {}, isUpdate = false) {
   const couponCode = normalizeCode(input.coupon_code || input.couponCode);
   const status = cleanText(input.status || "active") || "active";
   const commissionRate = toNumber(
-    input.commission_rate ?? input.commissionRate,
-    10
-  );
-  const pixKey = cleanText(input.pix_key || input.pixKey);
+  input.commission_rate ?? input.commissionRate,
+  10
+);
+
+const recruitmentCommissionRate = toNumber(
+  input.recruitment_commission_rate ?? input.recruitmentCommissionRate,
+  5
+);
+
+const pixKey = cleanText(input.pix_key || input.pixKey);
   const notes = cleanText(input.notes);
   const passwordHash = cleanText(input.password_hash || input.passwordHash);
   const accessEnabled =
@@ -333,6 +339,15 @@ const recruiterRefCode = normalizeCode(
   ) {
     payload.commission_rate = commissionRate;
   }
+
+  if (
+    !isUpdate ||
+    input.recruitment_commission_rate !== undefined ||
+    input.recruitmentCommissionRate !== undefined
+  ) {
+    payload.recruitment_commission_rate = recruitmentCommissionRate;
+  }
+
 
   if (!isUpdate || pixKey) payload.pix_key = pixKey || null;
   if (!isUpdate || notes) payload.notes = notes || null;
@@ -387,6 +402,17 @@ if (
   ) {
     throw new Error("A comissão precisa estar entre 0 e 100.");
   }
+
+
+  if (
+  payload.recruitment_commission_rate !== undefined &&
+  (
+    payload.recruitment_commission_rate < 0 ||
+    payload.recruitment_commission_rate > 100
+  )
+) {
+  throw new Error("A comissão de recrutamento precisa estar entre 0 e 100.");
+}
 
   return payload;
 }
@@ -680,6 +706,11 @@ export async function approveAffiliateApplication(id, input = {}) {
     10
   );
 
+  const recruitmentCommissionRate = toNumber(
+  input.recruitment_commission_rate ?? input.recruitmentCommissionRate,
+  5
+);
+
   const recruiterAffiliateId = cleanText(
     input.recruiter_affiliate_id ||
       input.recruiterAffiliateId ||
@@ -702,6 +733,7 @@ export async function approveAffiliateApplication(id, input = {}) {
     ref_code: refCode,
     coupon_code: couponCode || null,
     commission_rate: commissionRate,
+    recruitment_commission_rate: recruitmentCommissionRate,
     recruiter_affiliate_id: recruiterAffiliateId || null,
     recruiter_ref_code: recruiterRefCode || null,
     status: "active",
