@@ -831,22 +831,69 @@ export async function rejectAffiliateApplication(id, input = {}) {
 }
 
 export async function updateAffiliateCommissionBulk(input = {}) {
-  const commissionRate = toNumber(
-    input.commission_rate ?? input.commissionRate,
-    NaN
-  );
+  const hasCommissionRate =
+    input.commission_rate !== undefined || input.commissionRate !== undefined;
+
+  const hasRecruitmentCommissionRate =
+    input.recruitment_commission_rate !== undefined ||
+    input.recruitmentCommissionRate !== undefined;
+
+  const commissionRate = hasCommissionRate
+    ? toNumber(input.commission_rate ?? input.commissionRate, NaN)
+    : null;
+
+  const recruitmentCommissionRate = hasRecruitmentCommissionRate
+    ? toNumber(
+        input.recruitment_commission_rate ?? input.recruitmentCommissionRate,
+        NaN
+      )
+    : null;
+
   const status = cleanText(input.status);
 
-  if (!Number.isFinite(commissionRate)) {
+  if (!hasCommissionRate && !hasRecruitmentCommissionRate) {
+    throw new Error("Informe uma comissão para atualizar.");
+  }
+
+  if (hasCommissionRate && !Number.isFinite(commissionRate)) {
     throw new Error("Informe uma porcentagem de comissão válida.");
   }
 
-  if (commissionRate < 0 || commissionRate > 100) {
+  if (
+    hasCommissionRate &&
+    (commissionRate < 0 || commissionRate > 100)
+  ) {
     throw new Error("A comissão precisa estar entre 0 e 100.");
+  }
+
+  if (
+    hasRecruitmentCommissionRate &&
+    !Number.isFinite(recruitmentCommissionRate)
+  ) {
+    throw new Error("Informe uma comissão de recrutamento válida.");
+  }
+
+  if (
+    hasRecruitmentCommissionRate &&
+    (recruitmentCommissionRate < 0 || recruitmentCommissionRate > 100)
+  ) {
+    throw new Error("A comissão de recrutamento precisa estar entre 0 e 100.");
   }
 
   if (status && !["active", "inactive", "blocked"].includes(status)) {
     throw new Error("Status inválido para atualização em massa.");
+  }
+
+  const updatePayload = {};
+
+  if (hasCommissionRate) {
+    updatePayload.commission_rate = Number(commissionRate.toFixed(2));
+  }
+
+  if (hasRecruitmentCommissionRate) {
+    updatePayload.recruitment_commission_rate = Number(
+      recruitmentCommissionRate.toFixed(2)
+    );
   }
 
   const params = new URLSearchParams();
@@ -863,12 +910,11 @@ export async function updateAffiliateCommissionBulk(input = {}) {
     headers: {
       Prefer: "return=representation",
     },
-    body: JSON.stringify({
-      commission_rate: Number(commissionRate.toFixed(2)),
-    }),
+    body: JSON.stringify(updatePayload),
   });
 
   const updated = Array.isArray(updatedRows) ? updatedRows.length : 0;
+
   const scopeLabel = status
     ? status === "active"
       ? "afiliados ativos"
@@ -877,11 +923,30 @@ export async function updateAffiliateCommissionBulk(input = {}) {
         : "afiliados bloqueados"
     : "todos os afiliados";
 
+  const updatedLabels = [];
+
+  if (hasCommissionRate) {
+    updatedLabels.push(
+      `comissão de venda ${Number(commissionRate).toFixed(2)}%`
+    );
+  }
+
+  if (hasRecruitmentCommissionRate) {
+    updatedLabels.push(
+      `comissão de recrutamento ${Number(recruitmentCommissionRate).toFixed(2)}%`
+    );
+  }
+
   return {
     updated,
-    commission_rate: Number(commissionRate.toFixed(2)),
+    commission_rate: hasCommissionRate
+      ? Number(commissionRate.toFixed(2))
+      : undefined,
+    recruitment_commission_rate: hasRecruitmentCommissionRate
+      ? Number(recruitmentCommissionRate.toFixed(2))
+      : undefined,
     status: status || "all",
-    message: `Comissão de ${Number(commissionRate).toFixed(2)}% aplicada para ${updated} ${scopeLabel}.`,
+    message: `${updatedLabels.join(" e ")} aplicada para ${updated} ${scopeLabel}.`,
   };
 }
 
