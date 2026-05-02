@@ -22,6 +22,7 @@ import adminFinancialRoutes from "./routes/adminFinancial.routes.js";
 import adminPricingRoutes from "./routes/adminPricing.routes.js";
 import adminAffiliatesRoutes from "./routes/adminAffiliates.routes.js";
 import affiliatePortalRoutes from "./routes/affiliatePortal.routes.js";
+import affiliatePasswordRoutes from "./routes/affiliatePassword.routes.js";
 
 const app = express();
 
@@ -177,6 +178,7 @@ app.use("/api/shipping", shippingRoutes);
 app.use("/api/tracking", trackingRoutes);
 app.use("/api/store", storeRoutes);
 app.use("/api/affiliate", affiliatePortalRoutes);
+app.use('/api/public/affiliates/password', affiliatePasswordRoutes);
 
 app.use("/api/admin/financial", adminFinancialRoutes);
 app.use("/api/admin/notifications", adminNotificationsRoutes);
