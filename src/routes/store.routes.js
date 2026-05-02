@@ -1,4 +1,4 @@
-import {
+﻿import {
   notifyOrderCreatedPending,
   notifyOrderPaid,
   notifyOrderPaymentPending,
@@ -522,23 +522,27 @@ async function createActivationOfferSafely(order, source = "unknown") {
 }
 
 
-
-
-function getRecruitmentBonusAmount(affiliate = {}) {
+function getRecruitmentCommissionRate(affiliate = {}) {
   const configured =
-    process.env.AFFILIATE_RECRUITMENT_BONUS_AMOUNT ||
-    process.env.RECRUITMENT_BONUS_AMOUNT ||
-    affiliate.recruitment_bonus_amount ||
-    10;
+    affiliate.recruitment_commission_rate ||
+    process.env.AFFILIATE_RECRUITMENT_COMMISSION_RATE ||
+    process.env.RECRUITMENT_COMMISSION_RATE ||
+    5;
 
-  const amount = Number(configured);
+  const rate = Number(configured);
 
-  if (!Number.isFinite(amount) || amount <= 0) {
-    return 10;
+  if (!Number.isFinite(rate) || rate <= 0) {
+    return 5;
   }
 
-  return Number(amount.toFixed(2));
+  if (rate > 100) {
+    return 100;
+  }
+
+  return Number(rate.toFixed(2));
 }
+
+
 
 async function findAffiliateById(affiliateId) {
   const id = String(affiliateId || "").trim();
@@ -618,8 +622,34 @@ async function createRecruitmentBonusForPaidOrder(order, recruitedAffiliate, ord
     };
   }
 
+  const safeOrderTotal = Number(orderTotal || order.total_amount || 0) || 0;
+
+  if (safeOrderTotal <= 0) {
+    return {
+      created: false,
+      skipped: true,
+      reason: "invalid_order_total_for_recruitment_commission"
+    };
+  }
+
+  const recruitmentCommissionRate = getRecruitmentCommissionRate(recruiterAffiliate);
+
+  const recruitmentCommissionAmount = Number(
+    ((safeOrderTotal * recruitmentCommissionRate) / 100).toFixed(2)
+  );
+
+  if (recruitmentCommissionRate <= 0 || recruitmentCommissionAmount <= 0) {
+    return {
+      created: false,
+      skipped: true,
+      reason: "invalid_recruitment_commission"
+    };
+  }
+
   const checkUrl = new URL(`${env.supabaseUrl}/rest/v1/affiliate_conversions`);
   checkUrl.searchParams.set("select", "id");
+  checkUrl.searchParams.set("order_id", `eq.${order.id}`);
+  checkUrl.searchParams.set("affiliate_id", `eq.${recruiterAffiliate.id}`);
   checkUrl.searchParams.set("conversion_type", "eq.recruitment_bonus");
   checkUrl.searchParams.set("recruited_affiliate_id", `eq.${recruitedAffiliate.id}`);
   checkUrl.searchParams.set("limit", "1");
@@ -640,12 +670,10 @@ async function createRecruitmentBonusForPaidOrder(order, recruitedAffiliate, ord
     return {
       created: false,
       skipped: true,
-      reason: "recruitment_bonus_already_exists",
+      reason: "recruitment_commission_already_exists_for_this_order",
       conversionId: checkData[0].id
     };
   }
-
-  const bonusAmount = getRecruitmentBonusAmount(recruiterAffiliate);
 
   const payload = {
     affiliate_id: recruiterAffiliate.id,
@@ -653,25 +681,31 @@ async function createRecruitmentBonusForPaidOrder(order, recruitedAffiliate, ord
     customer_id: null,
     ref_code: recruiterAffiliate.ref_code || "",
     coupon_code: recruiterAffiliate.coupon_code || "",
-    order_total: Number(orderTotal || order.total_amount || 0) || 0,
-    commission_rate: 0,
-    commission_amount: bonusAmount,
+    order_total: safeOrderTotal,
+    commission_rate: recruitmentCommissionRate,
+    commission_amount: recruitmentCommissionAmount,
     conversion_type: "recruitment_bonus",
     recruited_affiliate_id: recruitedAffiliate.id,
-    recruitment_bonus_amount: bonusAmount,
+    seller_affiliate_id: recruitedAffiliate.id,
+    recruitment_commission_rate: recruitmentCommissionRate,
+    recruitment_bonus_amount: recruitmentCommissionAmount,
     status: "approved",
     approved_at: new Date().toISOString(),
     released_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
     metadata: {
-      source: "affiliate_recruitment_bonus",
+      source: "affiliate_recruitment_commission",
       order_id: order.id,
       order_number: order.order_number || "",
+      order_total: safeOrderTotal,
+      recruitment_commission_rate: recruitmentCommissionRate,
+      recruitment_commission_amount: recruitmentCommissionAmount,
+      recruiter_affiliate_id: recruiterAffiliate.id,
       recruited_affiliate_id: recruitedAffiliate.id,
       recruited_affiliate_name: recruitedAffiliate.full_name || "",
       recruited_affiliate_email: recruitedAffiliate.email || "",
       recruited_affiliate_ref_code: recruitedAffiliate.ref_code || ""
     },
-    notes: `Bônus de recrutamento criado automaticamente pela primeira venda paga do afiliado ${recruitedAffiliate.full_name || recruitedAffiliate.ref_code || recruitedAffiliate.id}.`
+    notes: `Comissão de recrutamento de ${recruitmentCommissionRate}% criada automaticamente pelo pedido ${order.order_number || order.id}, venda feita pelo afiliado ${recruitedAffiliate.full_name || recruitedAffiliate.ref_code || recruitedAffiliate.id}.`
   };
 
   const createResponse = await fetch(`${env.supabaseUrl}/rest/v1/affiliate_conversions`, {
@@ -688,8 +722,8 @@ async function createRecruitmentBonusForPaidOrder(order, recruitedAffiliate, ord
   const createData = await createResponse.json().catch(() => []);
 
   if (!createResponse.ok || !Array.isArray(createData) || !createData[0]?.id) {
-    console.error("ERRO SUPABASE RECRUITMENT BONUS:", createData);
-    throw new Error("Erro ao criar bônus de recrutamento do afiliado");
+    console.error("ERRO SUPABASE RECRUITMENT COMMISSION:", createData);
+    throw new Error("Erro ao criar comissão de recrutamento do afiliado");
   }
 
   const conversion = createData[0];
@@ -701,21 +735,26 @@ async function createRecruitmentBonusForPaidOrder(order, recruitedAffiliate, ord
     });
   } catch (notificationError) {
     console.error(
-      "ERRO AO ENVIAR NOTIFICAÇÃO DE BÔNUS DE RECRUTAMENTO:",
+      "ERRO AO ENVIAR NOTIFICAÇÃO DE COMISSÃO DE RECRUTAMENTO:",
       notificationError
     );
   }
 
-  await safeAffiliatePush("recruitment_bonus_created", recruiterAffiliate.id, {
-    title: "🎁 Bônus",
-    body: `Você ganhou ${formatMoneyBR(bonusAmount)} pela ativação de ${recruitedAffiliate.full_name || "um afiliado da sua rede"}.`,
+  await safeAffiliatePush("recruitment_commission_created", recruiterAffiliate.id, {
+    title: "🎁 Comissão de rede",
+    body: `Você ganhou ${formatMoneyBR(recruitmentCommissionAmount)} pela venda de ${recruitedAffiliate.full_name || "um afiliado da sua rede"}.`,
     url: "/pages-html/afiliado-painel.html",
     data: {
-      type: "recruitment_bonus_created",
+      type: "recruitment_commission_created",
       affiliate_id: recruiterAffiliate.id,
       recruited_affiliate_id: recruitedAffiliate.id,
+      seller_affiliate_id: recruitedAffiliate.id,
       conversion_id: conversion.id || null,
       order_id: order.id,
+      order_number: order.order_number || null,
+      order_total: safeOrderTotal,
+      commission_rate: recruitmentCommissionRate,
+      commission_amount: recruitmentCommissionAmount,
     },
   });
 
