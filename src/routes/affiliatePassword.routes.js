@@ -12,74 +12,132 @@ const supabaseAdmin = createClient(
 );
 
 function normalizeEmail(email) {
-  return String(email || '').trim().toLowerCase();
+  return String(email || "").trim().toLowerCase();
 }
 
 function hashToken(token) {
-  return crypto.createHash('sha256').update(token).digest('hex');
+  return crypto.createHash("sha256").update(token).digest("hex");
 }
 
 function isStrongPassword(password) {
-  return typeof password === 'string' && password.trim().length >= 6;
+  return typeof password === "string" && password.trim().length >= 6;
 }
 
 function getStoreBaseUrl() {
   return (
     process.env.STORE_PUBLIC_URL ||
     process.env.STORE_BASE_URL ||
-    'https://ozonteck-loja.onrender.com'
-  ).replace(/\/+$/, '');
+    "https://ozonteck-loja.onrender.com"
+  ).replace(/\/+$/, "");
+}
+
+function getMailConfig() {
+  const smtpHost =
+    process.env.BREVO_SMTP_HOST ||
+    process.env.SMTP_HOST ||
+    "smtp-relay.brevo.com";
+
+  const smtpPort = Number(
+    process.env.BREVO_SMTP_PORT ||
+      process.env.SMTP_PORT ||
+      587
+  );
+
+  const smtpUser =
+    process.env.BREVO_SMTP_USER ||
+    process.env.SMTP_USER;
+
+  const smtpPass =
+    process.env.BREVO_SMTP_PASS ||
+    process.env.SMTP_PASS;
+
+  const fromEmail =
+    process.env.MAIL_FROM_EMAIL ||
+    process.env.SMTP_FROM_EMAIL ||
+    process.env.BREVO_FROM_EMAIL ||
+    smtpUser;
+
+  const fromName =
+    process.env.MAIL_FROM_NAME ||
+    process.env.SMTP_FROM_NAME ||
+    "OZONTECK";
+
+  return {
+    smtpHost,
+    smtpPort,
+    smtpUser,
+    smtpPass,
+    fromEmail,
+    fromName,
+  };
 }
 
 function getMailTransporter() {
+  const { smtpHost, smtpPort, smtpUser, smtpPass } = getMailConfig();
+
   return nodemailer.createTransport({
-    host: process.env.BREVO_SMTP_HOST || 'smtp-relay.brevo.com',
-    port: Number(process.env.BREVO_SMTP_PORT || 587),
-    secure: false,
+    host: smtpHost,
+    port: smtpPort,
+    secure: smtpPort === 465,
     auth: {
-      user: process.env.BREVO_SMTP_USER,
-      pass: process.env.BREVO_SMTP_PASS,
+      user: smtpUser,
+      pass: smtpPass,
     },
   });
 }
 
 async function sendResetEmail({ to, name, resetLink }) {
-  if (!process.env.BREVO_SMTP_USER || !process.env.BREVO_SMTP_PASS) {
-    console.warn('RESET PASSWORD EMAIL: credenciais Brevo ausentes.');
+  const { smtpUser, smtpPass, fromEmail, fromName } = getMailConfig();
+
+  if (!smtpUser || !smtpPass) {
+    console.warn("RESET PASSWORD EMAIL: credenciais SMTP/Brevo ausentes.");
+    return;
+  }
+
+  if (!fromEmail) {
+    console.warn("RESET PASSWORD EMAIL: remetente ausente.");
     return;
   }
 
   const transporter = getMailTransporter();
 
-  const fromEmail = process.env.MAIL_FROM_EMAIL || process.env.BREVO_FROM_EMAIL || process.env.BREVO_SMTP_USER;
-  const fromName = process.env.MAIL_FROM_NAME || 'OZONTECK';
+  const safeName = String(name || "").trim();
 
   const html = `
-    <div style="font-family:Arial,sans-serif;background:#f6f7fb;padding:24px;">
-      <div style="max-width:560px;margin:auto;background:#ffffff;border-radius:18px;padding:28px;border:1px solid #e5e7eb;">
-        <h2 style="margin:0 0 12px;color:#111827;">Redefinição de senha</h2>
+    <div style="font-family: Arial, sans-serif; background: #f3f4f6; padding: 24px;">
+      <div style="max-width: 560px; margin: auto; background: #ffffff; border-radius: 18px; padding: 28px; border: 1px solid #e5e7eb;">
+        <div style="text-align:center; margin-bottom: 22px;">
+          <h1 style="margin:0; color:#111827; font-size:24px;">OZONTECK</h1>
+          <p style="margin:8px 0 0; color:#6b7280; font-size:14px;">
+            Painel de Afiliados
+          </p>
+        </div>
 
-        <p style="font-size:15px;color:#374151;line-height:1.6;">
-          Olá${name ? `, <strong>${name}</strong>` : ''}.
+        <h2 style="margin: 0 0 12px; color: #111827; font-size: 22px;">
+          Redefinição de senha
+        </h2>
+
+        <p style="font-size: 15px; color: #374151; line-height: 1.6;">
+          Olá${safeName ? `, <strong>${safeName}</strong>` : ""}.
         </p>
 
-        <p style="font-size:15px;color:#374151;line-height:1.6;">
+        <p style="font-size: 15px; color: #374151; line-height: 1.6;">
           Recebemos uma solicitação para redefinir a senha do seu painel de afiliado OZONTECK.
         </p>
 
-        <div style="text-align:center;margin:28px 0;">
-          <a href="${resetLink}" 
-             style="display:inline-block;background:#111827;color:#ffffff;text-decoration:none;padding:14px 22px;border-radius:12px;font-weight:700;">
+        <div style="text-align: center; margin: 28px 0;">
+          <a href="${resetLink}"
+             style="display:inline-block; background:#111827; color:#ffffff; text-decoration:none; padding:14px 24px; border-radius:12px; font-weight:700;">
             Redefinir minha senha
           </a>
         </div>
 
-        <p style="font-size:14px;color:#6b7280;line-height:1.6;">
+        <p style="font-size: 14px; color: #6b7280; line-height: 1.6;">
           Este link expira em 30 minutos. Se você não solicitou essa alteração, ignore este e-mail.
         </p>
 
-        <p style="font-size:13px;color:#9ca3af;margin-top:22px;">
-          OZONTECK — Painel de Afiliados
+        <p style="font-size: 13px; color: #9ca3af; margin-top: 22px;">
+          OZONTECK — Sistema de Afiliados
         </p>
       </div>
     </div>
@@ -88,35 +146,37 @@ async function sendResetEmail({ to, name, resetLink }) {
   await transporter.sendMail({
     from: `"${fromName}" <${fromEmail}>`,
     to,
-    subject: 'Redefinição de senha - Painel de Afiliados OZONTECK',
+    subject: "Redefinição de senha - Painel de Afiliados OZONTECK",
     html,
   });
 }
 
-router.post('/forgot-password', async (req, res) => {
+router.post("/forgot-password", async (req, res) => {
   try {
     const email = normalizeEmail(req.body?.email);
 
-    if (!email || !email.includes('@')) {
+    if (!email || !email.includes("@")) {
       return res.status(400).json({
         success: false,
-        message: 'Informe um e-mail válido.',
+        message: "Informe um e-mail válido.",
       });
     }
 
-    const genericMessage = 'Se este e-mail estiver cadastrado, enviaremos um link para redefinir sua senha.';
+    const genericMessage =
+      "Se este e-mail estiver cadastrado, enviaremos um link para redefinir sua senha.";
 
     const { data: affiliate, error: affiliateError } = await supabaseAdmin
-      .from('affiliates')
-      .select('id, full_name, email, status')
-      .eq('email', email)
+      .from("affiliates")
+      .select("id, full_name, email, status")
+      .eq("email", email)
       .maybeSingle();
 
     if (affiliateError) {
-      console.error('FORGOT PASSWORD AFFILIATE QUERY ERROR:', affiliateError);
+      console.error("FORGOT PASSWORD AFFILIATE QUERY ERROR:", affiliateError);
+
       return res.status(500).json({
         success: false,
-        message: 'Erro ao solicitar redefinição de senha.',
+        message: "Erro ao solicitar redefinição de senha.",
       });
     }
 
@@ -128,138 +188,155 @@ router.post('/forgot-password', async (req, res) => {
       });
     }
 
-    const rawToken = crypto.randomBytes(32).toString('hex');
+    const rawToken = crypto.randomBytes(32).toString("hex");
     const tokenHash = hashToken(rawToken);
-
     const expiresAt = new Date(Date.now() + 30 * 60 * 1000).toISOString();
 
     await supabaseAdmin
-      .from('affiliate_password_resets')
-      .update({ used_at: new Date().toISOString() })
-      .eq('affiliate_id', affiliate.id)
-      .is('used_at', null);
+      .from("affiliate_password_resets")
+      .update({
+        used_at: new Date().toISOString(),
+      })
+      .eq("affiliate_id", affiliate.id)
+      .is("used_at", null);
 
     const { error: insertError } = await supabaseAdmin
-      .from('affiliate_password_resets')
+      .from("affiliate_password_resets")
       .insert({
         affiliate_id: affiliate.id,
         email,
         token_hash: tokenHash,
         expires_at: expiresAt,
         ip_address: req.ip || null,
-        user_agent: req.get('user-agent') || null,
+        user_agent: req.get("user-agent") || null,
       });
 
     if (insertError) {
-      console.error('FORGOT PASSWORD TOKEN INSERT ERROR:', insertError);
+      console.error("FORGOT PASSWORD TOKEN INSERT ERROR:", insertError);
+
       return res.status(500).json({
         success: false,
-        message: 'Erro ao gerar link de redefinição.',
+        message: "Erro ao gerar link de redefinição.",
       });
     }
 
     const resetLink = `${getStoreBaseUrl()}/pages-html/afiliado-redefinir-senha.html?token=${rawToken}`;
 
-    await sendResetEmail({
-      to: email,
-      name: affiliate.full_name,
-      resetLink,
-    });
+    try {
+      await sendResetEmail({
+        to: email,
+        name: affiliate.full_name,
+        resetLink,
+      });
+    } catch (emailError) {
+      console.error("RESET PASSWORD SEND EMAIL ERROR:", emailError);
+
+      return res.status(500).json({
+        success: false,
+        message: "Erro ao enviar e-mail de redefinição.",
+      });
+    }
 
     return res.json({
       success: true,
       message: genericMessage,
     });
   } catch (error) {
-    console.error('FORGOT PASSWORD ERROR:', error);
+    console.error("FORGOT PASSWORD ERROR:", error);
+
     return res.status(500).json({
       success: false,
-      message: 'Erro interno ao solicitar redefinição de senha.',
+      message: "Erro interno ao solicitar redefinição de senha.",
     });
   }
 });
 
-router.post('/reset-password', async (req, res) => {
+router.post("/reset-password", async (req, res) => {
   try {
-    const token = String(req.body?.token || '').trim();
-    const newPassword = String(req.body?.password || '').trim();
+    const token = String(req.body?.token || "").trim();
+    const newPassword = String(req.body?.password || "").trim();
 
     if (!token) {
       return res.status(400).json({
         success: false,
-        message: 'Token não enviado.',
+        message: "Token não enviado.",
       });
     }
 
     if (!isStrongPassword(newPassword)) {
       return res.status(400).json({
         success: false,
-        message: 'A nova senha precisa ter pelo menos 6 caracteres.',
+        message: "A nova senha precisa ter pelo menos 6 caracteres.",
       });
     }
 
     const tokenHash = hashToken(token);
 
     const { data: resetRow, error: resetError } = await supabaseAdmin
-      .from('affiliate_password_resets')
-      .select('id, affiliate_id, expires_at, used_at')
-      .eq('token_hash', tokenHash)
+      .from("affiliate_password_resets")
+      .select("id, affiliate_id, expires_at, used_at")
+      .eq("token_hash", tokenHash)
       .maybeSingle();
 
     if (resetError) {
-      console.error('RESET PASSWORD TOKEN QUERY ERROR:', resetError);
+      console.error("RESET PASSWORD TOKEN QUERY ERROR:", resetError);
+
       return res.status(500).json({
         success: false,
-        message: 'Erro ao validar token.',
+        message: "Erro ao validar token.",
       });
     }
 
     if (!resetRow || resetRow.used_at) {
       return res.status(400).json({
         success: false,
-        message: 'Link inválido ou já utilizado.',
+        message: "Link inválido ou já utilizado.",
       });
     }
 
     if (new Date(resetRow.expires_at).getTime() < Date.now()) {
       return res.status(400).json({
         success: false,
-        message: 'Link expirado. Solicite uma nova redefinição de senha.',
+        message: "Link expirado. Solicite uma nova redefinição de senha.",
       });
     }
 
     const passwordHash = await bcrypt.hash(newPassword, 12);
 
     const { error: updateError } = await supabaseAdmin
-      .from('affiliates')
+      .from("affiliates")
       .update({
         password_hash: passwordHash,
         updated_at: new Date().toISOString(),
       })
-      .eq('id', resetRow.affiliate_id);
+      .eq("id", resetRow.affiliate_id);
 
     if (updateError) {
-      console.error('RESET PASSWORD AFFILIATE UPDATE ERROR:', updateError);
+      console.error("RESET PASSWORD AFFILIATE UPDATE ERROR:", updateError);
+
       return res.status(500).json({
         success: false,
-        message: 'Erro ao atualizar senha.',
+        message: "Erro ao atualizar senha.",
       });
     }
 
     await supabaseAdmin
-      .from('affiliate_password_resets')
-      .update({ used_at: new Date().toISOString() })
-      .eq('id', resetRow.id);
+      .from("affiliate_password_resets")
+      .update({
+        used_at: new Date().toISOString(),
+      })
+      .eq("id", resetRow.id);
 
     return res.json({
       success: true,
-      message: 'Senha redefinida com sucesso. Você já pode acessar o painel.',
+      message: "Senha redefinida com sucesso. Você já pode acessar o painel.",
     });
   } catch (error) {
-    console.error('RESET PASSWORD ERROR:', error);
+    console.error("RESET PASSWORD ERROR:", error);
+
     return res.status(500).json({
       success: false,
-      message: 'Erro interno ao redefinir senha.',
+      message: "Erro interno ao redefinir senha.",
     });
   }
 });
