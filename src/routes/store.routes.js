@@ -942,6 +942,8 @@ function normalizeProduct(product) {
         ""
     ).trim(),
     price: toNumber(product?.price, 0),
+    compareAtPrice: toNumber(product?.compare_at_price, 0),
+    compare_at_price: toNumber(product?.compare_at_price, 0),
     stockQuantity: toNumber(product?.stock_quantity, 0),
     status: String(product?.status || "").trim().toLowerCase(),
     weightKg: toNumber(product?.weight_kg, 0),
