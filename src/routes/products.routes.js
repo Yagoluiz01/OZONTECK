@@ -250,9 +250,6 @@ function validateProductPayload(body) {
 
   const parsedPrice = Number(price || 0);
   const parsedCompareAtPriceInput = Number(compare_at_price || 0);
-  const parsedStock = Number(stock_quantity || 0);
-  const normalizedStatus = String(status || "draft").trim().toLowerCase();
-
   const parsedCompareAtPrice =
     parsedPrice > 0 &&
     Number.isFinite(parsedCompareAtPriceInput) &&
@@ -261,6 +258,8 @@ function validateProductPayload(body) {
       : parsedPrice > 0
         ? Number((parsedPrice + 1).toFixed(2))
         : 0;
+  const parsedStock = Number(stock_quantity || 0);
+  const normalizedStatus = String(status || "draft").trim().toLowerCase();
 
   const parsedWeight = parseNonNegativeNumber(weight_kg, 0);
   const parsedHeight = parseNonNegativeNumber(height_cm, 0);
@@ -373,8 +372,8 @@ router.get("/", requireAuth, async (req, res) => {
         status: product.status || "draft",
         imageUrl: product.image_url || "",
         imageUrl2: product.image_url_2 || "",
-        rawPrice: Number(product.price || 0),
         currentPrice: Number(product.price || 0),
+        rawPrice: Number(product.price || 0),
         compareAtPrice: Number(product.compare_at_price || 0),
         rawCompareAtPrice: Number(product.compare_at_price || 0),
         stockQuantity: Number(product.stock_quantity || 0),
