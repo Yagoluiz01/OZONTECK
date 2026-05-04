@@ -5,9 +5,11 @@ import {
   calculateProductPricing,
   getPricingByProductId,
   getPricingHistoryByProductId,
+  listPaymentFeeRules,
   listPricingRecords,
   listProductsForPricing,
   saveProductPricing,
+  simulatePaymentFee,
 } from "../services/adminPricing.service.js";
 
 const router = express.Router();
@@ -45,6 +47,34 @@ router.get("/", async (req, res) => {
     return ok(res, { records });
   } catch (error) {
     return fail(res, error);
+  }
+});
+
+/**
+ * Lista as taxas ativas do Mercado Pago cadastradas no Supabase.
+ * Rota protegida:
+ * GET /api/admin/pricing/payment-fees
+ */
+router.get("/payment-fees", async (req, res) => {
+  try {
+    const fees = await listPaymentFeeRules();
+    return ok(res, { fees }, "Taxas de pagamento carregadas com sucesso.");
+  } catch (error) {
+    return fail(res, error);
+  }
+});
+
+/**
+ * Simula a taxa do Mercado Pago para um valor específico.
+ * Rota protegida:
+ * POST /api/admin/pricing/simulate-payment-fee
+ */
+router.post("/simulate-payment-fee", async (req, res) => {
+  try {
+    const simulation = await simulatePaymentFee(req.body || {});
+    return ok(res, { simulation }, "Taxa simulada com sucesso.");
+  } catch (error) {
+    return fail(res, error, 400);
   }
 });
 

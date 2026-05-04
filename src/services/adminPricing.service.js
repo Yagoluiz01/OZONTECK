@@ -62,6 +62,42 @@ function getAutoPercent(value, fallback) {
   return number;
 }
 
+function normalizePaymentMethod(value) {
+  const method = String(value || "pix").trim();
+
+  const allowed = ["pix", "boleto", "credit_card", "debit_card", "wallet"];
+
+  if (!allowed.includes(method)) {
+    throw new Error(
+      "payment_method inválido. Use: pix, boleto, credit_card, debit_card ou wallet."
+    );
+  }
+
+  return method;
+}
+
+function normalizeReceiptTerm(value) {
+  const term = String(value || "instant").trim();
+
+  const allowed = ["instant", "14_days", "30_days"];
+
+  if (!allowed.includes(term)) {
+    throw new Error("receipt_term inválido. Use: instant, 14_days ou 30_days.");
+  }
+
+  return term;
+}
+
+function normalizeInstallments(value) {
+  const installments = Math.trunc(toNumber(value, 1));
+
+  if (installments < 1 || installments > 12) {
+    throw new Error("installments inválido. Use um número entre 1 e 12.");
+  }
+
+  return installments;
+}
+
 async function supabaseFetch(path, options = {}) {
   ensureSupabaseConfig();
 
@@ -469,6 +505,92 @@ async function createPricingHistory({
   return created?.[0] || null;
 }
 
+export async function listPaymentFeeRules() {
+  return await supabaseFetch(
+    "payment_fee_rules?select=*&provider=eq.mercado_pago&is_active=eq.true&order=payment_method.asc,receipt_term.asc,installments.asc",
+    { method: "GET" }
+  );
+}
+
+export async function simulatePaymentFee(payload = {}) {
+  const amount = roundMoney(payload.amount || payload.gross_amount);
+
+  if (!amount || amount <= 0) {
+    throw new Error("amount é obrigatório e precisa ser maior que zero.");
+  }
+
+  const paymentMethod = normalizePaymentMethod(
+    payload.payment_method || payload.paymentMethod
+  );
+
+  const receiptTerm = normalizeReceiptTerm(
+    payload.receipt_term || payload.receiptTerm
+  );
+
+  const installments = normalizeInstallments(payload.installments || 1);
+
+  let rows = await supabaseFetch(
+    `payment_fee_rules?select=*&provider=eq.mercado_pago&payment_method=eq.${encodeURIComponent(
+      paymentMethod
+    )}&receipt_term=eq.${encodeURIComponent(
+      receiptTerm
+    )}&installments=eq.${installments}&is_active=eq.true&limit=1`,
+    { method: "GET" }
+  );
+
+  let rule = rows?.[0] || null;
+
+  if (!rule && paymentMethod !== "credit_card") {
+    rows = await supabaseFetch(
+      `payment_fee_rules?select=*&provider=eq.mercado_pago&payment_method=eq.${encodeURIComponent(
+        paymentMethod
+      )}&installments=eq.1&is_active=eq.true&limit=1`,
+      { method: "GET" }
+    );
+
+    rule = rows?.[0] || null;
+  }
+
+  if (!rule && paymentMethod === "credit_card" && installments > 1) {
+    rows = await supabaseFetch(
+      `payment_fee_rules?select=*&provider=eq.mercado_pago&payment_method=eq.credit_card&receipt_term=eq.instant&installments=eq.${installments}&is_active=eq.true&limit=1`,
+      { method: "GET" }
+    );
+
+    rule = rows?.[0] || null;
+  }
+
+  if (!rule) {
+    throw new Error(
+      "Nenhuma taxa ativa encontrada para esta forma de pagamento."
+    );
+  }
+
+  const percentFee = normalizePercent(rule.percent_fee);
+  const fixedFee = roundMoney(rule.fixed_fee);
+  const feeAmount = roundMoney(amount * (percentFee / 100) + fixedFee);
+  const netAmount = roundMoney(amount - feeAmount);
+  const effectivePercent = amount > 0 ? roundMoney((feeAmount / amount) * 100) : 0;
+
+  return {
+    provider: rule.provider,
+    rule_id: rule.id,
+
+    payment_method: rule.payment_method,
+    receipt_term: rule.receipt_term,
+    installments: rule.installments,
+
+    gross_amount: amount,
+    percent_fee: roundMoney(percentFee),
+    fixed_fee: fixedFee,
+    fee_amount: feeAmount,
+    net_amount: netAmount,
+    effective_percent: effectivePercent,
+
+    notes: rule.notes || null,
+  };
+}
+
 export async function listPricingRecords() {
   return await supabaseFetch(
     "product_pricing?select=*,products(id,name,sku,price)&order=updated_at.desc",
@@ -635,6 +757,8 @@ export async function listProductsForPricing(search = "") {
 }
 
 export default {
+  listPaymentFeeRules,
+  simulatePaymentFee,
   listPricingRecords,
   getPricingByProductId,
   getPricingHistoryByProductId,
