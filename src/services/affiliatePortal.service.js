@@ -89,6 +89,187 @@ function normalizeMoney(value) {
   return number;
 }
 
+
+function normalizeStatus(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+}
+
+function isPaidLikeStatus(value) {
+  return [
+    "paid",
+    "pago",
+    "approved",
+    "aprovado",
+    "success",
+    "sucesso",
+    "completed",
+    "complete",
+  ].includes(normalizeStatus(value));
+}
+
+function isReleasedLikeStatus(value) {
+  return [
+    "released",
+    "liberado",
+    "available",
+    "disponivel",
+    "ready",
+  ].includes(normalizeStatus(value));
+}
+
+function isDeliveredLikeStatus(value) {
+  return [
+    "delivered",
+    "entregue",
+    "received",
+    "recebido",
+    "delivery_completed",
+    "completed_delivery",
+    "finalizado",
+    "delivered_to_recipient",
+    "entrega_realizada",
+    "objeto_entregue",
+  ].includes(normalizeStatus(value));
+}
+
+function isShippedLikeStatus(value) {
+  return [
+    "shipped",
+    "enviado",
+    "sent",
+    "posted",
+    "postado",
+    "dispatch",
+    "dispatched",
+    "in_transit",
+    "em_transito",
+    "transito",
+    "transporting",
+    "a_caminho",
+    "on_the_way",
+    "out_for_delivery",
+    "saiu_para_entrega",
+    "generated",
+    "gerada",
+    "cart_created",
+  ].includes(normalizeStatus(value));
+}
+
+function isCancelledLikeStatus(value) {
+  return [
+    "cancelled",
+    "canceled",
+    "cancelado",
+    "cancelada",
+    "rejected",
+    "rejeitado",
+    "rejeitada",
+    "failed",
+    "falhou",
+    "refunded",
+    "estornado",
+    "estornada",
+    "charged_back",
+    "chargeback",
+  ].includes(normalizeStatus(value));
+}
+
+function getOrderCommissionAmount(order = {}) {
+  return normalizeMoney(
+    order.affiliate_commission_amount ??
+      order.commission_amount ??
+      order.affiliate_commission ??
+      0
+  );
+}
+
+function isOrderCancelled(order = {}) {
+  return (
+    isCancelledLikeStatus(order.order_status) ||
+    isCancelledLikeStatus(order.payment_status) ||
+    isCancelledLikeStatus(order.payment_raw_status) ||
+    isCancelledLikeStatus(order.affiliate_commission_status)
+  );
+}
+
+function isOrderDelivered(order = {}) {
+  return (
+    isDeliveredLikeStatus(order.order_status) ||
+    isDeliveredLikeStatus(order.shipping_status) ||
+    isDeliveredLikeStatus(order.delivery_status) ||
+    isDeliveredLikeStatus(order.tracking_status) ||
+    Boolean(order.delivered_at)
+  );
+}
+
+function isOrderInShipping(order = {}) {
+  return (
+    isShippedLikeStatus(order.order_status) ||
+    isShippedLikeStatus(order.shipping_label_status) ||
+    isShippedLikeStatus(order.shipping_status) ||
+    isShippedLikeStatus(order.delivery_status) ||
+    isShippedLikeStatus(order.tracking_status) ||
+    Boolean(order.shipping_tracking_code || order.tracking_code || order.shipped_at)
+  );
+}
+
+function isOrderPaidOrApproved(order = {}) {
+  return (
+    isPaidLikeStatus(order.payment_status) ||
+    isPaidLikeStatus(order.payment_raw_status) ||
+    isPaidLikeStatus(order.affiliate_commission_status) ||
+    isReleasedLikeStatus(order.affiliate_commission_status)
+  );
+}
+
+function getAffiliateOrderLifecycle(order = {}) {
+  if (isOrderCancelled(order)) {
+    return "cancelled";
+  }
+
+  if (isOrderDelivered(order)) {
+    return "delivered";
+  }
+
+  if (isOrderPaidOrApproved(order) && isOrderInShipping(order)) {
+    return "pending_shipping";
+  }
+
+  if (isOrderPaidOrApproved(order)) {
+    return "approved_waiting_shipping";
+  }
+
+  return "pending_payment";
+}
+
+function getFriendlyAffiliateCommissionStatus(order = {}) {
+  const lifecycle = getAffiliateOrderLifecycle(order);
+  const originalStatus = normalizeStatus(order.affiliate_commission_status);
+
+  if (lifecycle === "cancelled") {
+    return "cancelled";
+  }
+
+  if (lifecycle === "delivered") {
+    return "released";
+  }
+
+  if (lifecycle === "pending_shipping") {
+    return "pending_shipping";
+  }
+
+  if (originalStatus) {
+    return originalStatus;
+  }
+
+  return "pending";
+}
+
+
 function maskEmail(email) {
   const cleanEmail = String(email || "").trim().toLowerCase();
 
@@ -285,7 +466,7 @@ export async function getAffiliateSummary(affiliateId) {
     supabaseRequest(
       `/orders?affiliate_id=eq.${encodeURIComponent(
         affiliateId
-      )}&select=id,total_amount,affiliate_commission_amount,affiliate_commission_status,payment_status,order_status,created_at`
+      )}&select=id,total_amount,affiliate_commission_amount,affiliate_commission_status,payment_status,payment_raw_status,order_status,shipping_label_status,shipping_tracking_code,tracking_code,shipped_at,delivered_at,created_at`
     ),
     supabaseRequest(
       `/affiliate_payouts?affiliate_id=eq.${encodeURIComponent(
@@ -312,20 +493,27 @@ export async function getAffiliateSummary(affiliateId) {
   const summary = safeOrders.reduce(
     (acc, order) => {
       const total = normalizeMoney(order.total_amount);
-      const commission = normalizeMoney(order.affiliate_commission_amount);
-      const commissionStatus = String(
-        order.affiliate_commission_status || "pending"
-      ).toLowerCase();
+      const commission = getOrderCommissionAmount(order);
+      const lifecycle = getAffiliateOrderLifecycle(order);
+      const commissionStatus = getFriendlyAffiliateCommissionStatus(order);
+
+      if (lifecycle === "cancelled") {
+        acc.canceled_orders_count += 1;
+        return acc;
+      }
 
       acc.total_conversions += 1;
       acc.total_referred_sales += total;
 
-      if (commissionStatus === "approved") {
-        acc.approved_commission += commission;
-      } else if (commissionStatus === "released") {
+      if (lifecycle === "delivered" || commissionStatus === "released") {
         acc.released_commission += commission;
+      } else if (lifecycle === "pending_shipping") {
+        acc.pending_shipping_balance += commission;
+        acc.pending_commission += commission;
       } else if (commissionStatus === "paid") {
         acc.paid_commission_by_conversion += commission;
+      } else if (commissionStatus === "approved") {
+        acc.approved_commission += commission;
       } else {
         acc.pending_commission += commission;
       }
@@ -336,9 +524,11 @@ export async function getAffiliateSummary(affiliateId) {
       total_conversions: 0,
       total_referred_sales: 0,
       pending_commission: 0,
+      pending_shipping_balance: 0,
       approved_commission: 0,
       released_commission: 0,
       paid_commission_by_conversion: 0,
+      canceled_orders_count: 0,
       total_paid: 0,
       balance_to_pay: 0,
     }
@@ -355,7 +545,7 @@ export async function getAffiliateSummary(affiliateId) {
   }, 0);
 
   summary.balance_to_pay = Math.max(
-    summary.released_commission + summary.approved_commission - summary.total_paid,
+    summary.released_commission + summary.paid_commission_by_conversion - summary.total_paid,
     0
   );
 
@@ -420,7 +610,7 @@ export async function getAffiliateOrders(affiliateId) {
   const orders = await supabaseRequest(
     `/orders?affiliate_id=eq.${encodeURIComponent(
       affiliateId
-    )}&select=id,order_number,customer_name,customer_email,total_amount,affiliate_commission_amount,affiliate_commission_status,payment_status,order_status,created_at&order=created_at.desc&limit=100`
+    )}&select=id,order_number,customer_name,customer_email,total_amount,affiliate_commission_amount,affiliate_commission_status,payment_status,payment_raw_status,order_status,shipping_label_status,shipping_tracking_code,tracking_code,shipped_at,delivered_at,created_at&order=created_at.desc&limit=100`
   );
 
   const safeOrders = Array.isArray(orders) ? orders : [];
@@ -431,10 +621,18 @@ export async function getAffiliateOrders(affiliateId) {
     customer_name: maskName(order.customer_name),
     customer_email: maskEmail(order.customer_email),
     total_amount: normalizeMoney(order.total_amount),
-    commission_amount: normalizeMoney(order.affiliate_commission_amount),
-    commission_status: order.affiliate_commission_status || "pending",
+    commission_amount: getOrderCommissionAmount(order),
+    commission_status: getFriendlyAffiliateCommissionStatus(order),
+    affiliate_commission_status: order.affiliate_commission_status || "pending",
     payment_status: order.payment_status || null,
+    payment_raw_status: order.payment_raw_status || null,
     order_status: order.order_status || null,
+    shipping_label_status: order.shipping_label_status || null,
+    shipping_tracking_code: order.shipping_tracking_code || null,
+    tracking_code: order.tracking_code || null,
+    shipped_at: order.shipped_at || null,
+    delivered_at: order.delivered_at || null,
+    affiliate_order_lifecycle: getAffiliateOrderLifecycle(order),
     created_at: order.created_at || null,
   }));
 }
