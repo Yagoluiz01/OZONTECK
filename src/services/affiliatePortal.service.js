@@ -322,6 +322,28 @@ function buildOrderMap(orders = []) {
   return map;
 }
 
+async function getAffiliateOrdersTableRows(affiliateId, { limit = 500 } = {}) {
+  const data = await supabaseRequest(
+    `/orders?affiliate_id=eq.${encodeURIComponent(
+      affiliateId
+    )}&select=id,order_number,customer_name,customer_email,total_amount,affiliate_commission_amount,affiliate_commission_status,payment_status,payment_raw_status,order_status,shipping_label_status,shipping_tracking_code,tracking_code,shipped_at,delivered_at,created_at&order=created_at.desc&limit=${Number(limit) || 500}`
+  );
+
+  return Array.isArray(data) ? data : [];
+}
+
+function getCancelledOrdersCountFromOrders(orders = []) {
+  const ids = new Set();
+
+  orders.forEach((order) => {
+    if (isOrderCancelled(order)) {
+      ids.add(String(order.id || order.order_number || "").trim());
+    }
+  });
+
+  return Array.from(ids).filter(Boolean).length;
+}
+
 
 function maskEmail(email) {
   const cleanEmail = String(email || "").trim().toLowerCase();
@@ -515,7 +537,7 @@ export async function getAffiliateSummary(affiliateId) {
     });
   }
 
-  const [conversions, payouts, goalRows, bonusRows] = await Promise.all([
+  const [conversions, payouts, goalRows, bonusRows, affiliateOrdersTableRows] = await Promise.all([
     supabaseRequest(
       `/affiliate_conversions?affiliate_id=eq.${encodeURIComponent(
         affiliateId
@@ -536,17 +558,27 @@ export async function getAffiliateSummary(affiliateId) {
         affiliateId
       )}&select=*&order=released_at.desc&limit=50`
     ),
+    getAffiliateOrdersTableRows(affiliateId),
   ]);
 
   const safeConversions = Array.isArray(conversions) ? conversions : [];
   const safePayouts = Array.isArray(payouts) ? payouts : [];
+  const safeAffiliateOrdersTableRows = Array.isArray(affiliateOrdersTableRows)
+    ? affiliateOrdersTableRows
+    : [];
   const goal = Array.isArray(goalRows) ? goalRows[0] : null;
   const bonuses = Array.isArray(bonusRows) ? bonusRows : [];
 
-  const orders = await getOrdersByIds(
+  const conversionOrders = await getOrdersByIds(
     safeConversions.map((conversion) => conversion.order_id)
   );
 
+  const allOrdersMap = buildOrderMap([
+    ...safeAffiliateOrdersTableRows,
+    ...conversionOrders,
+  ]);
+
+  const orders = Array.from(allOrdersMap.values());
   const orderMap = buildOrderMap(orders);
 
   const summary = safeConversions.reduce(
@@ -616,6 +648,11 @@ export async function getAffiliateSummary(affiliateId) {
     }
   );
 
+  summary.canceled_orders_count = Math.max(
+    summary.canceled_orders_count,
+    getCancelledOrdersCountFromOrders(orders)
+  );
+
   summary.total_paid = safePayouts.reduce((acc, payout) => {
     const status = String(payout.status || "").toLowerCase();
 
@@ -630,11 +667,6 @@ export async function getAffiliateSummary(affiliateId) {
     summary.released_commission + summary.paid_commission_by_conversion - summary.total_paid,
     0
   );
-
-  summary.cancelled_orders_count = summary.canceled_orders_count;
-  summary.pendingShippingBalance = summary.pending_shipping_balance;
-  summary.canceledOrdersCount = summary.canceled_orders_count;
-  summary.balanceToPay = summary.balance_to_pay;
 
   const level_goal = goal
     ? {
@@ -694,21 +726,30 @@ export async function getAffiliateSummary(affiliateId) {
 }
 
 export async function getAffiliateOrders(affiliateId) {
-  const conversions = await supabaseRequest(
-    `/affiliate_conversions?affiliate_id=eq.${encodeURIComponent(
-      affiliateId
-    )}&conversion_type=eq.sale_commission&select=id,affiliate_id,order_id,customer_id,ref_code,coupon_code,order_total,commission_rate,commission_amount,conversion_type,status,approved_at,released_at,created_at&order=created_at.desc&limit=100`
-  );
+  const [conversions, affiliateOrdersTableRows] = await Promise.all([
+    supabaseRequest(
+      `/affiliate_conversions?affiliate_id=eq.${encodeURIComponent(
+        affiliateId
+      )}&conversion_type=eq.sale_commission&select=id,affiliate_id,order_id,customer_id,ref_code,coupon_code,order_total,commission_rate,commission_amount,conversion_type,status,approved_at,released_at,created_at&order=created_at.desc&limit=100`
+    ),
+    getAffiliateOrdersTableRows(affiliateId, { limit: 100 }),
+  ]);
 
   const safeConversions = Array.isArray(conversions) ? conversions : [];
+  const safeAffiliateOrdersTableRows = Array.isArray(affiliateOrdersTableRows)
+    ? affiliateOrdersTableRows
+    : [];
 
-  const orders = await getOrdersByIds(
+  const conversionOrders = await getOrdersByIds(
     safeConversions.map((conversion) => conversion.order_id)
   );
 
-  const orderMap = buildOrderMap(orders);
+  const orderMap = buildOrderMap([
+    ...safeAffiliateOrdersTableRows,
+    ...conversionOrders,
+  ]);
 
-  return safeConversions.map((conversion) => {
+  const rowsFromConversions = safeConversions.map((conversion) => {
     const order = orderMap.get(String(conversion.order_id || "")) || {};
     const lifecycle = getAffiliateOrderLifecycle({ conversion, order });
 
@@ -734,6 +775,43 @@ export async function getAffiliateOrders(affiliateId) {
       affiliate_order_lifecycle: lifecycle,
       created_at: order.created_at || conversion.created_at || null,
     };
+  });
+
+  const conversionOrderIds = new Set(
+    safeConversions.map((conversion) => String(conversion.order_id || "").trim())
+  );
+
+  const tableOnlyRows = safeAffiliateOrdersTableRows
+    .filter((order) => {
+      const orderId = String(order.id || "").trim();
+
+      return orderId && !conversionOrderIds.has(orderId) && isOrderCancelled(order);
+    })
+    .map((order) => ({
+      id: order.id,
+      conversion_id: null,
+      order_id: order.id,
+      order_number: order.order_number || order.id,
+      customer_name: maskName(order.customer_name),
+      customer_email: maskEmail(order.customer_email),
+      total_amount: normalizeMoney(order.total_amount),
+      commission_amount: normalizeMoney(order.affiliate_commission_amount),
+      commission_status: "cancelled",
+      affiliate_commission_status: order.affiliate_commission_status || "cancelled",
+      payment_status: order.payment_status || null,
+      payment_raw_status: order.payment_raw_status || null,
+      order_status: order.order_status || null,
+      shipping_label_status: order.shipping_label_status || null,
+      shipping_tracking_code: order.shipping_tracking_code || null,
+      tracking_code: order.tracking_code || null,
+      shipped_at: order.shipped_at || null,
+      delivered_at: order.delivered_at || null,
+      affiliate_order_lifecycle: "cancelled",
+      created_at: order.created_at || null,
+    }));
+
+  return [...rowsFromConversions, ...tableOnlyRows].sort((a, b) => {
+    return new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime();
   });
 }
 
