@@ -26,6 +26,9 @@ function isDeliveredLikeStatus(value) {
     "delivery_completed",
     "completed_delivery",
     "finalizado",
+    "delivered_to_recipient",
+    "entrega_realizada",
+    "objeto_entregue",
   ].includes(normalizeStatus(value));
 }
 
@@ -69,23 +72,15 @@ function safeMetadata(value) {
 }
 
 async function fetchAffiliateConversionsByOrderId(orderId) {
-  const id = String(orderId || "").trim();
+  const cleanOrderId = String(orderId || "").trim();
 
-  if (!id) {
-    return {
-      ok: false,
-      status: 400,
-      data: [],
-      error: "order_id_missing",
-    };
+  if (!cleanOrderId) {
+    return [];
   }
 
   const url = new URL(`${env.supabaseUrl}/rest/v1/affiliate_conversions`);
-  url.searchParams.set(
-    "select",
-    "id,affiliate_id,order_id,commission_amount,conversion_type,status,released_at,metadata,notes"
-  );
-  url.searchParams.set("order_id", `eq.${id}`);
+  url.searchParams.set("select", "*");
+  url.searchParams.set("order_id", `eq.${cleanOrderId}`);
 
   const response = await fetch(url.toString(), {
     method: "GET",
@@ -94,28 +89,22 @@ async function fetchAffiliateConversionsByOrderId(orderId) {
 
   const data = await response.json().catch(() => []);
 
-  return {
-    ok: response.ok,
-    status: response.status,
-    data: Array.isArray(data) ? data : [],
-    error: response.ok ? null : data,
-  };
+  if (!response.ok) {
+    console.error("AFFILIATE COMMISSION LIFECYCLE FETCH ERROR:", {
+      orderId: cleanOrderId,
+      status: response.status,
+      data,
+    });
+
+    return [];
+  }
+
+  return Array.isArray(data) ? data : [];
 }
 
 async function patchAffiliateConversion(conversionId, payload) {
-  const id = String(conversionId || "").trim();
-
-  if (!id) {
-    return {
-      ok: false,
-      status: 400,
-      data: [],
-      error: "conversion_id_missing",
-    };
-  }
-
   const url = new URL(`${env.supabaseUrl}/rest/v1/affiliate_conversions`);
-  url.searchParams.set("id", `eq.${id}`);
+  url.searchParams.set("id", `eq.${conversionId}`);
   url.searchParams.set("select", "*");
 
   const response = await fetch(url.toString(), {
@@ -133,245 +122,227 @@ async function patchAffiliateConversion(conversionId, payload) {
     ok: response.ok,
     status: response.status,
     data: Array.isArray(data) ? data : [],
-    error: response.ok ? null : data,
+    raw: data,
   };
 }
 
-async function patchWithStatusFallback(conversion, statusCandidates, basePayload) {
+async function tryPatchAffiliateConversion(conversionId, payloads = []) {
   let lastResult = null;
 
-  for (const status of statusCandidates) {
-    const result = await patchAffiliateConversion(conversion.id, {
-      ...basePayload,
-      status,
-    });
+  for (const payload of payloads) {
+    const result = await patchAffiliateConversion(conversionId, payload);
+    lastResult = result;
 
     if (result.ok) {
       return {
-        ...result,
-        usedStatus: status,
-        usedFallback: status !== statusCandidates[0],
+        success: true,
+        payload,
+        result,
       };
     }
 
-    lastResult = result;
+    console.warn("AFFILIATE COMMISSION LIFECYCLE PATCH FALLBACK:", {
+      conversionId,
+      status: result.status,
+      payload,
+      data: result.raw,
+    });
   }
 
-  const metadataOnlyResult = await patchAffiliateConversion(conversion.id, basePayload);
-
   return {
-    ...metadataOnlyResult,
-    usedStatus: null,
-    usedFallback: true,
-    statusPatchError: lastResult?.error || null,
+    success: false,
+    payload: null,
+    result: lastResult,
   };
 }
 
-async function releaseConversionsForDeliveredOrder(order, conversions, source) {
-  const now = new Date().toISOString();
-  const results = [];
-
-  for (const conversion of conversions) {
-    const currentStatus = normalizeStatus(conversion.status);
-
-    if (isAlreadyReleased(currentStatus)) {
-      results.push({
-        conversionId: conversion.id,
-        action: "skipped",
-        reason: "already_released_or_paid",
-        status: conversion.status || null,
-      });
-      continue;
-    }
-
-    const metadata = {
-      ...safeMetadata(conversion.metadata),
-      commission_lifecycle: {
-        source,
-        action: "released_after_delivery",
-        order_id: order.id,
-        order_number: order.order_number || null,
-        released_at: now,
-      },
-    };
-
-    const noteSuffix = `Comissão liberada automaticamente após entrega do pedido ${order.order_number || order.id}.`;
-    const notes = String(conversion.notes || "").includes(noteSuffix)
-      ? conversion.notes
-      : [conversion.notes, noteSuffix].filter(Boolean).join("\n");
-
-    const result = await patchWithStatusFallback(
-      conversion,
-      ["released", "approved"],
-      {
-        released_at: now,
-        metadata,
-        notes,
-      }
-    );
-
-    results.push({
-      conversionId: conversion.id,
-      action: result.ok ? "released" : "error",
-      ok: result.ok,
-      usedStatus: result.usedStatus,
-      usedFallback: Boolean(result.usedFallback),
-      error: result.ok ? null : result.error,
-    });
-  }
-
-  return results;
-}
-
-async function cancelConversionsForCancelledOrder(order, conversions, source) {
-  const now = new Date().toISOString();
-  const results = [];
-
-  for (const conversion of conversions) {
-    const currentStatus = normalizeStatus(conversion.status);
-
-    if (["cancelled", "canceled", "cancelado", "rejected", "failed"].includes(currentStatus)) {
-      results.push({
-        conversionId: conversion.id,
-        action: "skipped",
-        reason: "already_cancelled",
-        status: conversion.status || null,
-      });
-      continue;
-    }
-
-    if (["paid", "pago"].includes(currentStatus)) {
-      results.push({
-        conversionId: conversion.id,
-        action: "skipped",
-        reason: "already_paid_not_cancelled_automatically",
-        status: conversion.status || null,
-      });
-      continue;
-    }
-
-    const metadata = {
-      ...safeMetadata(conversion.metadata),
-      commission_lifecycle: {
-        source,
-        action: "cancelled_after_order_cancelled",
-        order_id: order.id,
-        order_number: order.order_number || null,
-        cancelled_at: now,
-      },
-    };
-
-    const noteSuffix = `Comissão cancelada automaticamente porque o pedido ${order.order_number || order.id} foi cancelado.`;
-    const notes = String(conversion.notes || "").includes(noteSuffix)
-      ? conversion.notes
-      : [conversion.notes, noteSuffix].filter(Boolean).join("\n");
-
-    const result = await patchWithStatusFallback(
-      conversion,
-      ["cancelled", "rejected", "failed"],
-      {
-        released_at: null,
-        metadata,
-        notes,
-      }
-    );
-
-    results.push({
-      conversionId: conversion.id,
-      action: result.ok ? "cancelled" : "error",
-      ok: result.ok,
-      usedStatus: result.usedStatus,
-      usedFallback: Boolean(result.usedFallback),
-      error: result.ok ? null : result.error,
-    });
-  }
-
-  return results;
-}
-
-export async function syncAffiliateCommissionLifecycleForOrder(
-  order,
-  { source = "order_lifecycle" } = {}
-) {
-  try {
-    if (!order?.id) {
-      return {
-        success: false,
-        skipped: true,
-        reason: "missing_order",
-      };
-    }
-
-    const orderStatus = normalizeStatus(order.order_status || order.status);
-    const paymentStatus = normalizeStatus(order.payment_status || order.payment_raw_status);
-    const hasDeliveredAt = Boolean(order.delivered_at);
-
-    const shouldRelease =
-      isDeliveredLikeStatus(orderStatus) ||
-      isDeliveredLikeStatus(order.delivery_status) ||
-      hasDeliveredAt;
-
-    const shouldCancel =
-      isCancelledLikeStatus(orderStatus) ||
-      isCancelledLikeStatus(paymentStatus);
-
-    if (!shouldRelease && !shouldCancel) {
-      return {
-        success: true,
-        skipped: true,
-        reason: "order_status_without_commission_lifecycle_change",
-        orderStatus,
-        paymentStatus,
-      };
-    }
-
-    const conversionsResponse = await fetchAffiliateConversionsByOrderId(order.id);
-
-    if (!conversionsResponse.ok) {
-      return {
-        success: false,
-        skipped: false,
-        reason: "affiliate_conversions_fetch_failed",
-        error: conversionsResponse.error,
-      };
-    }
-
-    const conversions = conversionsResponse.data;
-
-    if (!conversions.length) {
-      return {
-        success: true,
-        skipped: true,
-        reason: "no_affiliate_conversions_for_order",
-        orderId: order.id,
-      };
-    }
-
-    const actionResults = shouldCancel
-      ? await cancelConversionsForCancelledOrder(order, conversions, source)
-      : await releaseConversionsForDeliveredOrder(order, conversions, source);
-
-    const failed = actionResults.filter((item) => item.action === "error");
-
+async function releaseAffiliateConversion(conversion, order, source) {
+  if (!conversion?.id) {
     return {
-      success: failed.length === 0,
-      skipped: false,
-      action: shouldCancel ? "cancelled" : "released",
-      orderId: order.id,
-      orderNumber: order.order_number || null,
-      checked: conversions.length,
-      updated: actionResults.filter((item) => item.ok).length,
-      failed: failed.length,
-      results: actionResults,
+      updated: false,
+      skipped: true,
+      reason: "missing_conversion_id",
     };
-  } catch (error) {
-    console.error("ERRO NO CICLO DE COMISSÃO DO AFILIADO:", error);
+  }
 
+  if (isAlreadyReleased(conversion.status)) {
+    return {
+      updated: false,
+      skipped: true,
+      reason: "already_released",
+      conversionId: conversion.id,
+    };
+  }
+
+  const now = new Date().toISOString();
+  const metadata = {
+    ...safeMetadata(conversion.metadata),
+    released_by_delivery: true,
+    released_by_delivery_source: source,
+    released_by_delivery_at: now,
+    released_order_id: order?.id || null,
+    released_order_number: order?.order_number || null,
+    released_order_status: order?.order_status || null,
+    released_tracking_status: order?.shipping_label_raw?.sync_tracking_status || null,
+  };
+
+  const payloads = [
+    {
+      status: "released",
+      released_at: now,
+      metadata,
+      notes: `${conversion.notes || ""}\nComissão liberada automaticamente após confirmação de entrega ao cliente final.`.trim(),
+    },
+    {
+      status: "approved",
+      released_at: now,
+      metadata,
+      notes: `${conversion.notes || ""}\nComissão liberada automaticamente após confirmação de entrega ao cliente final.`.trim(),
+    },
+  ];
+
+  const result = await tryPatchAffiliateConversion(conversion.id, payloads);
+
+  return {
+    updated: result.success,
+    skipped: false,
+    action: "released_after_delivery",
+    conversionId: conversion.id,
+    status: result.result?.status || null,
+    details: result.result?.raw || null,
+  };
+}
+
+async function cancelAffiliateConversion(conversion, order, source) {
+  if (!conversion?.id) {
+    return {
+      updated: false,
+      skipped: true,
+      reason: "missing_conversion_id",
+    };
+  }
+
+  const normalized = normalizeStatus(conversion.status);
+
+  if (["cancelled", "canceled", "cancelado", "rejected", "failed"].includes(normalized)) {
+    return {
+      updated: false,
+      skipped: true,
+      reason: "already_cancelled",
+      conversionId: conversion.id,
+    };
+  }
+
+  const now = new Date().toISOString();
+  const metadata = {
+    ...safeMetadata(conversion.metadata),
+    cancelled_by_order_status: true,
+    cancelled_by_order_status_source: source,
+    cancelled_by_order_status_at: now,
+    cancelled_order_id: order?.id || null,
+    cancelled_order_number: order?.order_number || null,
+    cancelled_order_status: order?.order_status || null,
+  };
+
+  const payloads = [
+    {
+      status: "cancelled",
+      metadata,
+      notes: `${conversion.notes || ""}\nComissão cancelada automaticamente porque o pedido foi cancelado.`.trim(),
+    },
+    {
+      status: "rejected",
+      metadata,
+      notes: `${conversion.notes || ""}\nComissão rejeitada automaticamente porque o pedido foi cancelado.`.trim(),
+    },
+    {
+      status: "failed",
+      metadata,
+      notes: `${conversion.notes || ""}\nComissão invalidada automaticamente porque o pedido foi cancelado.`.trim(),
+    },
+  ];
+
+  const result = await tryPatchAffiliateConversion(conversion.id, payloads);
+
+  return {
+    updated: result.success,
+    skipped: false,
+    action: "cancelled",
+    conversionId: conversion.id,
+    status: result.result?.status || null,
+    details: result.result?.raw || null,
+  };
+}
+
+export async function syncAffiliateCommissionLifecycleForOrder(order, source = "order_status_update") {
+  if (!order?.id) {
     return {
       success: false,
-      skipped: false,
-      reason: "unexpected_affiliate_commission_lifecycle_error",
-      error: error?.message || String(error),
+      skipped: true,
+      reason: "missing_order",
     };
   }
+
+  const orderStatus = normalizeStatus(order.order_status);
+  const trackingStatus = normalizeStatus(order.shipping_label_raw?.sync_tracking_status);
+
+  const shouldCancel = isCancelledLikeStatus(orderStatus);
+  const shouldRelease = isDeliveredLikeStatus(orderStatus) || isDeliveredLikeStatus(trackingStatus);
+
+  if (!shouldRelease && !shouldCancel) {
+    return {
+      success: true,
+      skipped: true,
+      reason: "status_without_lifecycle_action",
+      orderId: order.id,
+      orderStatus: order.order_status || null,
+      syncTrackingStatus: order.shipping_label_raw?.sync_tracking_status || null,
+    };
+  }
+
+  const conversions = await fetchAffiliateConversionsByOrderId(order.id);
+
+  if (!conversions.length) {
+    return {
+      success: true,
+      skipped: true,
+      reason: "no_affiliate_conversions_for_order",
+      orderId: order.id,
+      action: shouldCancel ? "cancel" : "release_after_delivery",
+    };
+  }
+
+  const results = [];
+
+  for (const conversion of conversions) {
+    if (shouldCancel) {
+      results.push(await cancelAffiliateConversion(conversion, order, source));
+      continue;
+    }
+
+    results.push(await releaseAffiliateConversion(conversion, order, source));
+  }
+
+  const updated = results.filter((item) => item.updated).length;
+
+  console.log("AFFILIATE COMMISSION LIFECYCLE RESULT:", {
+    orderId: order.id,
+    orderNumber: order.order_number || null,
+    orderStatus: order.order_status || null,
+    syncTrackingStatus: order.shipping_label_raw?.sync_tracking_status || null,
+    source,
+    updated,
+    checked: conversions.length,
+    results,
+  });
+
+  return {
+    success: true,
+    skipped: false,
+    orderId: order.id,
+    action: shouldCancel ? "cancel" : "release_after_delivery",
+    checked: conversions.length,
+    updated,
+    results,
+  };
 }

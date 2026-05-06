@@ -926,12 +926,10 @@ router.put("/:id/tracking", requireAuth, async (req, res) => {
 
     const affiliateLifecycleResult = await syncAffiliateCommissionLifecycleForOrder(
       refreshedOrder,
-      { source: "admin_order_tracking_update" }
+      `admin_order_update_${normalizedStatus}`
     );
 
-    if (!affiliateLifecycleResult?.success && !affiliateLifecycleResult?.skipped) {
-      console.warn("ALERTA CICLO COMISSÃO AFILIADO:", affiliateLifecycleResult);
-    }
+    console.log("AFFILIATE COMMISSION LIFECYCLE ADMIN UPDATE:", affiliateLifecycleResult);
 
     setTimeout(() => {
       const previousStatus = String(existingOrder.order_status || "")
@@ -1005,7 +1003,6 @@ router.put("/:id/tracking", requireAuth, async (req, res) => {
       message: shouldGenerateLabel
         ? "Pedido atualizado e carrinho do Melhor Envio processado com sucesso"
         : "Pedido atualizado com sucesso",
-      affiliateLifecycle: affiliateLifecycleResult,
       order: normalizedOrder,
     });
   } catch (error) {
@@ -1134,12 +1131,10 @@ router.post("/:id/sync-melhor-envio-now", requireAuth, async (req, res) => {
 
     const affiliateLifecycleResult = await syncAffiliateCommissionLifecycleForOrder(
       refreshedOrder,
-      { source: "melhor_envio_manual_sync" }
+      "melhor_envio_sync"
     );
 
-    if (!affiliateLifecycleResult?.success && !affiliateLifecycleResult?.skipped) {
-      console.warn("ALERTA CICLO COMISSÃO AFILIADO APÓS SYNC:", affiliateLifecycleResult);
-    }
+    console.log("AFFILIATE COMMISSION LIFECYCLE MELHOR ENVIO SYNC:", affiliateLifecycleResult);
 
     const normalizedOrder = await buildOrderDetails(refreshedOrder);
     
@@ -1150,7 +1145,6 @@ router.post("/:id/sync-melhor-envio-now", requireAuth, async (req, res) => {
         ? "Etiqueta sincronizada com sucesso"
         : "Sincronização executada, mas a etiqueta ainda não está disponível no Melhor Envio",
       sync: syncResult,
-      affiliateLifecycle: affiliateLifecycleResult,
       order: normalizedOrder,
     });
   } catch (error) {

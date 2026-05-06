@@ -644,11 +644,14 @@ async function fetchPendingCartCreatedOrders(limit = 20) {
       "shipping_shipment_id",
       "shipping_label_error",
       "shipping_label_raw",
+      "order_status",
+      "shipped_at",
+      "delivered_at",
       "paid_at",
       "created_at"
     ].join(",")
   );
-  url.searchParams.set("shipping_label_status", "eq.pending");
+  url.searchParams.set("shipping_label_status", "in.(pending,cart_created,generated)");
   url.searchParams.set("shipping_shipment_id", "not.is.null");
   url.searchParams.set("order", "paid_at.asc.nullslast,created_at.asc");
   url.searchParams.set("limit", String(Math.max(1, Number(limit) || 20)));
@@ -754,6 +757,36 @@ function mergeShippingLabelRaw(existingRaw, patch) {
     ...base,
     ...patch
   };
+}
+
+
+function normalizeShippingStatus(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+}
+
+function isOrderAlreadyFinalStatus(status) {
+  return ["delivered", "cancelled", "failed"].includes(
+    String(status || "").trim().toLowerCase()
+  );
+}
+
+function isMelhorEnvioDeliveredStatus(status) {
+  return [
+    "delivered",
+    "entregue",
+    "received",
+    "recebido",
+    "delivery_completed",
+    "completed_delivery",
+    "finalizado",
+    "delivered_to_recipient",
+    "entrega_realizada",
+    "objeto_entregue"
+  ].includes(normalizeShippingStatus(status));
 }
 
 function shouldMarkAsGenerated({ labelUrl, trackingCode, trackingStatus }) {
@@ -872,17 +905,35 @@ async function syncSingleCartCreatedOrder(order, accessToken, baseUrl) {
   };
 }
 
-  await updateOrderSyncRecord(order.id, {
+  const now = new Date().toISOString();
+  const syncUpdatePayload = {
     shipping_label_status: "generated",
     shipping_label_url: labelUrl,
     shipping_label_pdf_url: labelUrl,
     shipping_tracking_code: trackingCode,
     tracking_code: trackingCode || order?.tracking_code || "",
     shipping_carrier: carrier,
-    shipping_label_generated_at: new Date().toISOString(),
+    shipping_label_generated_at: order?.shipping_label_generated_at || now,
     shipping_label_error: "",
     shipping_label_raw: mergedRaw
-  });
+  };
+
+  if (isMelhorEnvioDeliveredStatus(trackingInfo.status)) {
+    syncUpdatePayload.order_status = "delivered";
+    syncUpdatePayload.delivered_at = order?.delivered_at || now;
+
+    if (!order?.shipped_at) {
+      syncUpdatePayload.shipped_at = now;
+    }
+  } else if (!isOrderAlreadyFinalStatus(order?.order_status)) {
+    syncUpdatePayload.order_status = "shipped";
+
+    if (!order?.shipped_at) {
+      syncUpdatePayload.shipped_at = now;
+    }
+  }
+
+  await updateOrderSyncRecord(order.id, syncUpdatePayload);
 
   await addOrderSyncTimeline(
     order.id,
