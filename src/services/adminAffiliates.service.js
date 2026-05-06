@@ -201,6 +201,335 @@ function toMoneyNumber(value, fallback = 0) {
   return Number.isFinite(number) ? number : fallback;
 }
 
+function normalizeCommissionLifecycleStatus(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+}
+
+function isCommissionReleasedLikeStatus(value) {
+  return [
+    "released",
+    "liberado",
+    "available",
+    "disponivel",
+    "ready",
+  ].includes(normalizeCommissionLifecycleStatus(value));
+}
+
+function isCommissionPaidLikeStatus(value) {
+  return ["paid", "pago"].includes(normalizeCommissionLifecycleStatus(value));
+}
+
+function isCommissionCancelledLikeStatus(value) {
+  return [
+    "cancelled",
+    "canceled",
+    "cancelado",
+    "cancelada",
+    "rejected",
+    "rejeitado",
+    "rejeitada",
+    "failed",
+    "falhou",
+    "refunded",
+    "estornado",
+    "estornada",
+    "charged_back",
+    "chargeback",
+  ].includes(normalizeCommissionLifecycleStatus(value));
+}
+
+function isOrderDeliveredLikeStatus(value) {
+  return [
+    "delivered",
+    "entregue",
+    "received",
+    "recebido",
+    "delivery_completed",
+    "completed_delivery",
+    "finalizado",
+    "delivered_to_recipient",
+    "entrega_realizada",
+    "objeto_entregue",
+  ].includes(normalizeCommissionLifecycleStatus(value));
+}
+
+function isOrderCancelledLikeStatus(value) {
+  return isCommissionCancelledLikeStatus(value);
+}
+
+function isSaleAffiliateConversion(conversion = {}) {
+  const type = normalizeCommissionLifecycleStatus(
+    conversion.conversion_type || "sale_commission"
+  );
+
+  return !type || type === "sale_commission" || type === "sale" || type === "order";
+}
+
+function isRecruitmentAffiliateConversion(conversion = {}) {
+  const type = normalizeCommissionLifecycleStatus(conversion.conversion_type);
+
+  return [
+    "recruitment_bonus",
+    "recruitment_commission",
+    "network_commission",
+  ].includes(type);
+}
+
+function getAffiliateConversionCommissionAmount(conversion = {}) {
+  return toMoneyNumber(
+    conversion.commission_amount ??
+      conversion.recruitment_bonus_amount ??
+      conversion.network_commission ??
+      0,
+    0
+  );
+}
+
+function getAffiliateConversionOrderTotal(conversion = {}, order = {}) {
+  return toMoneyNumber(order.total_amount ?? conversion.order_total ?? 0, 0);
+}
+
+function isAdminOrderCancelled(order = {}) {
+  return (
+    isOrderCancelledLikeStatus(order.order_status) ||
+    isOrderCancelledLikeStatus(order.payment_status) ||
+    isOrderCancelledLikeStatus(order.payment_raw_status)
+  );
+}
+
+function isAdminOrderDelivered(order = {}) {
+  const raw = order.shipping_label_raw && typeof order.shipping_label_raw === "object"
+    ? order.shipping_label_raw
+    : {};
+
+  return (
+    isOrderDeliveredLikeStatus(order.order_status) ||
+    isOrderDeliveredLikeStatus(order.shipping_status) ||
+    isOrderDeliveredLikeStatus(order.delivery_status) ||
+    isOrderDeliveredLikeStatus(order.tracking_status) ||
+    isOrderDeliveredLikeStatus(raw.sync_tracking_status) ||
+    Boolean(order.delivered_at)
+  );
+}
+
+function getAdminAffiliateConversionLifecycle({ conversion = {}, order = {} } = {}) {
+  if (isCommissionCancelledLikeStatus(conversion.status) || isAdminOrderCancelled(order)) {
+    return "cancelled";
+  }
+
+  if (isAdminOrderDelivered(order) || isCommissionReleasedLikeStatus(conversion.status)) {
+    return "delivered";
+  }
+
+  return "waiting_delivery";
+}
+
+function getPaidPayoutAmount(payout = {}) {
+  const status = normalizeCommissionLifecycleStatus(payout.status || "paid");
+
+  if (["paid", "pago", "completed", "approved", "aprovado"].includes(status)) {
+    return toMoneyNumber(payout.amount, 0);
+  }
+
+  return 0;
+}
+
+function chunkArray(items = [], size = 80) {
+  const chunks = [];
+
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+
+  return chunks;
+}
+
+function buildMapById(rows = []) {
+  const map = new Map();
+
+  rows.forEach((row) => {
+    const id = cleanText(row?.id);
+
+    if (id) {
+      map.set(id, row);
+    }
+  });
+
+  return map;
+}
+
+function createEmptyAffiliateSafeSummary() {
+  return {
+    total_conversions: 0,
+    total_referred_sales: 0,
+    approved_commission: 0,
+    released_commission: 0,
+    waiting_delivery_commission: 0,
+    pending_delivery_commission: 0,
+    shipping_pending_commission: 0,
+    waiting_commission: 0,
+    paid_commission_by_conversion: 0,
+    total_paid: 0,
+    balance_to_pay: 0,
+    canceled_orders_count: 0,
+    network_commission_total: 0,
+    recruitment_bonus_total: 0,
+  };
+}
+
+async function fetchRowsByInFilter(table, column, ids = [], select = "*") {
+  const cleanIds = Array.from(
+    new Set(ids.map((id) => cleanText(id)).filter(Boolean))
+  );
+
+  if (!cleanIds.length) {
+    return [];
+  }
+
+  const rows = [];
+
+  for (const chunk of chunkArray(cleanIds, 70)) {
+    const params = new URLSearchParams();
+    params.set("select", select);
+    params.set(column, `in.(${chunk.join(",")})`);
+
+    const data = await supabaseRequest(`/${table}?${params.toString()}`);
+
+    if (Array.isArray(data)) {
+      rows.push(...data);
+    }
+  }
+
+  return rows;
+}
+
+async function buildSafeAffiliateSummaries(affiliateIds = []) {
+  const cleanAffiliateIds = Array.from(
+    new Set(affiliateIds.map((id) => cleanText(id)).filter(Boolean))
+  );
+
+  const summaries = new Map(
+    cleanAffiliateIds.map((affiliateId) => [affiliateId, createEmptyAffiliateSafeSummary()])
+  );
+
+  if (!cleanAffiliateIds.length) {
+    return summaries;
+  }
+
+  const [conversions, payouts] = await Promise.all([
+    fetchRowsByInFilter(
+      "affiliate_conversions",
+      "affiliate_id",
+      cleanAffiliateIds,
+      "id,affiliate_id,order_id,order_total,commission_amount,recruitment_bonus_amount,network_commission,conversion_type,status"
+    ),
+    fetchRowsByInFilter(
+      "affiliate_payouts",
+      "affiliate_id",
+      cleanAffiliateIds,
+      "id,affiliate_id,amount,status"
+    ),
+  ]);
+
+  const orderIds = conversions.map((conversion) => conversion.order_id).filter(Boolean);
+  const orders = await fetchRowsByInFilter(
+    "orders",
+    "id",
+    orderIds,
+    "id,total_amount,payment_status,payment_raw_status,order_status,shipping_label_status,shipping_status,delivery_status,tracking_status,shipping_tracking_code,tracking_code,shipped_at,delivered_at,shipping_label_raw"
+  );
+  const orderMap = buildMapById(orders);
+
+  payouts.forEach((payout) => {
+    const affiliateId = cleanText(payout.affiliate_id);
+    const summary = summaries.get(affiliateId);
+
+    if (!summary) return;
+
+    summary.total_paid += getPaidPayoutAmount(payout);
+  });
+
+  conversions.forEach((conversion) => {
+    const affiliateId = cleanText(conversion.affiliate_id);
+    const summary = summaries.get(affiliateId);
+
+    if (!summary) return;
+
+    const order = orderMap.get(cleanText(conversion.order_id)) || {};
+    const commission = getAffiliateConversionCommissionAmount(conversion);
+    const total = getAffiliateConversionOrderTotal(conversion, order);
+    const lifecycle = getAdminAffiliateConversionLifecycle({ conversion, order });
+
+    if (isRecruitmentAffiliateConversion(conversion)) {
+      if (lifecycle === "cancelled") return;
+
+      summary.network_commission_total += commission;
+      summary.recruitment_bonus_total += commission;
+      summary.approved_commission += commission;
+
+      if (isCommissionReleasedLikeStatus(conversion.status)) {
+        summary.released_commission += commission;
+      }
+
+      return;
+    }
+
+    if (!isSaleAffiliateConversion(conversion)) {
+      return;
+    }
+
+    if (lifecycle === "cancelled") {
+      summary.canceled_orders_count += 1;
+      return;
+    }
+
+    summary.total_conversions += 1;
+    summary.total_referred_sales += total;
+    summary.approved_commission += commission;
+
+    if (lifecycle === "delivered") {
+      summary.released_commission += commission;
+      return;
+    }
+
+    if (isCommissionPaidLikeStatus(conversion.status)) {
+      summary.paid_commission_by_conversion += commission;
+    }
+
+    summary.waiting_delivery_commission += commission;
+    summary.pending_delivery_commission += commission;
+    summary.shipping_pending_commission += commission;
+    summary.waiting_commission += commission;
+  });
+
+  summaries.forEach((summary) => {
+    summary.total_conversions = Number(summary.total_conversions || 0);
+    summary.total_referred_sales = Number(summary.total_referred_sales.toFixed(2));
+    summary.approved_commission = Number(summary.approved_commission.toFixed(2));
+    summary.released_commission = Number(summary.released_commission.toFixed(2));
+    summary.waiting_delivery_commission = Number(summary.waiting_delivery_commission.toFixed(2));
+    summary.pending_delivery_commission = Number(summary.pending_delivery_commission.toFixed(2));
+    summary.shipping_pending_commission = Number(summary.shipping_pending_commission.toFixed(2));
+    summary.waiting_commission = Number(summary.waiting_commission.toFixed(2));
+    summary.paid_commission_by_conversion = Number(summary.paid_commission_by_conversion.toFixed(2));
+    summary.total_paid = Number(summary.total_paid.toFixed(2));
+    summary.balance_to_pay = Number(
+      Math.max(summary.released_commission - summary.total_paid, 0).toFixed(2)
+    );
+  });
+
+  return summaries;
+}
+
+async function getSafeAffiliateBalanceToPay(affiliateId) {
+  const summaries = await buildSafeAffiliateSummaries([affiliateId]);
+  return summaries.get(cleanText(affiliateId)) || createEmptyAffiliateSafeSummary();
+}
+
 function sanitizeFileName(value) {
   return cleanText(value)
     .normalize("NFD")
@@ -458,7 +787,64 @@ export async function listAffiliateSummary(filters = {}) {
     );
   }
 
-  return supabaseRequest(`/affiliate_summary?${params.toString()}`);
+  const rows = await supabaseRequest(`/affiliate_summary?${params.toString()}`);
+  const safeRows = Array.isArray(rows) ? rows : [];
+  const affiliateIds = safeRows
+    .map((affiliate) => cleanText(affiliate.affiliate_id || affiliate.id))
+    .filter(Boolean);
+
+  try {
+    const safeSummaries = await buildSafeAffiliateSummaries(affiliateIds);
+
+    return safeRows.map((affiliate) => {
+      const affiliateId = cleanText(affiliate.affiliate_id || affiliate.id);
+      const safeSummary = safeSummaries.get(affiliateId) || createEmptyAffiliateSafeSummary();
+
+      return {
+        ...affiliate,
+        total_conversions: safeSummary.total_conversions,
+        total_referred_sales: safeSummary.total_referred_sales,
+        approved_commission: safeSummary.approved_commission,
+        released_commission: safeSummary.released_commission,
+        waiting_delivery_commission: safeSummary.waiting_delivery_commission,
+        pending_delivery_commission: safeSummary.pending_delivery_commission,
+        shipping_pending_commission: safeSummary.shipping_pending_commission,
+        waiting_commission: safeSummary.waiting_commission,
+        paid_commission_by_conversion: safeSummary.paid_commission_by_conversion,
+        network_commission_total: safeSummary.network_commission_total,
+        recruitment_bonus_total: safeSummary.recruitment_bonus_total,
+        total_paid: safeSummary.total_paid,
+        balance_to_pay: safeSummary.balance_to_pay,
+        canceled_orders_count: safeSummary.canceled_orders_count,
+      };
+    });
+  } catch (error) {
+    console.error("AFFILIATE SUMMARY SAFE ENRICHMENT ERROR:", error);
+
+    return safeRows.map((affiliate) => ({
+      ...affiliate,
+      balance_to_pay: 0,
+      released_commission: 0,
+      waiting_delivery_commission:
+        Number(
+          affiliate.waiting_delivery_commission ||
+            affiliate.pending_delivery_commission ||
+            affiliate.shipping_pending_commission ||
+            affiliate.waiting_commission ||
+            affiliate.approved_commission ||
+            0
+        ) || 0,
+      pending_delivery_commission:
+        Number(
+          affiliate.pending_delivery_commission ||
+            affiliate.waiting_delivery_commission ||
+            affiliate.shipping_pending_commission ||
+            affiliate.waiting_commission ||
+            affiliate.approved_commission ||
+            0
+        ) || 0,
+    }));
+  }
 }
 
 export async function getAffiliateById(id) {
@@ -586,6 +972,21 @@ export async function createAffiliatePayout(input = {}) {
 
   if (!affiliate) {
     throw new Error("Afiliado não encontrado.");
+  }
+
+  const safeSummary = await getSafeAffiliateBalanceToPay(affiliateId);
+  const safeBalance = Number(safeSummary.balance_to_pay || 0);
+
+  if (safeBalance <= 0) {
+    throw new Error(
+      "Este afiliado ainda não possui comissão liberada por entrega. Aguarde o pedido ser marcado como entregue."
+    );
+  }
+
+  if (amount > safeBalance) {
+    throw new Error(
+      `O valor informado (${formatMoneyBR(amount)}) é maior que o saldo liberado por entrega (${formatMoneyBR(safeBalance)}).`
+    );
   }
 
   const receiptData = receiptFile

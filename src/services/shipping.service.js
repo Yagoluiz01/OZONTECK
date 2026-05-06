@@ -4,6 +4,7 @@ import {
   buildMelhorEnvioHeaders,
   getMelhorEnvioConfig
 } from "./melhorEnvio.service.js";
+import { syncAffiliateCommissionLifecycleForOrder } from "./affiliateCommissionLifecycle.service.js";
 
 function onlyDigits(value) {
   return String(value || "").replace(/\D/g, "");
@@ -759,6 +760,50 @@ function mergeShippingLabelRaw(existingRaw, patch) {
   };
 }
 
+async function syncAffiliateCommissionAfterShippingUpdate(order, source) {
+  try {
+    if (!order?.id) {
+      return {
+        success: false,
+        skipped: true,
+        reason: "missing_order_after_shipping_update"
+      };
+    }
+
+    const result = await syncAffiliateCommissionLifecycleForOrder(order, source);
+
+    console.log(
+      "AFFILIATE COMMISSION AFTER MELHOR ENVIO SYNC: " +
+        JSON.stringify({
+          orderId: order.id,
+          orderNumber: order.order_number || null,
+          orderStatus: order.order_status || null,
+          deliveredAt: order.delivered_at || null,
+          source,
+          result
+        })
+    );
+
+    return result;
+  } catch (error) {
+    console.error(
+      "AFFILIATE COMMISSION AFTER MELHOR ENVIO SYNC ERROR: " +
+        JSON.stringify({
+          orderId: order?.id || null,
+          orderNumber: order?.order_number || null,
+          source,
+          message: error?.message || String(error)
+        })
+    );
+
+    return {
+      success: false,
+      skipped: false,
+      error: error?.message || "Erro ao sincronizar comissão após Melhor Envio"
+    };
+  }
+}
+
 
 function normalizeShippingStatus(value) {
   return String(value || "")
@@ -933,7 +978,15 @@ async function syncSingleCartCreatedOrder(order, accessToken, baseUrl) {
     }
   }
 
-  await updateOrderSyncRecord(order.id, syncUpdatePayload);
+  const updatedOrder = await updateOrderSyncRecord(order.id, syncUpdatePayload);
+
+  await syncAffiliateCommissionAfterShippingUpdate(
+    updatedOrder || {
+      ...order,
+      ...syncUpdatePayload
+    },
+    "melhor_envio_label_sync"
+  );
 
   await addOrderSyncTimeline(
     order.id,
@@ -953,6 +1006,8 @@ async function syncSingleCartCreatedOrder(order, accessToken, baseUrl) {
     orderId: order?.id || null,
     orderNumber: order?.order_number || null,
     status: "generated",
+    orderStatus: updatedOrder?.order_status || syncUpdatePayload.order_status || order?.order_status || null,
+    deliveredAt: updatedOrder?.delivered_at || syncUpdatePayload.delivered_at || order?.delivered_at || null,
     shipmentId,
     trackingCode,
     labelUrl

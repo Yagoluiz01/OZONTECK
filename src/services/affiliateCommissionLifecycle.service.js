@@ -284,10 +284,27 @@ export async function syncAffiliateCommissionLifecycleForOrder(order, source = "
   }
 
   const orderStatus = normalizeStatus(order.order_status);
-  const trackingStatus = normalizeStatus(order.shipping_label_raw?.sync_tracking_status);
+  const paymentStatus = normalizeStatus(order.payment_status);
+  const paymentRawStatus = normalizeStatus(order.payment_raw_status);
+  const shippingStatus = normalizeStatus(order.shipping_status);
+  const deliveryStatus = normalizeStatus(order.delivery_status);
+  const trackingStatus = normalizeStatus(
+    order.tracking_status || order.shipping_label_raw?.sync_tracking_status
+  );
 
-  const shouldCancel = isCancelledLikeStatus(orderStatus);
-  const shouldRelease = isDeliveredLikeStatus(orderStatus) || isDeliveredLikeStatus(trackingStatus);
+  const hasDeliveredAt = Boolean(order.delivered_at);
+
+  const shouldCancel =
+    isCancelledLikeStatus(orderStatus) ||
+    isCancelledLikeStatus(paymentStatus) ||
+    isCancelledLikeStatus(paymentRawStatus);
+
+  const shouldRelease =
+    isDeliveredLikeStatus(orderStatus) ||
+    isDeliveredLikeStatus(shippingStatus) ||
+    isDeliveredLikeStatus(deliveryStatus) ||
+    isDeliveredLikeStatus(trackingStatus) ||
+    hasDeliveredAt;
 
   if (!shouldRelease && !shouldCancel) {
     return {
@@ -296,7 +313,8 @@ export async function syncAffiliateCommissionLifecycleForOrder(order, source = "
       reason: "status_without_lifecycle_action",
       orderId: order.id,
       orderStatus: order.order_status || null,
-      syncTrackingStatus: order.shipping_label_raw?.sync_tracking_status || null,
+      syncTrackingStatus: order.tracking_status || order.shipping_label_raw?.sync_tracking_status || null,
+      deliveredAt: order.delivered_at || null,
     };
   }
 
@@ -329,7 +347,8 @@ export async function syncAffiliateCommissionLifecycleForOrder(order, source = "
     orderId: order.id,
     orderNumber: order.order_number || null,
     orderStatus: order.order_status || null,
-    syncTrackingStatus: order.shipping_label_raw?.sync_tracking_status || null,
+    syncTrackingStatus: order.tracking_status || order.shipping_label_raw?.sync_tracking_status || null,
+    deliveredAt: order.delivered_at || null,
     source,
     updated,
     checked: conversions.length,
