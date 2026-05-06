@@ -631,6 +631,11 @@ export async function getAffiliateSummary(affiliateId) {
     0
   );
 
+  summary.cancelled_orders_count = summary.canceled_orders_count;
+  summary.pendingShippingBalance = summary.pending_shipping_balance;
+  summary.canceledOrdersCount = summary.canceled_orders_count;
+  summary.balanceToPay = summary.balance_to_pay;
+
   const level_goal = goal
     ? {
         affiliate_id: goal.affiliate_id,
