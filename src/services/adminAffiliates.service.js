@@ -362,6 +362,40 @@ function buildMapById(rows = []) {
   return map;
 }
 
+async function fetchAffiliateSpecialCommissionFlags(affiliateIds = []) {
+  const ids = Array.from(new Set(affiliateIds.map((id) => cleanText(id)).filter(Boolean)));
+
+  if (!ids.length) {
+    return new Map();
+  }
+
+  try {
+    const rows = await fetchRowsByInFilter(
+      "affiliates",
+      "id",
+      ids,
+      "id,special_product_commission_enabled"
+    );
+
+    const map = new Map();
+
+    rows.forEach((row) => {
+      const id = cleanText(row?.id);
+      if (id) {
+        map.set(id, Boolean(row.special_product_commission_enabled));
+      }
+    });
+
+    return map;
+  } catch (error) {
+    console.warn(
+      "AFFILIATE SPECIAL COMMISSION FLAGS SKIPPED:",
+      error?.message || error
+    );
+    return new Map();
+  }
+}
+
 function createEmptyAffiliateSafeSummary() {
   return {
     total_conversions: 0,
@@ -615,7 +649,9 @@ function buildAffiliatePayload(input = {}, isUpdate = false) {
   const phone = cleanText(input.phone || input.telefone);
   const refCode = normalizeCode(input.ref_code || input.refCode);
   const couponCode = normalizeCode(input.coupon_code || input.couponCode);
-  const status = cleanText(input.status || "active") || "active";
+  const status = cleanText(
+    input.status ?? (isUpdate ? "" : "active")
+  ) || (isUpdate ? "" : "active");
   const commissionRate = toNumber(
   input.commission_rate ?? input.commissionRate,
   10
@@ -627,6 +663,12 @@ const recruitmentCommissionRate = toNumber(
 );
 
 const pixKey = cleanText(input.pix_key || input.pixKey);
+  const specialProductCommissionEnabled =
+    input.special_product_commission_enabled !== undefined
+      ? Boolean(input.special_product_commission_enabled)
+      : input.specialProductCommissionEnabled !== undefined
+        ? Boolean(input.specialProductCommissionEnabled)
+        : undefined;
   const notes = cleanText(input.notes);
   const passwordHash = cleanText(input.password_hash || input.passwordHash);
   const accessEnabled =
@@ -675,6 +717,10 @@ const recruiterRefCode = normalizeCode(
     input.recruitmentCommissionRate !== undefined
   ) {
     payload.recruitment_commission_rate = recruitmentCommissionRate;
+  }
+
+  if (specialProductCommissionEnabled !== undefined) {
+    payload.special_product_commission_enabled = specialProductCommissionEnabled;
   }
 
 
@@ -905,7 +951,10 @@ export async function listAffiliateSummary(filters = {}) {
     .filter(Boolean);
 
   try {
-    const safeSummaries = await buildSafeAffiliateSummaries(affiliateIds);
+    const [safeSummaries, specialCommissionFlags] = await Promise.all([
+      buildSafeAffiliateSummaries(affiliateIds),
+      fetchAffiliateSpecialCommissionFlags(affiliateIds),
+    ]);
 
     return safeRows.map((affiliate) => {
       const affiliateId = cleanText(affiliate.affiliate_id || affiliate.id);
@@ -913,6 +962,9 @@ export async function listAffiliateSummary(filters = {}) {
 
       return {
         ...affiliate,
+        special_product_commission_enabled:
+          specialCommissionFlags.get(affiliateId) ??
+          Boolean(affiliate.special_product_commission_enabled),
         total_conversions: safeSummary.total_conversions,
         total_referred_sales: safeSummary.total_referred_sales,
         approved_commission: safeSummary.approved_commission,
@@ -934,6 +986,7 @@ export async function listAffiliateSummary(filters = {}) {
 
     return safeRows.map((affiliate) => ({
       ...affiliate,
+      special_product_commission_enabled: Boolean(affiliate.special_product_commission_enabled),
       balance_to_pay: 0,
       released_commission: 0,
       waiting_delivery_commission:

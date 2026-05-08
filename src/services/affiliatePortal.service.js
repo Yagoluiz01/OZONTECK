@@ -882,7 +882,11 @@ function normalizeAffiliateProduct(row = {}, affiliate = {}) {
   const product = row.products || {};
   const productId = String(row.product_id || product.id || "").trim();
   const price = getProductPrice(product);
-  const commissionPercent = roundMoney(row.affiliate_commission_percent ?? affiliate.commission_rate ?? 0);
+  const hasSpecialCommission = Boolean(affiliate.special_product_commission_enabled);
+  const defaultPercent = roundMoney(row.affiliate_commission_percent ?? affiliate.commission_rate ?? 0);
+  const specialPercent = roundMoney(row.special_affiliate_commission_percent ?? defaultPercent);
+  const commissionPercent = hasSpecialCommission && specialPercent > 0 ? specialPercent : defaultPercent;
+  const commissionType = hasSpecialCommission && specialPercent > 0 ? "special" : "default";
   const estimatedCommission = roundMoney(price * (commissionPercent / 100));
   const safeStatus = normalizeStatus(row.status || "pending");
   const isSafePricing = ["healthy", "saudavel"].includes(safeStatus);
@@ -898,7 +902,13 @@ function normalizeAffiliateProduct(row = {}, affiliate = {}) {
     short_description: product.short_description || "",
     price,
     commission_percent: commissionPercent,
+    affiliate_commission_percent: defaultPercent,
+    special_affiliate_commission_percent: specialPercent,
+    commission_type: commissionType,
+    special_product_commission_enabled: hasSpecialCommission,
     estimated_commission: estimatedCommission,
+    estimated_default_commission: roundMoney(price * (defaultPercent / 100)),
+    estimated_special_commission: roundMoney(price * (specialPercent / 100)),
     pricing_status: row.status || "pending",
     risk_message: row.risk_message || null,
     can_promote: isSafePricing && price > 0 && commissionPercent > 0,
@@ -910,7 +920,7 @@ export async function getAffiliatePromotionalProducts(affiliateId) {
   const affiliate = await getAffiliateById(affiliateId);
 
   const rows = await supabaseRequest(
-    `/product_pricing?select=id,product_id,affiliate_commission_percent,status,risk_message,updated_at,products(id,name,sku,price,category,status,image_url,image_url_2,short_description)&order=updated_at.desc&limit=200`
+    `/product_pricing?select=id,product_id,affiliate_commission_percent,special_affiliate_commission_percent,status,risk_message,updated_at,products(id,name,sku,price,category,status,image_url,image_url_2,short_description)&order=updated_at.desc&limit=200`
   );
 
   const safeRows = Array.isArray(rows) ? rows : [];
