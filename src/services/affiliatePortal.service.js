@@ -882,11 +882,10 @@ function normalizeAffiliateProduct(row = {}, affiliate = {}) {
   const product = row.products || {};
   const productId = String(row.product_id || product.id || "").trim();
   const price = getProductPrice(product);
-  const hasSpecialCommission = Boolean(affiliate.special_product_commission_enabled);
   const defaultPercent = roundMoney(row.affiliate_commission_percent ?? affiliate.commission_rate ?? 0);
-  const specialPercent = roundMoney(row.special_affiliate_commission_percent ?? defaultPercent);
+  const specialPercent = roundMoney(row.special_affiliate_commission_percent ?? 0);
+  const hasSpecialCommission = Boolean(affiliate.special_product_commission_enabled);
   const commissionPercent = hasSpecialCommission && specialPercent > 0 ? specialPercent : defaultPercent;
-  const commissionType = hasSpecialCommission && specialPercent > 0 ? "special" : "default";
   const estimatedCommission = roundMoney(price * (commissionPercent / 100));
   const safeStatus = normalizeStatus(row.status || "pending");
   const isSafePricing = ["healthy", "saudavel"].includes(safeStatus);
@@ -901,14 +900,13 @@ function normalizeAffiliateProduct(row = {}, affiliate = {}) {
     image_url_2: product.image_url_2 || product.imageUrl2 || "",
     short_description: product.short_description || "",
     price,
+    current_price: price,
     commission_percent: commissionPercent,
-    affiliate_commission_percent: defaultPercent,
-    special_affiliate_commission_percent: specialPercent,
-    commission_type: commissionType,
+    affiliate_commission_percent: commissionPercent,
+    commission_type: hasSpecialCommission && specialPercent > 0 ? "special" : "default",
     special_product_commission_enabled: hasSpecialCommission,
     estimated_commission: estimatedCommission,
-    estimated_default_commission: roundMoney(price * (defaultPercent / 100)),
-    estimated_special_commission: roundMoney(price * (specialPercent / 100)),
+    estimated_default_commission: estimatedCommission,
     pricing_status: row.status || "pending",
     risk_message: row.risk_message || null,
     can_promote: isSafePricing && price > 0 && commissionPercent > 0,
