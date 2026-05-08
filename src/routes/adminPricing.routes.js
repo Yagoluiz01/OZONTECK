@@ -133,7 +133,7 @@ router.post("/save", async (req, res) => {
 
 router.post("/apply/:productId", async (req, res) => {
   try {
-    const result = await applySuggestedPriceToProduct(req.params.productId);
+    const result = await applySuggestedPriceToProduct(req.params.productId, req.body || {});
     return ok(res, result, "Preço sugerido aplicado ao produto com sucesso.");
   } catch (error) {
     return fail(res, error, 400);

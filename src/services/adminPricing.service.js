@@ -290,7 +290,7 @@ function calculatePricing(input) {
     marginPercent: safeMarginPercent,
   });
 
-  const suggestedPrice = calculatePriceForCommission({
+  const calculatedSuggestedPrice = calculatePriceForCommission({
     baseCost,
     gatewayFeePercent,
     taxPercent,
@@ -298,7 +298,19 @@ function calculatePricing(input) {
     marginPercent: desiredMarginPercent,
   });
 
-  const priceWithDefaultCommission = suggestedPrice;
+  const priceWithDefaultCommission = calculatedSuggestedPrice;
+
+  const manualSuggestedPrice = roundMoney(
+    input.suggested_price_override ||
+      input.manual_suggested_price ||
+      input.target_suggested_price ||
+      0
+  );
+
+  const suggestedPrice =
+    manualSuggestedPrice > calculatedSuggestedPrice
+      ? manualSuggestedPrice
+      : calculatedSuggestedPrice;
 
   const priceWithMaxCommission = calculatePriceForCommission({
     baseCost,
@@ -685,18 +697,43 @@ export async function saveProductPricing(payload) {
   return saved;
 }
 
-export async function applySuggestedPriceToProduct(productId) {
+export async function applySuggestedPriceToProduct(productId, payload = {}) {
   if (!productId) {
     throw new Error("productId é obrigatório.");
   }
 
-  const pricing = await getPricingByProductId(productId);
+  const existingPricing = await getPricingByProductId(productId);
+
+  if (!existingPricing && !Object.keys(payload || {}).length) {
+    throw new Error("Precificação não encontrada para este produto.");
+  }
+
+  let pricing = existingPricing;
+
+  const requestedSuggestedPrice = roundMoney(
+    payload.suggested_price_override ||
+      payload.manual_suggested_price ||
+      payload.target_suggested_price ||
+      0
+  );
+
+  if (requestedSuggestedPrice > 0) {
+    pricing = await saveProductPricing({
+      ...(payload || {}),
+      product_id: productId,
+      suggested_price_override: requestedSuggestedPrice,
+    });
+  }
 
   if (!pricing) {
     throw new Error("Precificação não encontrada para este produto.");
   }
 
-  const suggestedPrice = roundMoney(pricing.suggested_price);
+  const suggestedPrice = roundMoney(
+    requestedSuggestedPrice > 0
+      ? Math.max(requestedSuggestedPrice, pricing.suggested_price || 0)
+      : pricing.suggested_price
+  );
 
   if (!suggestedPrice || suggestedPrice <= 0) {
     throw new Error(
@@ -730,14 +767,20 @@ export async function applySuggestedPriceToProduct(productId) {
   await createPricingHistory({
     productId,
     pricingId: pricing.id,
-    pricingData: pricing,
+    pricingData: {
+      ...pricing,
+      suggested_price: suggestedPrice,
+    },
     eventType: "apply_price",
     currentProductPrice: product?.price || suggestedPrice,
     notes: pricing.notes || null,
   });
 
   return {
-    pricing,
+    pricing: {
+      ...pricing,
+      suggested_price: suggestedPrice,
+    },
     product,
   };
 }
