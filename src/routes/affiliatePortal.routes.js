@@ -9,6 +9,7 @@ import {
   payouts,
   summary,
   network,
+  products,
   updateProfile,
 } from "../controllers/affiliatePortal.controller.js";
 
@@ -31,6 +32,7 @@ router.get("/summary", requireAffiliateAuth, summary);
 router.get("/orders", requireAffiliateAuth, orders);
 router.get("/payouts", requireAffiliateAuth, payouts);
 router.get("/network", requireAffiliateAuth, network);
+router.get("/products", requireAffiliateAuth, products);
 router.put("/profile", requireAffiliateAuth, updateProfile);
 
 router.get("/push/config", requireAffiliateAuth, getPushConfig);

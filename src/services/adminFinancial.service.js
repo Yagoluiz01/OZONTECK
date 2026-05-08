@@ -71,6 +71,18 @@ async function supabaseFetch(path, options = {}) {
   return json;
 }
 
+async function optionalSupabaseFetch(path, options = {}) {
+  try {
+    return await supabaseFetch(path, options);
+  } catch (error) {
+    console.warn(
+      "FINANCEIRO OPTIONAL FETCH:",
+      error?.message || "Não foi possível buscar dados opcionais."
+    );
+    return [];
+  }
+}
+
 function getPeriodRange(period) {
   const now = new Date();
   const start = new Date(now);
@@ -175,7 +187,77 @@ function getRiskReason(status) {
   return reasons[status] || "Sem observações.";
 }
 
-function normalizeOrder(order) {
+function getDirectAffiliateCommission(order) {
+  return roundMoney(
+    toNumber(order.affiliate_commission_amount) ||
+      toNumber(order.affiliate_commission) ||
+      toNumber(order.commission_amount) ||
+      toNumber(order.affiliate_amount) ||
+      0
+  );
+}
+
+function buildCommissionMap(conversions = []) {
+  return (conversions || []).reduce((acc, item) => {
+    const status = String(item.status || "").toLowerCase();
+
+    if (["canceled", "cancelled", "rejected", "refunded"].includes(status)) {
+      return acc;
+    }
+
+    const amount = roundMoney(
+      toNumber(item.commission_amount) ||
+        toNumber(item.amount) ||
+        toNumber(item.commission_value) ||
+        0
+    );
+
+    if (amount <= 0) {
+      return acc;
+    }
+
+    const keys = [
+      item.order_id,
+      item.order_number,
+      item.external_reference,
+      item.payment_external_reference,
+    ].filter(Boolean);
+
+    keys.forEach((key) => {
+      const normalizedKey = String(key);
+      acc[normalizedKey] = roundMoney(toNumber(acc[normalizedKey]) + amount);
+    });
+
+    return acc;
+  }, {});
+}
+
+function getAffiliateCommissionForOrder(order, commissionMap = {}) {
+  const direct = getDirectAffiliateCommission(order);
+
+  if (direct > 0) {
+    return direct;
+  }
+
+  const keys = [
+    order.id,
+    order.order_number,
+    order.external_reference,
+    order.payment_external_reference,
+  ].filter(Boolean);
+
+  for (const key of keys) {
+    const value = toNumber(commissionMap[String(key)]);
+
+    if (value > 0) {
+      return roundMoney(value);
+    }
+  }
+
+  return 0;
+}
+
+function normalizeOrder(order, commissionMap = {}) {
   const grossAmount =
     toNumber(order.gross_amount) ||
     toNumber(order.total_amount) ||
@@ -191,6 +273,29 @@ function normalizeOrder(order) {
   const adCost = toNumber(order.ad_cost);
   const otherCosts = toNumber(order.other_costs);
   const refundsAmount = toNumber(order.refunds_amount);
+  const affiliateCommission = getAffiliateCommissionForOrder(order, commissionMap);
+
+  const totalVariableCosts = roundMoney(
+    productCost +
+      shippingCost +
+      gatewayFee +
+      adCost +
+      otherCosts +
+      refundsAmount +
+      affiliateCommission
+  );
+
+  const profitBeforeAffiliate = roundMoney(
+    grossAmount -
+      productCost -
+      shippingCost -
+      gatewayFee -
+      adCost -
+      otherCosts -
+      refundsAmount
+  );
+
+  const calculatedNetProfit = roundMoney(profitBeforeAffiliate - affiliateCommission);
 
   const netAmount =
     toNumber(order.net_amount) ||
@@ -201,22 +306,17 @@ function normalizeOrder(order) {
     roundMoney(grossAmount - productCost);
 
   const netProfit =
-    toNumber(order.net_profit) ||
-    roundMoney(
-      grossAmount -
-        productCost -
-        shippingCost -
-        gatewayFee -
-        adCost -
-        otherCosts -
-        refundsAmount
-    );
+    toNumber(order.net_profit) && affiliateCommission <= 0
+      ? roundMoney(order.net_profit)
+      : calculatedNetProfit;
 
   const marginPercent =
-    toNumber(order.margin_percent) ||
-    (grossAmount > 0 ? roundMoney((netProfit / grossAmount) * 100) : 0);
+    grossAmount > 0 ? roundMoney((netProfit / grossAmount) * 100) : 0;
 
   const shippingDifference = roundMoney(shippingAmount - shippingCost);
+
+  const missingGatewayFee = grossAmount > 0 && gatewayFee <= 0;
+  const missingProductCost = grossAmount > 0 && productCost <= 0;
 
   return {
     id: order.id,
@@ -239,6 +339,7 @@ function normalizeOrder(order) {
       )
         ? "paid"
         : "pending"),
+
     grossAmount: roundMoney(grossAmount),
     shippingAmount: roundMoney(shippingAmount),
     shippingCost: roundMoney(shippingCost),
@@ -247,15 +348,23 @@ function normalizeOrder(order) {
       roundMoney(shippingAmount),
       roundMoney(shippingCost)
     ),
+
     gatewayFee: roundMoney(gatewayFee),
     productCost: roundMoney(productCost),
     adCost: roundMoney(adCost),
     otherCosts: roundMoney(otherCosts),
     refundsAmount: roundMoney(refundsAmount),
+    affiliateCommission: roundMoney(affiliateCommission),
+
+    totalVariableCosts,
     netAmount: roundMoney(netAmount),
     grossProfit: roundMoney(grossProfit),
+    profitBeforeAffiliate,
     netProfit: roundMoney(netProfit),
     marginPercent: roundMoney(marginPercent),
+
+    missingGatewayFee,
+    missingProductCost,
   };
 }
 
@@ -441,19 +550,35 @@ export async function updateAccountReceivable(id, payload) {
   return result?.[0] || null;
 }
 
+async function listAffiliateConversionsForPeriod(period = "30d") {
+  const { startIso, endIso } = getPeriodRange(period);
+
+  return await optionalSupabaseFetch(
+    `affiliate_conversions?select=*&created_at=gte.${encodeURIComponent(
+      startIso
+    )}&created_at=lte.${encodeURIComponent(endIso)}&order=created_at.desc`,
+    { method: "GET" }
+  );
+}
+
 export async function listFinancialOrders(period = "30d") {
   const { startIso, endIso } = getPeriodRange(period);
 
-  const orders = await supabaseFetch(
-    `orders?select=*&created_at=gte.${encodeURIComponent(
-      startIso
-    )}&created_at=lte.${encodeURIComponent(endIso)}&order=created_at.desc`,
-    {
-      method: "GET",
-    }
-  );
+  const [orders, conversions] = await Promise.all([
+    supabaseFetch(
+      `orders?select=*&created_at=gte.${encodeURIComponent(
+        startIso
+      )}&created_at=lte.${encodeURIComponent(endIso)}&order=created_at.desc`,
+      {
+        method: "GET",
+      }
+    ),
+    listAffiliateConversionsForPeriod(period),
+  ]);
 
-  return (orders || []).map(normalizeOrder);
+  const commissionMap = buildCommissionMap(conversions);
+
+  return (orders || []).map((order) => normalizeOrder(order, commissionMap));
 }
 
 async function getProductsRiskSummary() {
@@ -526,6 +651,10 @@ function buildDre({ orders, payable, faturamentoBruto, receitaLiquida, lucroLiqu
     orders.reduce((sum, item) => sum + toNumber(item.gatewayFee), 0)
   );
 
+  const comissoesAfiliados = roundMoney(
+    orders.reduce((sum, item) => sum + toNumber(item.affiliateCommission), 0)
+  );
+
   const custoTrafego = roundMoney(
     orders.reduce((sum, item) => sum + toNumber(item.adCost), 0)
   );
@@ -542,6 +671,10 @@ function buildDre({ orders, payable, faturamentoBruto, receitaLiquida, lucroLiqu
     )
   );
 
+  const lucroAntesComissao = roundMoney(
+    orders.reduce((sum, item) => sum + toNumber(item.profitBeforeAffiliate), 0)
+  );
+
   const despesasFixasPagas = roundMoney(
     payable
       .filter((item) => item.status === "paid")
@@ -551,10 +684,20 @@ function buildDre({ orders, payable, faturamentoBruto, receitaLiquida, lucroLiqu
   const totalDespesasOperacionais = roundMoney(
     custoProdutos +
       taxasGateway +
+      comissoesAfiliados +
       custoTrafego +
       freteReal +
       outrasDespesasPedidos +
       despesasFixasPagas
+  );
+
+  const totalCustosVariaveis = roundMoney(
+    custoProdutos +
+      taxasGateway +
+      comissoesAfiliados +
+      custoTrafego +
+      freteReal +
+      outrasDespesasPedidos
   );
 
   const base = faturamentoBruto > 0 ? faturamentoBruto : 1;
@@ -576,16 +719,23 @@ function buildDre({ orders, payable, faturamentoBruto, receitaLiquida, lucroLiqu
     },
     {
       key: "custo_produtos",
-      label: "(-) Custo dos produtos",
+      label: "(-) Custo dos produtos vendidos",
       amount: roundMoney(custoProdutos),
       percent: roundMoney((custoProdutos / base) * 100),
       type: "negative",
     },
     {
       key: "taxas_gateway",
-      label: "(-) Taxas de gateway",
+      label: "(-) Taxas de pagamento",
       amount: roundMoney(taxasGateway),
       percent: roundMoney((taxasGateway / base) * 100),
+      type: "negative",
+    },
+    {
+      key: "comissoes_afiliados",
+      label: "(-) Comissões de afiliados",
+      amount: roundMoney(comissoesAfiliados),
+      percent: roundMoney((comissoesAfiliados / base) * 100),
       type: "negative",
     },
     {
@@ -597,7 +747,7 @@ function buildDre({ orders, payable, faturamentoBruto, receitaLiquida, lucroLiqu
     },
     {
       key: "frete_real",
-      label: "(-) Frete real",
+      label: "(-) Frete real / etiquetas",
       amount: roundMoney(freteReal),
       percent: roundMoney((freteReal / base) * 100),
       type: "negative",
@@ -610,6 +760,13 @@ function buildDre({ orders, payable, faturamentoBruto, receitaLiquida, lucroLiqu
       type: "negative",
     },
     {
+      key: "lucro_antes_comissao",
+      label: "(=) Lucro antes da comissão",
+      amount: roundMoney(lucroAntesComissao),
+      percent: roundMoney((lucroAntesComissao / base) * 100),
+      type: lucroAntesComissao >= 0 ? "positive" : "danger",
+    },
+    {
       key: "despesas_fixas_pagas",
       label: "(-) Despesas fixas pagas",
       amount: roundMoney(despesasFixasPagas),
@@ -618,7 +775,7 @@ function buildDre({ orders, payable, faturamentoBruto, receitaLiquida, lucroLiqu
     },
     {
       key: "lucro_liquido",
-      label: "(=) Lucro líquido",
+      label: "(=) Lucro líquido real",
       amount: roundMoney(lucroLiquido),
       percent: roundMoney((lucroLiquido / base) * 100),
       type: lucroLiquido >= 0 ? "positive" : "danger",
@@ -630,13 +787,19 @@ function buildDre({ orders, payable, faturamentoBruto, receitaLiquida, lucroLiqu
     receitaLiquida: roundMoney(receitaLiquida),
     custoProdutos,
     taxasGateway,
+    comissoesAfiliados,
     custoTrafego,
     freteReal,
     outrasDespesasPedidos,
+    lucroAntesComissao,
     despesasFixasPagas,
+    totalCustosVariaveis,
     totalDespesasOperacionais,
     lucroLiquido: roundMoney(lucroLiquido),
-    margemFinal: faturamentoBruto > 0 ? roundMoney((lucroLiquido / faturamentoBruto) * 100) : 0,
+    margemFinal:
+      faturamentoBruto > 0
+        ? roundMoney((lucroLiquido / faturamentoBruto) * 100)
+        : 0,
     lines,
   };
 }
@@ -665,16 +828,33 @@ export async function getFinancialSummary(period = "30d") {
   );
 
   const despesasPedidos = orders.reduce((sum, item) => {
-    return (
-      sum +
-      toNumber(item.productCost) +
-      toNumber(item.shippingCost) +
-      toNumber(item.gatewayFee) +
-      toNumber(item.adCost) +
-      toNumber(item.otherCosts) +
-      toNumber(item.refundsAmount)
-    );
+    return sum + toNumber(item.totalVariableCosts);
   }, 0);
+
+  const totalGatewayFees = orders.reduce(
+    (sum, item) => sum + toNumber(item.gatewayFee),
+    0
+  );
+
+  const totalAffiliateCommissions = orders.reduce(
+    (sum, item) => sum + toNumber(item.affiliateCommission),
+    0
+  );
+
+  const totalProductCosts = orders.reduce(
+    (sum, item) => sum + toNumber(item.productCost),
+    0
+  );
+
+  const totalAdCosts = orders.reduce(
+    (sum, item) => sum + toNumber(item.adCost),
+    0
+  );
+
+  const totalOtherCosts = orders.reduce(
+    (sum, item) => sum + toNumber(item.otherCosts) + toNumber(item.refundsAmount),
+    0
+  );
 
   const totalShippingCharged = orders.reduce(
     (sum, item) => sum + toNumber(item.shippingAmount),
@@ -729,6 +909,8 @@ export async function getFinancialSummary(period = "30d") {
   const ordersWithLoss = orders.filter((item) => toNumber(item.netProfit) < 0).length;
   const pedidosPagos = orders.filter((item) => item.financialStatus === "paid").length;
   const pedidosPendentes = orders.filter((item) => item.financialStatus !== "paid").length;
+  const ordersWithoutGatewayFee = orders.filter((item) => item.missingGatewayFee).length;
+  const ordersWithoutProductCost = orders.filter((item) => item.missingProductCost).length;
 
   const dre = buildDre({
     orders,
@@ -750,6 +932,19 @@ export async function getFinancialSummary(period = "30d") {
       contasReceber: roundMoney(contasReceberPendentes),
       contasPagar: roundMoney(contasPagarPendentes),
     },
+    costs: {
+      totalGatewayFees: roundMoney(totalGatewayFees),
+      totalAffiliateCommissions: roundMoney(totalAffiliateCommissions),
+      totalProductCosts: roundMoney(totalProductCosts),
+      totalShippingReal: roundMoney(totalShippingReal),
+      totalAdCosts: roundMoney(totalAdCosts),
+      totalOtherCosts: roundMoney(totalOtherCosts),
+      totalVariableCosts: roundMoney(despesasPedidos),
+      fixedExpensesPaid: roundMoney(contasPagarPagas),
+      totalCostsWithFixedExpenses: roundMoney(despesasTotais),
+      ordersWithoutGatewayFee,
+      ordersWithoutProductCost,
+    },
     shipping: {
       totalCharged: roundMoney(totalShippingCharged),
       totalReal: roundMoney(totalShippingReal),
@@ -763,6 +958,8 @@ export async function getFinancialSummary(period = "30d") {
       pedidosPendentes,
       overdueBills,
       ordersWithLoss,
+      ordersWithoutGatewayFee,
+      ordersWithoutProductCost,
       productsWithoutPricing: productsRisk.withoutPricing,
       productsBelowSafe: productsRisk.belowSafe,
       productsBelowSuggested: productsRisk.belowSuggested,
@@ -788,7 +985,9 @@ export async function syncOrderFinancialData(orderId) {
     throw new Error("Pedido não encontrado.");
   }
 
-  const normalized = normalizeOrder(order);
+  const conversions = await listAffiliateConversionsForPeriod("30d");
+  const commissionMap = buildCommissionMap(conversions);
+  const normalized = normalizeOrder(order, commissionMap);
 
   const updates = {
     gross_amount: normalized.grossAmount,

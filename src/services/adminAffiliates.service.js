@@ -746,6 +746,117 @@ if (
   return payload;
 }
 
+
+function roundAffiliateMoney(value) {
+  const number = Number(value || 0);
+  return Number.isFinite(number) ? Number(number.toFixed(2)) : 0;
+}
+
+function getAdminProductPrice(product = {}) {
+  return roundAffiliateMoney(product.price ?? product.current_price ?? 0);
+}
+
+function normalizeProductStatusForAffiliates(product = {}) {
+  return normalizeCommissionLifecycleStatus(product.status || "active");
+}
+
+function isProductVisibleForCommission(product = {}) {
+  const status = normalizeProductStatusForAffiliates(product);
+
+  if (!status) {
+    return true;
+  }
+
+  return ["active", "ativo", "published", "publicado", "available", "disponivel"].includes(status);
+}
+
+function getCommissionProductSafety(row = {}, currentPrice = 0) {
+  const defaultRequiredPrice = roundAffiliateMoney(row.price_with_default_commission);
+  const specialRequiredPrice = roundAffiliateMoney(row.price_with_special_commission);
+  const maxRequiredPrice = roundAffiliateMoney(row.price_with_max_commission);
+
+  const defaultSafe = currentPrice > 0 && defaultRequiredPrice > 0 && currentPrice >= defaultRequiredPrice;
+  const specialSafe = currentPrice > 0 && specialRequiredPrice > 0 && currentPrice >= specialRequiredPrice;
+  const maxSafe = currentPrice > 0 && maxRequiredPrice > 0 && currentPrice >= maxRequiredPrice;
+
+  return {
+    default_safe: defaultSafe,
+    special_safe: specialSafe,
+    max_safe: maxSafe,
+    default_gap: roundAffiliateMoney(defaultRequiredPrice - currentPrice),
+    special_gap: roundAffiliateMoney(specialRequiredPrice - currentPrice),
+    max_gap: roundAffiliateMoney(maxRequiredPrice - currentPrice),
+  };
+}
+
+export async function listAffiliateCommissionProducts(filters = {}) {
+  const search = cleanText(filters.search);
+
+  const params = new URLSearchParams();
+  params.set(
+    "select",
+    "id,product_id,affiliate_commission_percent,max_affiliate_commission_percent,special_affiliate_commission_percent,price_with_default_commission,price_with_max_commission,price_with_special_commission,profit_with_default_commission,profit_with_max_commission,profit_with_special_commission,margin_with_default_commission_percent,margin_with_max_commission_percent,margin_with_special_commission_percent,status,risk_message,updated_at,products(id,name,sku,price,category,status,image_url,image_url_2)"
+  );
+  params.set("order", "updated_at.desc");
+  params.set("limit", "300");
+
+  const rows = await supabaseRequest(`/product_pricing?${params.toString()}`);
+  let safeRows = Array.isArray(rows) ? rows : [];
+
+  if (search) {
+    const normalizedSearch = search.toLowerCase();
+    safeRows = safeRows.filter((row) => {
+      const product = row.products || {};
+      return (
+        String(product.name || "").toLowerCase().includes(normalizedSearch) ||
+        String(product.sku || "").toLowerCase().includes(normalizedSearch) ||
+        String(product.category || "").toLowerCase().includes(normalizedSearch)
+      );
+    });
+  }
+
+  return safeRows
+    .filter((row) => row?.products && isProductVisibleForCommission(row.products))
+    .map((row) => {
+      const product = row.products || {};
+      const currentPrice = getAdminProductPrice(product);
+      const defaultPercent = roundAffiliateMoney(row.affiliate_commission_percent);
+      const specialPercent = roundAffiliateMoney(row.special_affiliate_commission_percent);
+      const maxPercent = roundAffiliateMoney(row.max_affiliate_commission_percent);
+      const safety = getCommissionProductSafety(row, currentPrice);
+
+      return {
+        pricing_id: row.id,
+        product_id: row.product_id || product.id,
+        name: product.name || "Produto",
+        sku: product.sku || null,
+        category: product.category || null,
+        status: product.status || null,
+        image_url: product.image_url || product.imageUrl || "",
+        current_price: currentPrice,
+        affiliate_commission_percent: defaultPercent,
+        special_affiliate_commission_percent: specialPercent,
+        max_affiliate_commission_percent: maxPercent,
+        estimated_default_commission: roundAffiliateMoney(currentPrice * (defaultPercent / 100)),
+        estimated_special_commission: roundAffiliateMoney(currentPrice * (specialPercent / 100)),
+        estimated_max_commission: roundAffiliateMoney(currentPrice * (maxPercent / 100)),
+        price_with_default_commission: roundAffiliateMoney(row.price_with_default_commission),
+        price_with_special_commission: roundAffiliateMoney(row.price_with_special_commission),
+        price_with_max_commission: roundAffiliateMoney(row.price_with_max_commission),
+        profit_with_default_commission: roundAffiliateMoney(row.profit_with_default_commission),
+        profit_with_special_commission: roundAffiliateMoney(row.profit_with_special_commission),
+        profit_with_max_commission: roundAffiliateMoney(row.profit_with_max_commission),
+        margin_with_default_commission_percent: roundAffiliateMoney(row.margin_with_default_commission_percent),
+        margin_with_special_commission_percent: roundAffiliateMoney(row.margin_with_special_commission_percent),
+        margin_with_max_commission_percent: roundAffiliateMoney(row.margin_with_max_commission_percent),
+        pricing_status: row.status || "pending",
+        risk_message: row.risk_message || null,
+        ...safety,
+      };
+    })
+    .sort((a, b) => b.estimated_default_commission - a.estimated_default_commission);
+}
+
 export async function listAffiliates(filters = {}) {
   const search = cleanText(filters.search);
   const status = cleanText(filters.status);

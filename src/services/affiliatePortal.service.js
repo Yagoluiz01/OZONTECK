@@ -838,6 +838,101 @@ export async function getAffiliatePayouts(affiliateId) {
   }));
 }
 
+
+const STORE_BASE_URL = String(
+  process.env.STORE_BASE_URL ||
+    process.env.FRONTEND_URL ||
+    "https://ozonteck-loja.onrender.com"
+).replace(/\/+$/, "");
+
+function roundMoney(value) {
+  const number = Number(value || 0);
+  return Number.isFinite(number) ? Number(number.toFixed(2)) : 0;
+}
+
+function buildProductAffiliateLink(refCode, productId) {
+  const params = new URLSearchParams();
+
+  if (productId) {
+    params.set("id", productId);
+  }
+
+  if (refCode) {
+    params.set("ref", refCode);
+  }
+
+  return `${STORE_BASE_URL}/pages-html/detalhe-produto.html?${params.toString()}`;
+}
+
+function getProductPrice(product = {}) {
+  return roundMoney(product.price ?? product.current_price ?? 0);
+}
+
+function isProductPublic(product = {}) {
+  const status = normalizeStatus(product.status || "active");
+
+  if (!status) {
+    return true;
+  }
+
+  return ["active", "ativo", "published", "publicado", "available", "disponivel"].includes(status);
+}
+
+function normalizeAffiliateProduct(row = {}, affiliate = {}) {
+  const product = row.products || {};
+  const productId = String(row.product_id || product.id || "").trim();
+  const price = getProductPrice(product);
+  const commissionPercent = roundMoney(row.affiliate_commission_percent ?? affiliate.commission_rate ?? 0);
+  const estimatedCommission = roundMoney(price * (commissionPercent / 100));
+  const safeStatus = normalizeStatus(row.status || "pending");
+  const isSafePricing = ["healthy", "saudavel"].includes(safeStatus);
+
+  return {
+    id: productId,
+    product_id: productId,
+    name: product.name || "Produto",
+    sku: product.sku || null,
+    category: product.category || null,
+    image_url: product.image_url || product.imageUrl || "",
+    image_url_2: product.image_url_2 || product.imageUrl2 || "",
+    short_description: product.short_description || "",
+    price,
+    commission_percent: commissionPercent,
+    estimated_commission: estimatedCommission,
+    pricing_status: row.status || "pending",
+    risk_message: row.risk_message || null,
+    can_promote: isSafePricing && price > 0 && commissionPercent > 0,
+    affiliate_link: buildProductAffiliateLink(affiliate.ref_code, productId),
+  };
+}
+
+export async function getAffiliatePromotionalProducts(affiliateId) {
+  const affiliate = await getAffiliateById(affiliateId);
+
+  const rows = await supabaseRequest(
+    `/product_pricing?select=id,product_id,affiliate_commission_percent,status,risk_message,updated_at,products(id,name,sku,price,category,status,image_url,image_url_2,short_description)&order=updated_at.desc&limit=200`
+  );
+
+  const safeRows = Array.isArray(rows) ? rows : [];
+
+  const products = safeRows
+    .filter((row) => row?.products && isProductPublic(row.products))
+    .map((row) => normalizeAffiliateProduct(row, affiliate))
+    .filter((product) => product.product_id && product.price > 0)
+    .sort((a, b) => {
+      if (a.can_promote !== b.can_promote) {
+        return a.can_promote ? -1 : 1;
+      }
+
+      return b.estimated_commission - a.estimated_commission;
+    });
+
+  return {
+    affiliate,
+    products,
+  };
+}
+
 export async function getAffiliateNetwork(affiliateId) {
   const affiliate = await getAffiliateById(affiliateId);
 

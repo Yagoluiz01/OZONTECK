@@ -4,6 +4,7 @@ import {
   getAffiliatePayouts,
   getAffiliateSummary,
   getAffiliateNetwork,
+  getAffiliatePromotionalProducts,
   loginAffiliate,
   requestAffiliatePasswordReset,
   updateAffiliateProfile,
@@ -109,6 +110,21 @@ export async function payouts(req, res) {
     return res.json({
       success: true,
       payouts: result,
+    });
+  } catch (error) {
+    return sendError(res, error);
+  }
+}
+
+
+export async function products(req, res) {
+  try {
+    const result = await getAffiliatePromotionalProducts(req.affiliateId);
+
+    return res.json({
+      success: true,
+      affiliate: result.affiliate,
+      products: result.products,
     });
   } catch (error) {
     return sendError(res, error);

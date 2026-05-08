@@ -8,6 +8,7 @@ import {
   createAffiliate,
   updateAffiliate,
   updateAffiliateCommissionBulk,
+  listAffiliateCommissionProducts,
   listAffiliateNetwork,
   listAffiliateNetworkApplications,
   getAffiliateNetwork,
@@ -143,6 +144,19 @@ router.get("/summary", async (req, res) => {
   try {
     const affiliates = await listAffiliateSummary(req.query || {});
     return ok(res, { affiliates });
+  } catch (error) {
+    return fail(res, error);
+  }
+});
+
+
+/**
+ * PRODUTOS PRECIFICADOS PARA AFILIADOS
+ */
+router.get("/commission-products", async (req, res) => {
+  try {
+    const products = await listAffiliateCommissionProducts(req.query || {});
+    return ok(res, { products }, "Produtos com comissão carregados com sucesso.");
   } catch (error) {
     return fail(res, error);
   }
