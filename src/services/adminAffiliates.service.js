@@ -1667,6 +1667,93 @@ export async function listAffiliateLevels() {
   return Array.isArray(rows) ? rows : [];
 }
 
+
+function normalizeAffiliateLevelPayload(input = {}, { partial = false } = {}) {
+  const payload = {};
+
+  if (!partial || Object.prototype.hasOwnProperty.call(input, "name")) {
+    const name = cleanText(input.name || input.level_name || input.title);
+    if (!partial && !name) throw new Error("Nome da meta é obrigatório.");
+    if (name) payload.name = name;
+  }
+
+  if (!partial || Object.prototype.hasOwnProperty.call(input, "level_order")) {
+    const levelOrder = Math.trunc(toNumber(input.level_order ?? input.levelOrder ?? input.order, 0));
+    if (!partial && levelOrder <= 0) throw new Error("Ordem do nível precisa ser maior que zero.");
+    if (levelOrder > 0) payload.level_order = levelOrder;
+  }
+
+  if (!partial || Object.prototype.hasOwnProperty.call(input, "required_conversions")) {
+    const requiredConversions = Math.trunc(toNumber(input.required_conversions ?? input.requiredConversions, 0));
+    if (!partial && requiredConversions <= 0) throw new Error("Quantidade de vendas da meta precisa ser maior que zero.");
+    if (requiredConversions > 0) payload.required_conversions = requiredConversions;
+  }
+
+  if (!partial || Object.prototype.hasOwnProperty.call(input, "bonus_amount")) {
+    const bonusAmount = toMoneyNumber(input.bonus_amount ?? input.bonusAmount, 0);
+    if (bonusAmount < 0) throw new Error("Valor do bônus não pode ser negativo.");
+    payload.bonus_amount = bonusAmount;
+  }
+
+  if (!partial || Object.prototype.hasOwnProperty.call(input, "bonus_type")) {
+    payload.bonus_type = cleanText(input.bonus_type || input.bonusType || "fixed") || "fixed";
+  }
+
+  if (Object.prototype.hasOwnProperty.call(input, "description")) {
+    payload.description = cleanText(input.description);
+  }
+
+  if (Object.prototype.hasOwnProperty.call(input, "badge_color") || Object.prototype.hasOwnProperty.call(input, "badgeColor")) {
+    payload.badge_color = cleanText(input.badge_color || input.badgeColor || "#16d45d") || "#16d45d";
+  }
+
+  if (Object.prototype.hasOwnProperty.call(input, "is_active") || Object.prototype.hasOwnProperty.call(input, "isActive")) {
+    payload.is_active = Boolean(input.is_active ?? input.isActive);
+  }
+
+  payload.updated_at = new Date().toISOString();
+  return payload;
+}
+
+export async function createAffiliateLevel(input = {}) {
+  const payload = normalizeAffiliateLevelPayload(input);
+
+  const rows = await supabaseRequest(`/affiliate_levels`, {
+    method: "POST",
+    headers: { Prefer: "return=representation" },
+    body: JSON.stringify(payload),
+  });
+
+  return rows?.[0] || null;
+}
+
+export async function updateAffiliateLevel(id, input = {}) {
+  const levelId = cleanText(id || input.id);
+  if (!levelId) throw new Error("ID do nível é obrigatório.");
+
+  const payload = normalizeAffiliateLevelPayload(input, { partial: true });
+
+  const rows = await supabaseRequest(`/affiliate_levels?id=eq.${levelId}`, {
+    method: "PATCH",
+    headers: { Prefer: "return=representation" },
+    body: JSON.stringify(payload),
+  });
+
+  return rows?.[0] || null;
+}
+
+export async function deleteAffiliateLevel(id) {
+  const levelId = cleanText(id);
+  if (!levelId) throw new Error("ID do nível é obrigatório.");
+
+  const rows = await supabaseRequest(`/affiliate_levels?id=eq.${levelId}`, {
+    method: "DELETE",
+    headers: { Prefer: "return=representation" },
+  });
+
+  return rows?.[0] || { id: levelId };
+}
+
 export async function listAffiliateGoalOverview(filters = {}) {
   const search = cleanText(filters.search);
   const status = cleanText(filters.status);

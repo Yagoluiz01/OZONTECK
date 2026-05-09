@@ -20,6 +20,9 @@ import {
   approveAffiliateApplication,
   rejectAffiliateApplication,
   listAffiliateLevels,
+  createAffiliateLevel,
+  updateAffiliateLevel,
+  deleteAffiliateLevel,
   listAffiliateGoalOverview,
   listAffiliateBonusOverview,
   processAffiliateLevelProgress,
@@ -223,6 +226,34 @@ router.get("/levels", async (req, res) => {
     return ok(res, { levels });
   } catch (error) {
     return fail(res, error);
+  }
+});
+
+
+router.post("/levels", async (req, res) => {
+  try {
+    const level = await createAffiliateLevel(req.body || {});
+    return ok(res, { level }, "Meta criada com sucesso.");
+  } catch (error) {
+    return fail(res, error, 400);
+  }
+});
+
+router.patch("/levels/:levelId", async (req, res) => {
+  try {
+    const level = await updateAffiliateLevel(req.params.levelId, req.body || {});
+    return ok(res, { level }, "Meta atualizada com sucesso.");
+  } catch (error) {
+    return fail(res, error, 400);
+  }
+});
+
+router.delete("/levels/:levelId", async (req, res) => {
+  try {
+    const level = await deleteAffiliateLevel(req.params.levelId);
+    return ok(res, { level }, "Meta excluída com sucesso.");
+  } catch (error) {
+    return fail(res, error, 400);
   }
 });
 
