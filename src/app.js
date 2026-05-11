@@ -20,6 +20,7 @@ import storeRoutes from "./routes/store.routes.js";
 import shippingRoutes from "./routes/shipping.routes.js";
 import adminFinancialRoutes from "./routes/adminFinancial.routes.js";
 import adminPricingRoutes from "./routes/adminPricing.routes.js";
+import adminFiscalRoutes from "./routes/adminFiscal.routes.js";
 import adminAffiliatesRoutes from "./routes/adminAffiliates.routes.js";
 import affiliatePortalRoutes from "./routes/affiliatePortal.routes.js";
 import affiliatePasswordRoutes from "./routes/affiliatePassword.routes.js";
@@ -165,6 +166,7 @@ app.use("/api/store", storeRoutes);
 
 app.use("/api/admin/financial", adminFinancialRoutes);
 app.use("/api/admin/pricing", adminPricingRoutes);
+app.use("/api/admin/fiscal", adminFiscalRoutes);
 app.use("/api/admin/affiliates", adminAffiliatesRoutes);
 app.use("/api/admin/notifications", adminNotificationsRoutes);
 app.use("/api/admin/push", adminPushRoutes);
