@@ -1,3 +1,5 @@
+import adminAffiliateMarketingRoutes from "./routes/adminAffiliateMarketing.routes.js";
+import affiliateMarketingRoutes from './routes/affiliateMarketing.routes.js';
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
@@ -150,7 +152,7 @@ app.use(
 );
 
 app.use(morgan("dev"));
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({ limit: "80mb" }));
 
 app.use("/labels", express.static(path.join(__dirname, "../public/labels")));
 
@@ -164,6 +166,8 @@ app.get("/api/health", (req, res) => {
 app.use("/api/tracking", trackingRoutes);
 app.use("/api/store", storeRoutes);
 
+app.use("/api/admin/affiliate-marketing", adminAffiliateMarketingRoutes);
+app.use('/api/affiliate/marketing-kit', affiliateMarketingRoutes);
 app.use("/api/admin/financial", adminFinancialRoutes);
 app.use("/api/admin/pricing", adminPricingRoutes);
 app.use("/api/admin/fiscal", adminFiscalRoutes);
