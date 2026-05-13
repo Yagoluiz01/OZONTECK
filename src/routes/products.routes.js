@@ -384,6 +384,21 @@ router.get("/", requireAuth, async (req, res) => {
         height_cm: Number(product.height_cm || 0),
         width_cm: Number(product.width_cm || 0),
         length_cm: Number(product.length_cm || 0),
+
+        installment_count: Number(product.installment_count || 12),
+        installmentCount: Number(product.installment_count || 12),
+        installment_value: product.installment_value ?? null,
+        installmentValue: product.installment_value ?? null,
+        installment_label: product.installment_label || "",
+        installmentLabel: product.installment_label || "",
+        payment_method_simulated: product.payment_method_simulated || "credit_card",
+        paymentMethodSimulated: product.payment_method_simulated || "credit_card",
+        payment_fee_value: product.payment_fee_value ?? null,
+        paymentFeeValue: product.payment_fee_value ?? null,
+        payment_net_value: product.payment_net_value ?? null,
+        paymentNetValue: product.payment_net_value ?? null,
+        pricing_updated_at: product.pricing_updated_at || null,
+        pricingUpdatedAt: product.pricing_updated_at || null,
       })),
     });
   } catch (error) {

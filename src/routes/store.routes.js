@@ -949,7 +949,43 @@ function normalizeProduct(product) {
     weightKg: toNumber(product?.weight_kg, 0),
     heightCm: toNumber(product?.height_cm, 0),
     widthCm: toNumber(product?.width_cm, 0),
-    lengthCm: toNumber(product?.length_cm, 0)
+    lengthCm: toNumber(product?.length_cm, 0),
+
+    // Dados de parcelamento/precificação usados pela loja.
+    // Mantemos snake_case para compatibilidade com o banco/Supabase
+    // e camelCase para evitar quebrar qualquer frontend que use esse padrão.
+    installment_count: toNumber(product?.installment_count, 12),
+    installmentCount: toNumber(product?.installment_count, 12),
+    installment_value:
+      product?.installment_value === null || product?.installment_value === undefined
+        ? null
+        : toNumber(product?.installment_value, 0),
+    installmentValue:
+      product?.installment_value === null || product?.installment_value === undefined
+        ? null
+        : toNumber(product?.installment_value, 0),
+    installment_label: String(product?.installment_label || "").trim(),
+    installmentLabel: String(product?.installment_label || "").trim(),
+    payment_method_simulated: String(product?.payment_method_simulated || "credit_card").trim(),
+    paymentMethodSimulated: String(product?.payment_method_simulated || "credit_card").trim(),
+    payment_fee_value:
+      product?.payment_fee_value === null || product?.payment_fee_value === undefined
+        ? null
+        : toNumber(product?.payment_fee_value, 0),
+    paymentFeeValue:
+      product?.payment_fee_value === null || product?.payment_fee_value === undefined
+        ? null
+        : toNumber(product?.payment_fee_value, 0),
+    payment_net_value:
+      product?.payment_net_value === null || product?.payment_net_value === undefined
+        ? null
+        : toNumber(product?.payment_net_value, 0),
+    paymentNetValue:
+      product?.payment_net_value === null || product?.payment_net_value === undefined
+        ? null
+        : toNumber(product?.payment_net_value, 0),
+    pricing_updated_at: product?.pricing_updated_at || null,
+    pricingUpdatedAt: product?.pricing_updated_at || null
   };
 }
 

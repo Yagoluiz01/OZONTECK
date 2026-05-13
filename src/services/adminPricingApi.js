@@ -57,8 +57,9 @@ export function savePricing(payload) {
   });
 }
 
-export function applyPricingToProduct(productId) {
+export function applyPricingToProduct(productId, payload = {}) {
   return request(`/apply/${productId}`, {
     method: "POST",
+    body: JSON.stringify(payload || {}),
   });
 }

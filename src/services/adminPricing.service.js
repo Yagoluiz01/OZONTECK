@@ -43,6 +43,13 @@ function roundMoney(value) {
   return Number(toNumber(value, 0).toFixed(2));
 }
 
+function formatCurrencyBRL(value) {
+  return Number(value || 0).toLocaleString("pt-BR", {
+    style: "currency",
+    currency: "BRL",
+  });
+}
+
 function normalizePercent(value) {
   const percent = toNumber(value, 0);
 
@@ -907,6 +914,14 @@ export async function simulatePaymentFee(payload = {}) {
     net_amount: netAmount,
     effective_percent: effectivePercent,
 
+    // Campos prontos para gravar no produto e exibir na loja.
+    installment_count: rule.installments,
+    installment_value: roundMoney(amount / Number(rule.installments || 1)),
+    installment_label: `${rule.installments}x de ${formatCurrencyBRL(roundMoney(amount / Number(rule.installments || 1)))}`,
+    payment_method_simulated: rule.payment_method,
+    payment_fee_value: feeAmount,
+    payment_net_value: netAmount,
+
     notes: rule.notes || null,
   };
 }
@@ -1024,6 +1039,61 @@ export async function saveProductPricing(payload) {
   return saved;
 }
 
+function resolveInstallmentCount(pricing = {}) {
+  const raw =
+    pricing.installment_count ||
+    pricing.installments ||
+    pricing.payment_installments ||
+    pricing.credit_card_installments ||
+    12;
+
+  try {
+    return normalizeInstallments(raw);
+  } catch {
+    return 12;
+  }
+}
+
+function buildProductPricingPatch(suggestedPrice, pricing = {}) {
+  const installmentCount = resolveInstallmentCount(pricing);
+  const installmentValue = roundMoney(
+    pricing.installment_value ||
+      pricing.installmentValue ||
+      (suggestedPrice > 0 ? suggestedPrice / installmentCount : 0)
+  );
+  const paymentFeeValue = roundMoney(
+    pricing.payment_fee_value ||
+      pricing.paymentFeeValue ||
+      pricing.fee_amount ||
+      pricing.payment_fee_amount ||
+      0
+  );
+  const paymentNetValue = roundMoney(
+    pricing.payment_net_value ||
+      pricing.paymentNetValue ||
+      pricing.net_amount ||
+      (suggestedPrice > 0 && paymentFeeValue > 0 ? suggestedPrice - paymentFeeValue : 0)
+  );
+
+  return {
+    price: suggestedPrice,
+    installment_count: installmentCount,
+    installment_value: installmentValue > 0 ? installmentValue : null,
+    installment_label:
+      installmentValue > 0
+        ? `A partir de ${installmentCount}x de ${formatCurrencyBRL(installmentValue)}`
+        : null,
+    payment_method_simulated:
+      pricing.payment_method_simulated ||
+      pricing.payment_method ||
+      pricing.paymentMethod ||
+      "credit_card",
+    payment_fee_value: paymentFeeValue > 0 ? paymentFeeValue : null,
+    payment_net_value: paymentNetValue > 0 ? paymentNetValue : null,
+    pricing_updated_at: new Date().toISOString(),
+  };
+}
+
 export async function applySuggestedPriceToProduct(productId, payload = {}) {
   if (!productId) {
     throw new Error("productId é obrigatório.");
@@ -1084,9 +1154,7 @@ export async function applySuggestedPriceToProduct(productId, payload = {}) {
     headers: {
       Prefer: "return=representation",
     },
-    body: JSON.stringify({
-      price: suggestedPrice,
-    }),
+    body: JSON.stringify(buildProductPricingPatch(suggestedPrice, pricing)),
   });
 
   const product = updatedProduct?.[0] || null;
@@ -1113,7 +1181,9 @@ export async function applySuggestedPriceToProduct(productId, payload = {}) {
 }
 
 export async function listProductsForPricing(search = "") {
-  const filters = ["select=id,name,sku,price"];
+  const filters = [
+    "select=id,name,sku,price,installment_count,installment_value,installment_label,payment_method_simulated,payment_fee_value,payment_net_value,pricing_updated_at"
+  ];
 
   if (search) {
     filters.push(`name=ilike.*${encodeURIComponent(search)}*`);
