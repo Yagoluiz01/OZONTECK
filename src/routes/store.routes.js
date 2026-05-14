@@ -941,6 +941,18 @@ function normalizeProduct(product) {
         product?.image ||
         ""
     ).trim(),
+
+    // Vídeo do produto usado na página de detalhes.
+    // Mantemos snake_case e camelCase para compatibilidade com o frontend.
+    video_url: String(product?.video_url || product?.videoUrl || "").trim(),
+    videoUrl: String(product?.video_url || product?.videoUrl || "").trim(),
+    video_poster_url: String(
+      product?.video_poster_url || product?.videoPosterUrl || ""
+    ).trim(),
+    videoPosterUrl: String(
+      product?.video_poster_url || product?.videoPosterUrl || ""
+    ).trim(),
+
     price: toNumber(product?.price, 0),
     compareAtPrice: toNumber(product?.compare_at_price, 0),
     compare_at_price: toNumber(product?.compare_at_price, 0),
