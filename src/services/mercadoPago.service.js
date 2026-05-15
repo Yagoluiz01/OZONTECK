@@ -1,105 +1,69 @@
-const crypto = require('crypto');
-const { MercadoPagoConfig, Preference, Payment } = require('mercadopago');
+import { MercadoPagoConfig, Preference, Payment } from "mercadopago";
+import { env } from "../config/env.js";
 
-const client = new MercadoPagoConfig({
-  accessToken: process.env.MERCADO_PAGO_ACCESS_TOKEN,
-});
-
-const preferenceClient = new Preference(client);
-const paymentClient = new Payment(client);
-
-function buildOrderItemsForPreference(order, items = []) {
-  return items.map((item) => ({
-    id: String(item.product_id || item.id || ''),
-    title: item.product_name || item.name || 'Produto OZONTECK',
-    quantity: Number(item.quantity || 1),
-    unit_price: Number(item.unit_price || item.price || 0),
-    currency_id: 'BRL',
-  }));
-}
-
-async function createCheckoutPreference({ order, items }) {
-  const externalReference = order.order_number;
-
-  const body = {
-    items: buildOrderItemsForPreference(order, items),
-    external_reference: externalReference,
-    notification_url: `${process.env.API_BASE_URL}/api/store/payments/mercado-pago/webhook`,
-    back_urls: {
-      success: process.env.STORE_SUCCESS_URL,
-      pending: process.env.STORE_PENDING_URL,
-      failure: process.env.STORE_FAILURE_URL,
-    },
-    auto_return: 'approved',
-    payer: {
-      name: order.customer_name || undefined,
-      email: order.customer_email || undefined,
-      phone: order.customer_phone
-        ? {
-            number: String(order.customer_phone).replace(/\D/g, ''),
-          }
-        : undefined,
-    },
-    metadata: {
-      order_id: order.id,
-      order_number: order.order_number,
-    },
-  };
-
-  const response = await preferenceClient.create({ body });
-
-  return {
-    preferenceId: response.id,
-    initPoint: response.init_point,
-    sandboxInitPoint: response.sandbox_init_point,
-    externalReference,
-    raw: response,
-  };
-}
-
-async function getPaymentById(paymentId) {
-  const payment = await paymentClient.get({ id: paymentId });
-  return payment;
-}
-
-function parseXSignature(signatureHeader = '') {
-  const parts = signatureHeader.split(',').map((p) => p.trim());
-  const map = {};
-
-  for (const part of parts) {
-    const [key, value] = part.split('=');
-    if (key && value) map[key] = value;
+function getMercadoPagoClient() {
+  if (!env.mercadoPagoAccessToken) {
+    throw new Error("MERCADO_PAGO_ACCESS_TOKEN não configurado.");
   }
 
-  return {
-    ts: map.ts,
-    v1: map.v1,
-  };
+  return new MercadoPagoConfig({
+    accessToken: env.mercadoPagoAccessToken,
+  });
 }
 
-function validateMercadoPagoWebhookSignature({
-  xSignature,
-  xRequestId,
-  dataId,
-  secret,
-}) {
-  if (!xSignature || !xRequestId || !dataId || !secret) return false;
+export async function createMercadoPagoPreference(order) {
+  const client = getMercadoPagoClient();
+  const preferenceClient = new Preference(client);
 
-  const { ts, v1 } = parseXSignature(xSignature);
-  if (!ts || !v1) return false;
+  const items = Array.isArray(order.items)
+    ? order.items.map((item) => ({
+        id: String(item.product_id || item.id || ""),
+        title: String(item.name || item.product_name || "Produto OZONTECK"),
+        quantity: Number(item.quantity || 1),
+        unit_price: Number(item.unit_price || item.price || 0),
+        currency_id: "BRL",
+      }))
+    : [];
 
-  const manifest = `id:${dataId};request-id:${xRequestId};ts:${ts};`;
+  if (!items.length) {
+    throw new Error("Pedido sem itens para criar pagamento no Mercado Pago.");
+  }
 
-  const hmac = crypto
-    .createHmac('sha256', secret)
-    .update(manifest)
-    .digest('hex');
+  const preference = await preferenceClient.create({
+    body: {
+      items,
 
-  return hmac === v1;
+      external_reference: String(order.order_number || order.orderNumber),
+
+      payer: {
+        name: order.customer_name || order.customerName || "",
+        email: order.customer_email || order.customerEmail || "",
+      },
+
+      back_urls: {
+        success: env.storeSuccessUrl,
+        pending: env.storePendingUrl,
+        failure: env.storeFailureUrl,
+      },
+
+      auto_return: "approved",
+
+      notification_url: `${env.apiBaseUrl}/api/store/payments/mercado-pago/webhook`,
+
+      metadata: {
+        order_number: String(order.order_number || order.orderNumber),
+      },
+    },
+  });
+
+  return preference;
 }
 
-module.exports = {
-  createCheckoutPreference,
-  getPaymentById,
-  validateMercadoPagoWebhookSignature,
-};
+export async function getMercadoPagoPayment(paymentId) {
+  const client = getMercadoPagoClient();
+  const paymentClient = new Payment(client);
+
+  return paymentClient.get({
+    id: paymentId,
+  });
+}
