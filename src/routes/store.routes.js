@@ -1606,14 +1606,28 @@ async function createMercadoPagoPreference({ req, order, items, customer }) {
   const apiBaseUrl = getApiBaseUrl(req);
   const backUrls = getStoreBackUrls();
 
-  const body = {
-    items: items.map((item) => ({
-      id: String(item.product.id || ""),
-      title: String(item.product.name || "Produto OZONTECK"),
-      quantity: Number(item.quantity || 1),
-      unit_price: Number(item.unitPrice || 0),
+  const preferenceItems = items.map((item) => ({
+    id: String(item.product.id || ""),
+    title: String(item.product.name || "Produto OZONTECK"),
+    quantity: Number(item.quantity || 1),
+    unit_price: Number(item.unitPrice || 0),
+    currency_id: "BRL"
+  }));
+
+  const shippingAmount = Number(order.shipping_amount || 0) || 0;
+
+  if (shippingAmount > 0) {
+    preferenceItems.push({
+      id: `frete-${String(order.order_number || order.id || "ozonteck")}`,
+      title: "Frete",
+      quantity: 1,
+      unit_price: Number(shippingAmount.toFixed(2)),
       currency_id: "BRL"
-    })),
+    });
+  }
+
+  const body = {
+    items: preferenceItems,
     external_reference: String(order.order_number || ""),
     notification_url: `${apiBaseUrl}/api/store/payments/mercado-pago/webhook`,
     back_urls: {
