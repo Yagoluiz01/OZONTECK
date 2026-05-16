@@ -1,4 +1,4 @@
-﻿import {
+import {
   notifyOrderCreatedPending,
   notifyOrderPaid,
   notifyOrderPaymentPending,
@@ -1708,6 +1708,75 @@ async function getMercadoPagoPayment(paymentId) {
   return data;
 }
 
+
+async function createMercadoPagoPixPayment({ req, order, customer }) {
+  const accessToken = getMercadoPagoAccessToken();
+
+  if (!accessToken) {
+    throw new Error("MERCADO_PAGO_ACCESS_TOKEN não configurado");
+  }
+
+  const apiBaseUrl = getApiBaseUrl(req);
+  const customerNameParts = String(customer.nome || "").trim().split(/\s+/).filter(Boolean);
+  const firstName = customerNameParts.shift() || "Cliente";
+  const lastName = customerNameParts.join(" ") || "OZONTECK";
+  const cpfDigits = onlyDigits(customer.cpf || "");
+  const transactionAmount = Number(Number(order.total_amount || 0).toFixed(2));
+
+  if (!transactionAmount || transactionAmount <= 0) {
+    throw new Error("Valor do pedido inválido para gerar Pix.");
+  }
+
+  const payer = {
+    email: String(customer.email || "").trim().toLowerCase(),
+    first_name: firstName,
+    last_name: lastName
+  };
+
+  if (cpfDigits.length === 11) {
+    payer.identification = {
+      type: "CPF",
+      number: cpfDigits
+    };
+  }
+
+  const body = {
+    transaction_amount: transactionAmount,
+    description: `Pedido OZONTECK ${String(order.order_number || "")}`.trim(),
+    payment_method_id: "pix",
+    external_reference: String(order.order_number || ""),
+    notification_url: `${apiBaseUrl}/api/store/payments/mercado-pago/webhook`,
+    payer,
+    metadata: {
+      order_number: String(order.order_number || ""),
+      order_id: String(order.id || "")
+    }
+  };
+
+  const response = await fetch("https://api.mercadopago.com/v1/payments", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+      "X-Idempotency-Key": `ozonteck-pix-${String(order.order_number || order.id || Date.now())}`
+    },
+    body: JSON.stringify(body)
+  });
+
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok || !data?.id) {
+    throw new Error(
+      data?.message ||
+        data?.error ||
+        data?.cause?.[0]?.description ||
+        "Erro ao gerar Pix no Mercado Pago"
+    );
+  }
+
+  return data;
+}
+
 async function updateOrderById(orderId, payload) {
   const url = new URL(`${env.supabaseUrl}/rest/v1/orders`);
   url.searchParams.set("id", `eq.${orderId}`);
@@ -2437,6 +2506,65 @@ if (!accessToken) {
     success: false,
     message:
       "MERCADO_PAGO_ACCESS_TOKEN não configurado. Ative ENABLE_PAYMENT_SIMULATION=true para testar sem Mercado Pago."
+  });
+}
+
+const requestedPaymentMethod = String(
+  body.paymentMethod || body.payment_method || "gateway_redirect"
+)
+  .trim()
+  .toLowerCase();
+
+if (requestedPaymentMethod === "pix_transparent") {
+  const pixPayment = await createMercadoPagoPixPayment({
+    req,
+    order: createdOrder,
+    customer
+  });
+
+  const transactionData = pixPayment?.point_of_interaction?.transaction_data || {};
+
+  const paymentUpdate = await updateOrderById(createdOrder.id, {
+    payment_gateway: "mercado_pago_pix",
+    payment_reference: String(pixPayment.id || ""),
+    payment_external_reference: String(createdOrder.order_number || ""),
+    payment_raw_status: String(pixPayment.status || "pending"),
+    payment_status:
+      String(pixPayment.status || "").toLowerCase() === "approved"
+        ? "paid"
+        : "pending"
+  });
+
+  if (!paymentUpdate.ok) {
+    return res.status(500).json({
+      success: false,
+      message: "Pedido criado, mas houve erro ao salvar a referência do Pix",
+      details: paymentUpdate.raw
+    });
+  }
+
+  return res.status(201).json({
+    success: true,
+    message: "Pedido criado com sucesso. Pix gerado para pagamento.",
+    order: {
+      id: createdOrder.id,
+      number: createdOrder.order_number,
+      total: totalAmount,
+      status: createdOrder.order_status,
+      paymentStatus: "pending"
+    },
+    payment: {
+      gateway: "mercado_pago_pix",
+      method: "pix",
+      paymentId: pixPayment.id,
+      externalReference: createdOrder.order_number,
+      status: pixPayment.status || "pending",
+      statusDetail: pixPayment.status_detail || "",
+      qrCode: transactionData.qr_code || "",
+      qrCodeBase64: transactionData.qr_code_base64 || "",
+      ticketUrl: transactionData.ticket_url || "",
+      expiresAt: transactionData.date_of_expiration || pixPayment.date_of_expiration || ""
+    }
   });
 }
 
