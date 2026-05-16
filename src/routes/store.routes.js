@@ -1777,6 +1777,93 @@ async function createMercadoPagoPixPayment({ req, order, customer }) {
   return data;
 }
 
+
+async function createMercadoPagoBoletoPayment({ req, order, customer }) {
+  const accessToken = getMercadoPagoAccessToken();
+
+  if (!accessToken) {
+    throw new Error("MERCADO_PAGO_ACCESS_TOKEN não configurado");
+  }
+
+  const apiBaseUrl = getApiBaseUrl(req);
+  const customerNameParts = String(customer.nome || "").trim().split(/\s+/).filter(Boolean);
+  const firstName = customerNameParts.shift() || "Cliente";
+  const lastName = customerNameParts.join(" ") || "OZONTECK";
+  const cpfDigits = onlyDigits(customer.cpf || "");
+  const transactionAmount = Number(Number(order.total_amount || 0).toFixed(2));
+
+  if (!transactionAmount || transactionAmount <= 0) {
+    throw new Error("Valor do pedido inválido para gerar boleto.");
+  }
+
+  if (cpfDigits.length !== 11) {
+    throw new Error("CPF válido é obrigatório para gerar boleto.");
+  }
+
+  const zipCode = onlyDigits(customer.cep || "");
+  const streetName = String(customer.endereco || "").trim();
+  const streetNumber = String(customer.numero || "").trim() || "S/N";
+  const neighborhood = String(customer.bairro || "").trim();
+  const city = String(customer.cidade || "").trim();
+  const federalUnit = String(customer.estado || "").trim().toUpperCase().slice(0, 2);
+
+  if (!zipCode || !streetName || !neighborhood || !city || !federalUnit) {
+    throw new Error("Endereço completo é obrigatório para gerar boleto.");
+  }
+
+  const body = {
+    transaction_amount: transactionAmount,
+    description: `Pedido OZONTECK ${String(order.order_number || "")}`.trim(),
+    payment_method_id: "bolbradesco",
+    external_reference: String(order.order_number || ""),
+    notification_url: `${apiBaseUrl}/api/store/payments/mercado-pago/webhook`,
+    payer: {
+      email: String(customer.email || "").trim().toLowerCase(),
+      first_name: firstName,
+      last_name: lastName,
+      identification: {
+        type: "CPF",
+        number: cpfDigits
+      },
+      address: {
+        zip_code: zipCode,
+        street_name: streetName,
+        street_number: streetNumber,
+        neighborhood,
+        city,
+        federal_unit: federalUnit
+      }
+    },
+    metadata: {
+      order_number: String(order.order_number || ""),
+      order_id: String(order.id || "")
+    }
+  };
+
+  const response = await fetch("https://api.mercadopago.com/v1/payments", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+      "X-Idempotency-Key": `ozonteck-boleto-${String(order.order_number || order.id || Date.now())}`
+    },
+    body: JSON.stringify(body)
+  });
+
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok || !data?.id) {
+    throw new Error(
+      data?.message ||
+        data?.error ||
+        data?.cause?.[0]?.description ||
+        "Erro ao gerar boleto no Mercado Pago"
+    );
+  }
+
+  return data;
+}
+
 async function updateOrderById(orderId, payload) {
   const url = new URL(`${env.supabaseUrl}/rest/v1/orders`);
   url.searchParams.set("id", `eq.${orderId}`);
@@ -2564,6 +2651,57 @@ if (requestedPaymentMethod === "pix_transparent") {
       qrCodeBase64: transactionData.qr_code_base64 || "",
       ticketUrl: transactionData.ticket_url || "",
       expiresAt: transactionData.date_of_expiration || pixPayment.date_of_expiration || ""
+    }
+  });
+}
+
+
+if (requestedPaymentMethod === "boleto_transparent") {
+  const boletoPayment = await createMercadoPagoBoletoPayment({
+    req,
+    order: createdOrder,
+    customer
+  });
+
+  const transactionDetails = boletoPayment?.transaction_details || {};
+  const paymentUpdate = await updateOrderById(createdOrder.id, {
+    payment_gateway: "mercado_pago_boleto",
+    payment_reference: String(boletoPayment.id || ""),
+    payment_external_reference: String(createdOrder.order_number || ""),
+    payment_raw_status: String(boletoPayment.status || "pending"),
+    payment_status: "pending"
+  });
+
+  if (!paymentUpdate.ok) {
+    return res.status(500).json({
+      success: false,
+      message: "Pedido criado, mas houve erro ao salvar a referência do boleto",
+      details: paymentUpdate.raw
+    });
+  }
+
+  return res.status(201).json({
+    success: true,
+    message: "Pedido criado com sucesso. Boleto gerado para pagamento.",
+    order: {
+      id: createdOrder.id,
+      number: createdOrder.order_number,
+      total: totalAmount,
+      status: createdOrder.order_status,
+      paymentStatus: "pending"
+    },
+    payment: {
+      gateway: "mercado_pago_boleto",
+      method: "boleto",
+      paymentId: boletoPayment.id,
+      externalReference: createdOrder.order_number,
+      status: boletoPayment.status || "pending",
+      statusDetail: boletoPayment.status_detail || "",
+      ticketUrl: transactionDetails.external_resource_url || boletoPayment.transaction_details?.external_resource_url || "",
+      barcode: transactionDetails.barcode || "",
+      digitableLine: transactionDetails.digitable_line || transactionDetails.line || "",
+      paymentMethodId: boletoPayment.payment_method_id || "bolbradesco",
+      dateOfExpiration: boletoPayment.date_of_expiration || ""
     }
   });
 }
