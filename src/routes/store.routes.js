@@ -996,6 +996,10 @@ function normalizeProduct(product) {
       product?.payment_net_value === null || product?.payment_net_value === undefined
         ? null
         : toNumber(product?.payment_net_value, 0),
+    show_on_home: Boolean(product?.show_on_home),
+    showOnHome: Boolean(product?.show_on_home),
+    home_order: toNumber(product?.home_order, 0),
+    homeOrder: toNumber(product?.home_order, 0),
     pricing_updated_at: product?.pricing_updated_at || null,
     pricingUpdatedAt: product?.pricing_updated_at || null
   };
@@ -2199,6 +2203,54 @@ async function saveLabelError(orderId, errorMessage) {
     shipping_label_generated_at: null
   });
 }
+
+
+router.get("/products/home", async (req, res) => {
+  try {
+    const response = await fetchProductsTable();
+
+    if (!response.ok) {
+      return res.status(500).json({
+        success: false,
+        message: "Erro ao buscar produtos da página inicial",
+        details: response.raw
+      });
+    }
+
+    const limit = Math.max(1, Math.min(24, Number(req.query.limit || 8) || 8));
+
+    const products = response.data
+      .map(normalizeProduct)
+      .filter((product) => {
+        const isActive = String(product.status || "").toLowerCase() === "active";
+        const hasStock = Number(product.stockQuantity || 0) > 0;
+        return product.id && product.name && product.showOnHome && isActive && hasStock;
+      })
+      .sort((a, b) => {
+        const orderA = Number(a.homeOrder || 0);
+        const orderB = Number(b.homeOrder || 0);
+
+        if (orderA !== orderB) return orderA - orderB;
+        return String(a.name || "").localeCompare(String(b.name || ""), "pt-BR");
+      })
+      .slice(0, limit);
+
+    res.set("Cache-Control", "no-store");
+
+    return res.status(200).json({
+      success: true,
+      products
+    });
+  } catch (error) {
+    console.error("ERRO AO LISTAR PRODUTOS DA HOME:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Erro interno ao listar produtos da página inicial",
+      details: String(error?.message || error)
+    });
+  }
+});
 
 router.get("/products", async (req, res) => {
   try {

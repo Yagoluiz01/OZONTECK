@@ -127,6 +127,18 @@ function parseNonNegativeNumber(value, fallback = 0) {
   return Number.isFinite(num) && num >= 0 ? num : fallback;
 }
 
+function parseBoolean(value, fallback = false) {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value === 1;
+
+  const normalized = String(value ?? "").trim().toLowerCase();
+
+  if (["true", "1", "yes", "sim", "on"].includes(normalized)) return true;
+  if (["false", "0", "no", "nao", "não", "off", ""].includes(normalized)) return false;
+
+  return fallback;
+}
+
 async function uploadImageToStorage(file) {
   if (!file) return null;
 
@@ -240,6 +252,8 @@ function validateProductPayload(body) {
     short_description,
     video_url,
     video_poster_url,
+    show_on_home,
+    home_order,
     weight_kg,
     height_cm,
     width_cm,
@@ -267,6 +281,8 @@ function validateProductPayload(body) {
   const parsedHeight = parseNonNegativeNumber(height_cm, 0);
   const parsedWidth = parseNonNegativeNumber(width_cm, 0);
   const parsedLength = parseNonNegativeNumber(length_cm, 0);
+  const parsedShowOnHome = parseBoolean(show_on_home, false);
+  const parsedHomeOrder = Math.max(0, Math.trunc(parseNonNegativeNumber(home_order, 0)));
 
   if (Number.isNaN(parsedPrice) || parsedPrice < 0) {
     return { ok: false, message: "Preço inválido" };
@@ -293,6 +309,8 @@ function validateProductPayload(body) {
       short_description: String(short_description || "").trim(),
       video_url: String(video_url || "").trim(),
       video_poster_url: String(video_poster_url || "").trim(),
+      show_on_home: parsedShowOnHome,
+      home_order: parsedHomeOrder,
       weight_kg: parsedWeight,
       height_cm: parsedHeight,
       width_cm: parsedWidth,
@@ -388,6 +406,10 @@ router.get("/", requireAuth, async (req, res) => {
         videoUrl: product.video_url || "",
         video_poster_url: product.video_poster_url || "",
         videoPosterUrl: product.video_poster_url || "",
+        show_on_home: Boolean(product.show_on_home),
+        showOnHome: Boolean(product.show_on_home),
+        home_order: Number(product.home_order || 0),
+        homeOrder: Number(product.home_order || 0),
         weight_kg: Number(product.weight_kg || 0),
         height_cm: Number(product.height_cm || 0),
         width_cm: Number(product.width_cm || 0),
@@ -448,6 +470,8 @@ router.post(
         short_description,
         video_url,
         video_poster_url,
+        show_on_home,
+        home_order,
         weight_kg,
         height_cm,
         width_cm,
@@ -498,6 +522,8 @@ router.post(
         short_description,
         video_url,
         video_poster_url,
+        show_on_home,
+        home_order,
         weight_kg,
         height_cm,
         width_cm,
@@ -596,6 +622,8 @@ router.put(
         short_description,
         video_url,
         video_poster_url,
+        show_on_home,
+        home_order,
         weight_kg,
         height_cm,
         width_cm,
@@ -644,6 +672,8 @@ router.put(
         short_description,
         video_url,
         video_poster_url,
+        show_on_home,
+        home_order,
         weight_kg,
         height_cm,
         width_cm,
