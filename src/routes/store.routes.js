@@ -2821,7 +2821,11 @@ router.post("/payments/mercado-pago/webhook", async (req, res) => {
     ).trim();
 
     const dataId = String(
-      req.body?.data?.id || req.query?.["data.id"] || ""
+      req.body?.data?.id ||
+        req.body?.id ||
+        req.query?.["data.id"] ||
+        req.query?.id ||
+        ""
     ).trim();
 
     if (!dataId) {
@@ -2837,7 +2841,7 @@ router.post("/payments/mercado-pago/webhook", async (req, res) => {
     const xSignature = String(req.headers["x-signature"] || "").trim();
     const xRequestId = String(req.headers["x-request-id"] || "").trim();
 
-    if (secret) {
+    if (secret && xSignature && xRequestId) {
       const isValid = validateMercadoPagoWebhookSignature({
         xSignature,
         xRequestId,
@@ -2846,11 +2850,16 @@ router.post("/payments/mercado-pago/webhook", async (req, res) => {
       });
 
       if (!isValid) {
-        return res.status(401).json({
-          success: false,
-          message: "Assinatura invÃ¡lida do webhook"
+        console.warn("WEBHOOK MERCADO PAGO: assinatura inválida, continuando com validação pelo paymentId na API do Mercado Pago", {
+          dataId,
+          topic
         });
       }
+    } else if (secret) {
+      console.warn("WEBHOOK MERCADO PAGO: assinatura ausente, continuando com validação pelo paymentId na API do Mercado Pago", {
+        dataId,
+        topic
+      });
     }
 
     if (topic !== "payment") {
