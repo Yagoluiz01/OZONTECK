@@ -21,8 +21,34 @@ import {
 import { generateAutomaticShippingLabel } from "../services/shipping.service.js";
 import { processPaidOrder } from "../jobs/processPaidOrder.js";
 import { createActivationOfferForPaidOrder } from "../services/customerActivation.service.js";
+import {
+  getCustomerOrderPushPublicKey,
+  saveCustomerOrderPushSubscription,
+  sendCustomerOrderPushForPaymentApproved,
+  sendCustomerOrderPushForTracking
+} from "../services/customerOrderPush.service.js";
 
 const router = express.Router();
+
+
+async function safeCustomerOrderPush(label, order, callback) {
+  try {
+    return await callback(order);
+  } catch (error) {
+    console.error(`ERRO AO ENVIAR PUSH PARA CLIENTE (${label}):`, {
+      orderId: order?.id || null,
+      orderNumber: order?.order_number || null,
+      error: error?.message || String(error),
+    });
+
+    return {
+      sent: 0,
+      failed: 1,
+      skipped: false,
+      error: error?.message || "Erro ao enviar push para cliente",
+    };
+  }
+}
 
 
 async function safeAffiliatePush(label, affiliateId, notification) {
@@ -2205,6 +2231,89 @@ async function saveLabelError(orderId, errorMessage) {
 }
 
 
+
+router.get("/notifications/vapid-public-key", async (req, res) => {
+  try {
+    const publicKey = getCustomerOrderPushPublicKey();
+
+    if (!publicKey) {
+      return res.status(500).json({
+        success: false,
+        message: "Chave pública de notificação não configurada"
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      publicKey
+    });
+  } catch (error) {
+    console.error("ERRO AO BUSCAR CHAVE PÚBLICA DE PUSH DO CLIENTE:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Erro ao buscar configuração de notificação"
+    });
+  }
+});
+
+router.post("/orders/:orderNumber/notifications/subscribe", async (req, res) => {
+  try {
+    const orderNumber = String(req.params.orderNumber || "").trim();
+    const subscription = req.body?.subscription;
+
+    if (!orderNumber) {
+      return res.status(400).json({
+        success: false,
+        message: "Número do pedido é obrigatório"
+      });
+    }
+
+    if (!subscription?.endpoint || !subscription?.keys?.p256dh || !subscription?.keys?.auth) {
+      return res.status(400).json({
+        success: false,
+        message: "Inscrição de notificação inválida"
+      });
+    }
+
+    const order = await findOrderByExternalReference(orderNumber).catch(() => null);
+
+    if (!order?.id) {
+      return res.status(404).json({
+        success: false,
+        message: "Pedido não encontrado para ativar notificações"
+      });
+    }
+
+    const saved = await saveCustomerOrderPushSubscription({
+      orderNumber,
+      paymentId: req.body?.payment_id || req.body?.paymentId || "",
+      subscription,
+      userAgent: req.body?.user_agent || req.headers["user-agent"] || ""
+    });
+
+    const testPush = await safeCustomerOrderPush(
+      "customer_order_push_subscribed",
+      order,
+      (currentOrder) => sendCustomerOrderPushForPaymentApproved(currentOrder)
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: "Notificações do pedido ativadas com sucesso",
+      subscription: saved,
+      testPush
+    });
+  } catch (error) {
+    console.error("ERRO AO SALVAR INSCRIÇÃO DE PUSH DO CLIENTE:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Erro ao ativar notificações do pedido"
+    });
+  }
+});
+
 router.get("/products/home", async (req, res) => {
   try {
     const response = await fetchProductsTable();
@@ -2937,6 +3046,8 @@ router.post("/payments/mercado-pago/webhook", async (req, res) => {
     let metaPurchaseResult = null;
     let affiliateConversionResult = null;
     let activationOfferResult = null;
+    let customerPaymentPushResult = null;
+    let customerTrackingPushResult = null;
 
     if (paymentStatus === "approved") {
       try {
@@ -2988,6 +3099,12 @@ if (!alreadyPaidBeforeWebhook) {
           } catch (notificationError) {
             console.error("ERRO AO ENVIAR NOTIFICAÇÃO DE PEDIDO PAGO:", notificationError);
           }
+
+          customerPaymentPushResult = await safeCustomerOrderPush(
+            "payment_approved",
+            updatedOrder,
+            (currentOrder) => sendCustomerOrderPushForPaymentApproved(currentOrder)
+          );
         } else {
           metaPurchaseResult = {
             sent: false,
@@ -3010,6 +3127,22 @@ if (!alreadyPaidBeforeWebhook) {
           if (!savedLabel.ok) {
             throw new Error("Erro ao salvar dados da etiqueta no pedido");
           }
+
+          const refreshedShippingOrder = {
+            ...updatedOrder,
+            shipping_label_status: "generated",
+            shipping_label_url: String(generatedLabel.labelUrl || ""),
+            shipping_label_pdf_url: String(generatedLabel.labelPdfUrl || ""),
+            shipping_tracking_code: String(generatedLabel.trackingCode || ""),
+            shipping_shipment_id: String(generatedLabel.shipmentId || ""),
+            tracking_code: String(generatedLabel.trackingCode || "")
+          };
+
+          customerTrackingPushResult = await safeCustomerOrderPush(
+            "tracking_available",
+            refreshedShippingOrder,
+            (currentOrder) => sendCustomerOrderPushForTracking(currentOrder)
+          );
 
           labelResult = {
             generated: true,
@@ -3053,7 +3186,9 @@ if (!alreadyPaidBeforeWebhook) {
   label: labelResult,
   metaPurchase: metaPurchaseResult,
   affiliateConversion: affiliateConversionResult,
-  activationOffer: activationOfferResult
+  activationOffer: activationOfferResult,
+  customerPaymentPush: customerPaymentPushResult,
+  customerTrackingPush: customerTrackingPushResult
 });
   } catch (error) {
     console.error("ERRO NO WEBHOOK DO MERCADO PAGO:", error);
