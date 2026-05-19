@@ -110,6 +110,16 @@ function normalizeCarrierName(value) {
   return carrier;
 }
 
+function isFreshTrackingReservation(value, maxAgeMs = 2 * 60 * 1000) {
+  if (!value) return false;
+
+  const reservedAt = new Date(value).getTime();
+
+  if (!Number.isFinite(reservedAt)) return false;
+
+  return Date.now() - reservedAt < maxAgeMs;
+}
+
 export function getCustomerOrderPushPublicKey() {
   return VAPID_PUBLIC_KEY;
 }
@@ -179,7 +189,7 @@ export async function sendCustomerOrderPush(order = {}, notification = {}) {
   const query = new URLSearchParams({
     order_number: `eq.${orderNumber}`,
     is_active: "eq.true",
-    select: "id,endpoint,p256dh,auth,last_tracking_sent_at",
+    select: "id,endpoint,p256dh,auth,last_sent_at,last_tracking_sent_at",
   });
 
   const subscriptions = await supabaseRequest(
@@ -227,7 +237,17 @@ export async function sendCustomerOrderPush(order = {}, notification = {}) {
     subscriptions.map(async (item) => {
       let reservedTrackingAt = null;
 
-      if (isTrackingNotification && item.last_tracking_sent_at) {
+      if (isTrackingNotification && item.last_sent_at && item.last_tracking_sent_at) {
+        skipped += 1;
+        return;
+      }
+
+      if (
+        isTrackingNotification &&
+        !item.last_sent_at &&
+        item.last_tracking_sent_at &&
+        isFreshTrackingReservation(item.last_tracking_sent_at)
+      ) {
         skipped += 1;
         return;
       }
@@ -235,13 +255,19 @@ export async function sendCustomerOrderPush(order = {}, notification = {}) {
       if (isTrackingNotification) {
         reservedTrackingAt = new Date().toISOString();
 
+        const reserveQuery = new URLSearchParams({
+          id: `eq.${item.id}`,
+          last_sent_at: "is.null",
+        });
+
         const reserved = await supabaseRequest(
-          `/rest/v1/customer_order_push_subscriptions?id=eq.${item.id}&last_tracking_sent_at=is.null`,
+          `/rest/v1/customer_order_push_subscriptions?${reserveQuery.toString()}`,
           {
             method: "PATCH",
             headers: { Prefer: "return=representation" },
             body: JSON.stringify({
               last_tracking_sent_at: reservedTrackingAt,
+              last_error: null,
               updated_at: reservedTrackingAt,
             }),
           }
@@ -276,6 +302,7 @@ export async function sendCustomerOrderPush(order = {}, notification = {}) {
             headers: { Prefer: "return=minimal" },
             body: JSON.stringify({
               last_sent_at: now,
+              ...(isTrackingNotification ? { last_tracking_sent_at: now } : {}),
               fail_count: 0,
               last_error: null,
               updated_at: now,
@@ -294,7 +321,7 @@ export async function sendCustomerOrderPush(order = {}, notification = {}) {
           updated_at: new Date().toISOString(),
         };
 
-        if (isTrackingNotification && !shouldDisable) {
+        if (isTrackingNotification) {
           failurePayload.last_tracking_sent_at = null;
         }
 
