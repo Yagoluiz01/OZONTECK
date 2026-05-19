@@ -161,10 +161,13 @@ export async function sendCustomerOrderPush(order = {}, notification = {}) {
     };
   }
 
+  const isTrackingNotification =
+    String(notification.type || "").trim() === "tracking_available";
+
   const query = new URLSearchParams({
     order_number: `eq.${orderNumber}`,
     is_active: "eq.true",
-    select: "id,endpoint,p256dh,auth",
+    select: "id,endpoint,p256dh,auth,last_tracking_sent_at",
   });
 
   const subscriptions = await supabaseRequest(
@@ -206,9 +209,15 @@ export async function sendCustomerOrderPush(order = {}, notification = {}) {
 
   let sent = 0;
   let failed = 0;
+  let skipped = 0;
 
   await Promise.all(
     subscriptions.map(async (item) => {
+      if (isTrackingNotification && item.last_tracking_sent_at) {
+        skipped += 1;
+        return;
+      }
+
       try {
         await webPush.sendNotification(
           {
@@ -230,6 +239,9 @@ export async function sendCustomerOrderPush(order = {}, notification = {}) {
             headers: { Prefer: "return=minimal" },
             body: JSON.stringify({
               last_sent_at: new Date().toISOString(),
+              ...(isTrackingNotification
+                ? { last_tracking_sent_at: new Date().toISOString() }
+                : {}),
               fail_count: 0,
               last_error: null,
               updated_at: new Date().toISOString(),
@@ -261,7 +273,8 @@ export async function sendCustomerOrderPush(order = {}, notification = {}) {
   return {
     sent,
     failed,
-    skipped: false,
+    skipped,
+    skipped_all: sent === 0 && failed === 0 && skipped > 0,
   };
 }
 
@@ -276,13 +289,24 @@ export async function sendCustomerOrderPushForPaymentApproved(order = {}) {
 export async function sendCustomerOrderPushForTracking(order = {}) {
   const orderNumber = sanitizeOrderNumber(order.order_number || order.orderNumber);
   const trackingCode = String(order.shipping_tracking_code || order.tracking_code || "").trim();
-  const carrier = String(order.shipping_carrier || order.shipping_service_name || "transportadora").trim();
+  const rawCarrier = String(
+    order.shipping_carrier ||
+      order.shipping_service_name ||
+      order.carrier ||
+      "transportadora"
+  ).trim();
+
+  const carrier = /jadlog/i.test(rawCarrier) ? "Jadlog" : rawCarrier || "transportadora";
 
   return sendCustomerOrderPush(order, {
     type: "tracking_available",
-    title: "🚚 Seu pedido já tem rastreio",
+    title: `📦 Pedido enviado para a ${carrier}`,
     body: trackingCode
-      ? `Pedido ${orderNumber}: código ${trackingCode} pela ${carrier}.`
-      : `Pedido ${orderNumber}: novas informações de envio disponíveis.`,
+      ? `Seu pedido ${orderNumber} foi enviado para a ${carrier}. Código de rastreio: ${trackingCode}.`
+      : `Seu pedido ${orderNumber} foi enviado para a ${carrier}. Assim que o rastreio atualizar, avisaremos você.`,
+    data: {
+      carrier,
+      tracking_sent_once: true,
+    },
   });
 }
