@@ -779,16 +779,32 @@ function calculatePricing(input, goalLevels = [], product = null) {
     fixedAffiliateCost: goalBonusPerSale,
   });
 
-  const currentPriceForGoalGap = currentProductPrice > 0 ? currentProductPrice : 0;
-  const allGoalsSafeGapValue = roundMoney(
-    Math.max(allGoalsSafePrice - currentPriceForGoalGap, 0)
+  const adjustedSuggestedPriceForGoalGap = manualSuggestedPrice > 0
+    ? manualSuggestedPrice
+    : 0;
+
+  const allGoalsSafeReferencePrice = roundMoney(
+    Math.max(currentProductPrice || 0, adjustedSuggestedPriceForGoalGap || 0)
   );
 
-  const allGoalsSafeStatus = allGoalsSafeGapValue <= 0 ? "healthy" : "attention";
+  const allGoalsSafeReferenceType =
+    adjustedSuggestedPriceForGoalGap > (currentProductPrice || 0)
+      ? "suggested_price"
+      : "current_price";
+
+  const allGoalsSafeGapValue = roundMoney(
+    Math.max(allGoalsSafePrice - allGoalsSafeReferencePrice, 0)
+  );
+
+  const allGoalsSafeStatus = allGoalsSafeGapValue <= 0.02 ? "healthy" : "attention";
+  const allGoalsSafeWasAdjusted = allGoalsSafeStatus === "healthy" && allGoalsSafeReferenceType === "suggested_price";
+
   const allGoalsSafeMessage = goalRequiredPrices.length
     ? allGoalsSafeStatus === "healthy"
-      ? "O preço atual já suporta todas as metas ativas, comissão padrão, comissão de rede e margem mínima."
-      : "O preço atual não suporta todas as metas ativas. Use o preço seguro sugerido para cobrir bônus de meta, comissão padrão, comissão de rede e margem mínima."
+      ? allGoalsSafeWasAdjusted
+        ? "O preço sugerido ajustado já cobre todas as metas ativas, comissão padrão, comissão de rede e margem mínima."
+        : "O preço atual já suporta todas as metas ativas, comissão padrão, comissão de rede e margem mínima."
+      : "O preço atual ainda não suporta todas as metas ativas. Use o preço seguro sugerido para cobrir bônus de meta, comissão padrão, comissão de rede e margem mínima."
     : "Nenhuma meta ativa foi encontrada. O preço seguro considera comissão padrão, comissão de rede e margem mínima.";
 
   const allGoalsSafeDirectCommissionValue = roundMoney(
@@ -807,18 +823,26 @@ function calculatePricing(input, goalLevels = [], product = null) {
   const decisionStatus = allGoalsSafeStatus === "healthy" ? "healthy" : "attention";
   const decisionTitle =
     decisionStatus === "healthy"
-      ? "Produto seguro para vender com metas"
+      ? allGoalsSafeWasAdjusted
+        ? "Preço sugerido seguro para cobrir as metas"
+        : "Produto seguro para vender com metas"
       : "Produto precisa de ajuste para cobrir as metas";
   const decisionMessage =
     decisionStatus === "healthy"
-      ? "O preço atual cobre custos, comissão padrão, comissão de rede, maior bônus médio das metas e margem mínima."
+      ? allGoalsSafeWasAdjusted
+        ? "O preço sugerido ajustado cobre custos, comissão padrão, comissão de rede, maior bônus médio das metas e margem mínima. Salve e aplique o preço no produto para finalizar."
+        : "O preço atual cobre custos, comissão padrão, comissão de rede, maior bônus médio das metas e margem mínima."
       : `Ajuste o preço sugerido para ${formatCurrencyBRL(allGoalsSafePrice)} para cobrir todas as metas, pagar comissão ao afiliado e manter a margem mínima.`;
 
   const riskReasons = [];
 
-  if (currentProductPrice > 0 && allGoalsSafeGapValue > 0) {
+  if (allGoalsSafeWasAdjusted) {
     riskReasons.push(
-      `Preço atual abaixo do seguro para metas em ${formatCurrencyBRL(allGoalsSafeGapValue)}.`
+      `Preço sugerido ajustado para ${formatCurrencyBRL(allGoalsSafeReferencePrice)} já cobre todas as metas com segurança.`
+    );
+  } else if (allGoalsSafeReferencePrice > 0 && allGoalsSafeGapValue > 0) {
+    riskReasons.push(
+      `Preço em análise abaixo do seguro para metas em ${formatCurrencyBRL(allGoalsSafeGapValue)}.`
     );
   }
 
@@ -891,6 +915,9 @@ function calculatePricing(input, goalLevels = [], product = null) {
     worst_goal_bonus_per_sale: roundMoney(goalAnalysis.worst_bonus_per_sale || 0),
     goal_analysis: goalAnalysis,
     all_goals_safe_price: roundMoney(allGoalsSafePrice),
+    all_goals_safe_reference_price: roundMoney(allGoalsSafeReferencePrice),
+    all_goals_safe_reference_type: allGoalsSafeReferenceType,
+    all_goals_safe_was_adjusted: allGoalsSafeWasAdjusted,
     all_goals_safe_gap_value: roundMoney(allGoalsSafeGapValue),
     all_goals_safe_status: allGoalsSafeStatus,
     all_goals_safe_message: allGoalsSafeMessage,
@@ -973,6 +1000,9 @@ function stripTransientPricingFields(pricing = {}) {
     safe_commission_available_before_direct,
     minimum_company_profit_value,
     all_goals_safe_price,
+    all_goals_safe_reference_price,
+    all_goals_safe_reference_type,
+    all_goals_safe_was_adjusted,
     all_goals_safe_gap_value,
     all_goals_safe_status,
     all_goals_safe_message,
