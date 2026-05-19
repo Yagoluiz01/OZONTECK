@@ -791,6 +791,61 @@ function calculatePricing(input, goalLevels = [], product = null) {
       : "O preço atual não suporta todas as metas ativas. Use o preço seguro sugerido para cobrir bônus de meta, comissão padrão, comissão de rede e margem mínima."
     : "Nenhuma meta ativa foi encontrada. O preço seguro considera comissão padrão, comissão de rede e margem mínima.";
 
+  const allGoalsSafeDirectCommissionValue = roundMoney(
+    allGoalsSafeProfitData.commission_value
+  );
+  const allGoalsSafeNetworkCommissionValue = roundMoney(
+    allGoalsSafeProfitData.network_commission_value
+  );
+  const allGoalsSafeGoalBonusValue = roundMoney(
+    allGoalsSafeProfitData.goal_bonus_value
+  );
+  const allGoalsSafeAffiliateTotalCost = roundMoney(
+    allGoalsSafeProfitData.affiliate_total_cost
+  );
+
+  const decisionStatus = allGoalsSafeStatus === "healthy" ? "healthy" : "attention";
+  const decisionTitle =
+    decisionStatus === "healthy"
+      ? "Produto seguro para vender com metas"
+      : "Produto precisa de ajuste para cobrir as metas";
+  const decisionMessage =
+    decisionStatus === "healthy"
+      ? "O preço atual cobre custos, comissão padrão, comissão de rede, maior bônus médio das metas e margem mínima."
+      : `Ajuste o preço sugerido para ${formatCurrencyBRL(allGoalsSafePrice)} para cobrir todas as metas, pagar comissão ao afiliado e manter a margem mínima.`;
+
+  const riskReasons = [];
+
+  if (currentProductPrice > 0 && allGoalsSafeGapValue > 0) {
+    riskReasons.push(
+      `Preço atual abaixo do seguro para metas em ${formatCurrencyBRL(allGoalsSafeGapValue)}.`
+    );
+  }
+
+  if (goalBonusPerSale > 0) {
+    riskReasons.push(
+      `Maior bônus médio de meta considerado: ${formatCurrencyBRL(goalBonusPerSale)} por venda.`
+    );
+  }
+
+  if (affiliateCommissionPercent > 0) {
+    riskReasons.push(
+      `Comissão padrão do afiliado vendedor: ${affiliateCommissionPercent.toFixed(2)}%.`
+    );
+  }
+
+  if (networkCommissionPercent > 0) {
+    riskReasons.push(
+      `Comissão de rede/recrutamento ativa: ${networkCommissionPercent.toFixed(2)}%.`
+    );
+  }
+
+  if (minimumCompanyMarginPercent > 0) {
+    riskReasons.push(
+      `Margem mínima protegida da empresa: ${minimumCompanyMarginPercent.toFixed(2)}%.`
+    );
+  }
+
   const risk = buildRiskStatus({
     suggestedPrice,
     priceWithMaxCommission,
@@ -841,6 +896,14 @@ function calculatePricing(input, goalLevels = [], product = null) {
     all_goals_safe_message: allGoalsSafeMessage,
     all_goals_safe_profit: roundMoney(allGoalsSafeProfitData.profit),
     all_goals_safe_margin_percent: roundMoney(allGoalsSafeProfitData.margin_percent),
+    all_goals_safe_direct_commission_value: allGoalsSafeDirectCommissionValue,
+    all_goals_safe_network_commission_value: allGoalsSafeNetworkCommissionValue,
+    all_goals_safe_goal_bonus_value: allGoalsSafeGoalBonusValue,
+    all_goals_safe_affiliate_total_cost: allGoalsSafeAffiliateTotalCost,
+    pricing_decision_status: decisionStatus,
+    pricing_decision_title: decisionTitle,
+    pricing_decision_message: decisionMessage,
+    pricing_risk_reasons: riskReasons,
 
     cost_total: roundMoney(baseCost),
     minimum_price: roundMoney(minimumPrice),
@@ -915,6 +978,14 @@ function stripTransientPricingFields(pricing = {}) {
     all_goals_safe_message,
     all_goals_safe_profit,
     all_goals_safe_margin_percent,
+    all_goals_safe_direct_commission_value,
+    all_goals_safe_network_commission_value,
+    all_goals_safe_goal_bonus_value,
+    all_goals_safe_affiliate_total_cost,
+    pricing_decision_status,
+    pricing_decision_title,
+    pricing_decision_message,
+    pricing_risk_reasons,
     ...persistablePricing
   } = pricing || {};
 
