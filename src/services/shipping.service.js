@@ -1,3 +1,4 @@
+import { sendCustomerOrderPushForTracking } from "./customerOrderPush.service.js";
 import { env } from "../config/env.js";
 import {
   getMelhorEnvioAccessToken,
@@ -987,6 +988,54 @@ async function syncSingleCartCreatedOrder(order, accessToken, baseUrl) {
     },
     "melhor_envio_label_sync"
   );
+
+
+    const customerTrackingOrder = updatedOrder || {
+    ...order,
+    ...syncUpdatePayload
+  };
+
+  const customerTrackingCode = String(
+    customerTrackingOrder?.shipping_tracking_code ||
+      customerTrackingOrder?.tracking_code ||
+      trackingCode ||
+      ""
+  ).trim();
+
+  const customerOrderStatus = String(
+    customerTrackingOrder?.order_status ||
+      syncUpdatePayload?.order_status ||
+      ""
+  ).toLowerCase();
+
+  if (
+    customerTrackingCode &&
+    ["shipped", "enviado", "delivered", "entregue"].includes(customerOrderStatus)
+  ) {
+    try {
+      const customerTrackingPushResult =
+        await sendCustomerOrderPushForTracking({
+          ...customerTrackingOrder,
+          shipping_tracking_code: customerTrackingCode,
+          tracking_code: customerTrackingCode
+        });
+
+      console.log("CUSTOMER TRACKING PUSH AFTER MELHOR ENVIO SYNC:", {
+        orderId: customerTrackingOrder?.id || null,
+        orderNumber: customerTrackingOrder?.order_number || null,
+        trackingCode: customerTrackingCode,
+        orderStatus: customerOrderStatus,
+        result: customerTrackingPushResult
+      });
+    } catch (pushError) {
+      console.error("ERRO AO ENVIAR PUSH DE RASTREIO PARA CLIENTE:", {
+        orderId: customerTrackingOrder?.id || null,
+        orderNumber: customerTrackingOrder?.order_number || null,
+        trackingCode: customerTrackingCode,
+        error: pushError?.message || String(pushError)
+      });
+    }
+  }
 
   await addOrderSyncTimeline(
     order.id,
