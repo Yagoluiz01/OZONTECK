@@ -98,6 +98,18 @@ function buildOrderNotificationUrl(order = {}) {
   return baseUrl ? `${baseUrl}${path}` : path;
 }
 
+function normalizeCarrierName(value) {
+  const carrier = String(value || "").trim();
+
+  if (!carrier) return "Jadlog";
+
+  if (carrier.toLowerCase().includes("jadlog")) {
+    return "Jadlog";
+  }
+
+  return carrier;
+}
+
 export function getCustomerOrderPushPublicKey() {
   return VAPID_PUBLIC_KEY;
 }
@@ -213,9 +225,32 @@ export async function sendCustomerOrderPush(order = {}, notification = {}) {
 
   await Promise.all(
     subscriptions.map(async (item) => {
+      let reservedTrackingAt = null;
+
       if (isTrackingNotification && item.last_tracking_sent_at) {
         skipped += 1;
         return;
+      }
+
+      if (isTrackingNotification) {
+        reservedTrackingAt = new Date().toISOString();
+
+        const reserved = await supabaseRequest(
+          `/rest/v1/customer_order_push_subscriptions?id=eq.${item.id}&last_tracking_sent_at=is.null`,
+          {
+            method: "PATCH",
+            headers: { Prefer: "return=representation" },
+            body: JSON.stringify({
+              last_tracking_sent_at: reservedTrackingAt,
+              updated_at: reservedTrackingAt,
+            }),
+          }
+        ).catch(() => []);
+
+        if (!Array.isArray(reserved) || reserved.length === 0) {
+          skipped += 1;
+          return;
+        }
       }
 
       try {
@@ -232,19 +267,18 @@ export async function sendCustomerOrderPush(order = {}, notification = {}) {
 
         sent += 1;
 
+        const now = new Date().toISOString();
+
         await supabaseRequest(
           `/rest/v1/customer_order_push_subscriptions?id=eq.${item.id}`,
           {
             method: "PATCH",
             headers: { Prefer: "return=minimal" },
             body: JSON.stringify({
-              last_sent_at: new Date().toISOString(),
-              ...(isTrackingNotification
-                ? { last_tracking_sent_at: new Date().toISOString() }
-                : {}),
+              last_sent_at: now,
               fail_count: 0,
               last_error: null,
-              updated_at: new Date().toISOString(),
+              updated_at: now,
             }),
           }
         ).catch(() => null);
@@ -253,17 +287,23 @@ export async function sendCustomerOrderPush(order = {}, notification = {}) {
         const statusCode = Number(error?.statusCode || 0);
         const shouldDisable = statusCode === 404 || statusCode === 410;
 
+        const failurePayload = {
+          is_active: shouldDisable ? false : true,
+          last_error: String(error?.message || "Erro ao enviar push").slice(0, 500),
+          fail_count: shouldDisable ? 99 : 1,
+          updated_at: new Date().toISOString(),
+        };
+
+        if (isTrackingNotification && !shouldDisable) {
+          failurePayload.last_tracking_sent_at = null;
+        }
+
         await supabaseRequest(
           `/rest/v1/customer_order_push_subscriptions?id=eq.${item.id}`,
           {
             method: "PATCH",
             headers: { Prefer: "return=minimal" },
-            body: JSON.stringify({
-              is_active: shouldDisable ? false : true,
-              last_error: String(error?.message || "Erro ao enviar push").slice(0, 500),
-              fail_count: shouldDisable ? 99 : 1,
-              updated_at: new Date().toISOString(),
-            }),
+            body: JSON.stringify(failurePayload),
           }
         ).catch(() => null);
       }
@@ -274,7 +314,7 @@ export async function sendCustomerOrderPush(order = {}, notification = {}) {
     sent,
     failed,
     skipped,
-    skipped_all: sent === 0 && failed === 0 && skipped > 0,
+    skipped_duplicates: skipped,
   };
 }
 
@@ -289,24 +329,16 @@ export async function sendCustomerOrderPushForPaymentApproved(order = {}) {
 export async function sendCustomerOrderPushForTracking(order = {}) {
   const orderNumber = sanitizeOrderNumber(order.order_number || order.orderNumber);
   const trackingCode = String(order.shipping_tracking_code || order.tracking_code || "").trim();
-  const rawCarrier = String(
-    order.shipping_carrier ||
-      order.shipping_service_name ||
-      order.carrier ||
-      "transportadora"
-  ).trim();
-
-  const carrier = /jadlog/i.test(rawCarrier) ? "Jadlog" : rawCarrier || "transportadora";
+  const carrier = normalizeCarrierName(order.shipping_carrier || order.shipping_service_name || "Jadlog");
 
   return sendCustomerOrderPush(order, {
     type: "tracking_available",
     title: `📦 Pedido enviado para a ${carrier}`,
     body: trackingCode
       ? `Seu pedido ${orderNumber} foi enviado para a ${carrier}. Código de rastreio: ${trackingCode}.`
-      : `Seu pedido ${orderNumber} foi enviado para a ${carrier}. Assim que o rastreio atualizar, avisaremos você.`,
+      : `Seu pedido ${orderNumber} foi enviado para a ${carrier}. Em breve o rastreio estará disponível.`,
     data: {
       carrier,
-      tracking_sent_once: true,
     },
   });
 }
