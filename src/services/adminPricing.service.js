@@ -290,6 +290,91 @@ function calculateProfitForPrice({
   };
 }
 
+
+function calculateSafeDirectCommissionForPrice({
+  price,
+  baseCost,
+  gatewayFeePercent,
+  taxPercent,
+  networkCommissionPercent = 0,
+  fixedAffiliateCost = 0,
+  minimumCompanyMarginPercent = 0,
+}) {
+  const safePrice = roundMoney(price);
+
+  if (!safePrice || safePrice <= 0) {
+    return {
+      reference_price: 0,
+      gateway_value: 0,
+      tax_value: 0,
+      network_commission_value: 0,
+      goal_bonus_value: 0,
+      minimum_company_profit_value: 0,
+      fixed_cost_total: roundMoney(baseCost),
+      protected_cost_total: roundMoney(baseCost),
+      safe_commission_value: 0,
+      safe_commission_percent: 0,
+      available_before_direct_commission: 0,
+      has_available_margin: false,
+    };
+  }
+
+  const gatewayValue = roundMoney(
+    safePrice * (normalizePercent(gatewayFeePercent) / 100)
+  );
+
+  const taxValue = roundMoney(
+    safePrice * (normalizePercent(taxPercent) / 100)
+  );
+
+  const networkCommissionValue = roundMoney(
+    safePrice * (normalizePercent(networkCommissionPercent) / 100)
+  );
+
+  const goalBonusValue = roundMoney(fixedAffiliateCost);
+
+  const minimumCompanyProfitValue = roundMoney(
+    safePrice * (normalizePercent(minimumCompanyMarginPercent) / 100)
+  );
+
+  const fixedCostTotal = roundMoney(baseCost);
+
+  const protectedCostTotal = roundMoney(
+    fixedCostTotal +
+      gatewayValue +
+      taxValue +
+      networkCommissionValue +
+      goalBonusValue +
+      minimumCompanyProfitValue
+  );
+
+  const availableBeforeDirectCommission = roundMoney(
+    safePrice - protectedCostTotal
+  );
+
+  const safeCommissionValue = roundMoney(
+    Math.max(availableBeforeDirectCommission, 0)
+  );
+
+  const safeCommissionPercent =
+    safePrice > 0 ? roundMoney((safeCommissionValue / safePrice) * 100) : 0;
+
+  return {
+    reference_price: safePrice,
+    gateway_value: gatewayValue,
+    tax_value: taxValue,
+    network_commission_value: networkCommissionValue,
+    goal_bonus_value: goalBonusValue,
+    minimum_company_profit_value: minimumCompanyProfitValue,
+    fixed_cost_total: fixedCostTotal,
+    protected_cost_total: protectedCostTotal,
+    safe_commission_value: safeCommissionValue,
+    safe_commission_percent: normalizePercent(safeCommissionPercent),
+    available_before_direct_commission: availableBeforeDirectCommission,
+    has_available_margin: safeCommissionValue > 0,
+  };
+}
+
 function buildRiskStatus({
   suggestedPrice,
   priceWithMaxCommission,
@@ -622,6 +707,41 @@ function calculatePricing(input, goalLevels = [], product = null) {
   });
 
   const currentProductPrice = roundMoney(product?.price || input.current_product_price || 0);
+  const safeCommissionReferencePrice =
+    currentProductPrice > 0 ? currentProductPrice : suggestedPrice;
+
+  const safeCommissionAnalysis = calculateSafeDirectCommissionForPrice({
+    price: safeCommissionReferencePrice,
+    baseCost,
+    gatewayFeePercent,
+    taxPercent,
+    networkCommissionPercent,
+    fixedAffiliateCost: goalBonusPerSale,
+    minimumCompanyMarginPercent,
+  });
+
+  const currentDirectCommissionValue = roundMoney(
+    safeCommissionReferencePrice * (affiliateCommissionPercent / 100)
+  );
+
+  const safeCommissionGapValue = roundMoney(
+    safeCommissionAnalysis.safe_commission_value - currentDirectCommissionValue
+  );
+
+  const safeCommissionStatus =
+    affiliateCommissionPercent <= safeCommissionAnalysis.safe_commission_percent
+      ? "healthy"
+      : safeCommissionAnalysis.safe_commission_percent > 0
+        ? "attention"
+        : "danger";
+
+  const safeCommissionMessage =
+    safeCommissionStatus === "healthy"
+      ? "A comissão atual está segura no preço atual do produto, mantendo a margem mínima da empresa."
+      : safeCommissionAnalysis.safe_commission_percent > 0
+        ? "A comissão atual passa do limite seguro no preço atual. Use a comissão sugerida ou aumente o preço antes de liberar uma comissão maior."
+        : "O preço atual não suporta comissão direta mantendo custos, comissão de rede, bônus de meta e margem mínima. Revise custos, margem ou preço.";
+
   const goalAnalysis = buildGoalAnalysisForPricing({
     goalLevels,
     baseCost,
@@ -688,6 +808,28 @@ function calculatePricing(input, goalLevels = [], product = null) {
     unit_profit: roundMoney(suggestedProfitData.profit),
     real_margin_percent: roundMoney(suggestedProfitData.margin_percent),
 
+    current_product_price: roundMoney(currentProductPrice),
+    safe_commission_reference_price: roundMoney(safeCommissionReferencePrice),
+    safe_affiliate_commission_percent: roundMoney(
+      safeCommissionAnalysis.safe_commission_percent
+    ),
+    safe_affiliate_commission_value: roundMoney(
+      safeCommissionAnalysis.safe_commission_value
+    ),
+    safe_commission_current_value: roundMoney(currentDirectCommissionValue),
+    safe_commission_gap_value: roundMoney(safeCommissionGapValue),
+    safe_commission_status: safeCommissionStatus,
+    safe_commission_message: safeCommissionMessage,
+    safe_commission_protected_cost_total: roundMoney(
+      safeCommissionAnalysis.protected_cost_total
+    ),
+    safe_commission_available_before_direct: roundMoney(
+      safeCommissionAnalysis.available_before_direct_commission
+    ),
+    minimum_company_profit_value: roundMoney(
+      safeCommissionAnalysis.minimum_company_profit_value
+    ),
+
     direct_commission_value: directCommissionValue,
     network_commission_value: networkCommissionValue,
     goal_bonus_value: goalBonusValue,
@@ -711,6 +853,25 @@ function calculatePricing(input, goalLevels = [], product = null) {
     status: risk.status,
     risk_message: risk.risk_message,
   };
+}
+
+function stripTransientPricingFields(pricing = {}) {
+  const {
+    current_product_price,
+    safe_commission_reference_price,
+    safe_affiliate_commission_percent,
+    safe_affiliate_commission_value,
+    safe_commission_current_value,
+    safe_commission_gap_value,
+    safe_commission_status,
+    safe_commission_message,
+    safe_commission_protected_cost_total,
+    safe_commission_available_before_direct,
+    minimum_company_profit_value,
+    ...persistablePricing
+  } = pricing || {};
+
+  return persistablePricing;
 }
 
 async function getProductById(productId) {
@@ -992,6 +1153,7 @@ export async function saveProductPricing(payload) {
   }
 
   const calculated = await calculateProductPricing(payload);
+  const persistableCalculated = stripTransientPricingFields(calculated);
   const existing = await getPricingByProductId(productId);
   const product = await getProductById(productId);
 
@@ -1004,7 +1166,7 @@ export async function saveProductPricing(payload) {
         Prefer: "return=representation",
       },
       body: JSON.stringify({
-        ...calculated,
+        ...persistableCalculated,
         notes: payload.notes || null,
       }),
     });
@@ -1017,7 +1179,7 @@ export async function saveProductPricing(payload) {
         Prefer: "return=representation",
       },
       body: JSON.stringify({
-        ...calculated,
+        ...persistableCalculated,
         notes: payload.notes || null,
       }),
     });
