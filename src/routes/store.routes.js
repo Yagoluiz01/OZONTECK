@@ -83,6 +83,185 @@ function formatMoneyBR(value) {
   });
 }
 
+function roundMoney(value) {
+  const number = Number(value || 0);
+
+  if (!Number.isFinite(number)) {
+    return 0;
+  }
+
+  return Number(number.toFixed(2));
+}
+
+function normalizePercentValue(value, fallback = 0) {
+  const number = Number(value);
+
+  if (!Number.isFinite(number) || number < 0) {
+    return roundMoney(fallback);
+  }
+
+  if (number > 100) {
+    return 100;
+  }
+
+  return roundMoney(number);
+}
+
+function getCommissionBaseFromOrder(order = {}) {
+  const subtotal = Number(order?.subtotal || 0) || 0;
+  const discount = Number(order?.discount_amount || 0) || 0;
+
+  return roundMoney(Math.max(subtotal - discount, 0));
+}
+
+async function fetchProductPricingMap(productIds = []) {
+  const uniqueProductIds = [
+    ...new Set(
+      productIds
+        .map((id) => String(id || "").trim())
+        .filter(Boolean)
+    ),
+  ];
+
+  if (!uniqueProductIds.length) {
+    return new Map();
+  }
+
+  try {
+    const url = new URL(`${env.supabaseUrl}/rest/v1/product_pricing`);
+    url.searchParams.set(
+      "select",
+      "product_id,affiliate_commission_percent,network_commission_percent"
+    );
+    url.searchParams.set("product_id", `in.(${uniqueProductIds.join(",")})`);
+
+    const response = await fetch(url.toString(), {
+      method: "GET",
+      headers: {
+        apikey: env.supabaseServiceRoleKey,
+        Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+    });
+
+    const data = await response.json().catch(() => []);
+
+    if (!response.ok || !Array.isArray(data)) {
+      console.warn("PRECIFICAÇÃO DO PRODUTO NÃO CARREGADA PARA COMISSÃO:", data);
+      return new Map();
+    }
+
+    return new Map(
+      data
+        .filter((row) => row?.product_id)
+        .map((row) => [String(row.product_id), row])
+    );
+  } catch (error) {
+    console.error("ERRO AO BUSCAR PRECIFICAÇÃO PARA COMISSÃO:", error);
+    return new Map();
+  }
+}
+
+function calculateCommissionPolicyFromCartItems({
+  items = [],
+  discountAmount = 0,
+  fallbackSellerRate = 0,
+  fallbackRecruitmentRate = 0,
+  pricingMap = new Map(),
+} = {}) {
+  const subtotal = roundMoney(
+    items.reduce((sum, item) => sum + Number(item.totalPrice || item.total_price || 0), 0)
+  );
+  const safeDiscount = roundMoney(Math.max(Number(discountAmount || 0) || 0, 0));
+  const commissionBase = roundMoney(Math.max(subtotal - safeDiscount, 0));
+  const discountRatio = subtotal > 0 ? Math.min(safeDiscount / subtotal, 1) : 0;
+
+  let sellerCommissionAmount = 0;
+  let recruitmentCommissionAmount = 0;
+
+  for (const item of items) {
+    const productId = String(item?.product?.id || item?.product_id || "").trim();
+    const pricing = pricingMap.get(productId) || {};
+    const itemTotal = roundMoney(Number(item.totalPrice || item.total_price || 0) || 0);
+    const itemBase = roundMoney(Math.max(itemTotal - itemTotal * discountRatio, 0));
+
+    const sellerRate = normalizePercentValue(
+      pricing.affiliate_commission_percent ?? fallbackSellerRate,
+      fallbackSellerRate
+    );
+    const recruitmentRate = normalizePercentValue(
+      pricing.network_commission_percent ?? fallbackRecruitmentRate,
+      fallbackRecruitmentRate
+    );
+
+    sellerCommissionAmount += roundMoney((itemBase * sellerRate) / 100);
+    recruitmentCommissionAmount += roundMoney((itemBase * recruitmentRate) / 100);
+  }
+
+  sellerCommissionAmount = roundMoney(sellerCommissionAmount);
+  recruitmentCommissionAmount = roundMoney(recruitmentCommissionAmount);
+
+  const sellerRate = commissionBase > 0
+    ? roundMoney((sellerCommissionAmount / commissionBase) * 100)
+    : normalizePercentValue(fallbackSellerRate);
+
+  const recruitmentRate = commissionBase > 0
+    ? roundMoney((recruitmentCommissionAmount / commissionBase) * 100)
+    : normalizePercentValue(fallbackRecruitmentRate);
+
+  return {
+    commissionBase,
+    sellerRate,
+    sellerCommissionAmount,
+    recruitmentRate,
+    recruitmentCommissionAmount,
+  };
+}
+
+async function calculateCommissionPolicyForOrder(order = {}, sellerAffiliate = null) {
+  const fallbackSellerRate = normalizePercentValue(
+    order.affiliate_commission_rate || sellerAffiliate?.commission_rate || 0
+  );
+  const fallbackRecruitmentRate = normalizePercentValue(
+    getRecruitmentCommissionRate(sellerAffiliate || {})
+  );
+
+  let items = [];
+
+  try {
+    if (order?.id) {
+      items = await findOrderItems(order.id);
+    }
+  } catch (error) {
+    console.error("ERRO AO BUSCAR ITENS PARA COMISSÃO DO PEDIDO:", error);
+  }
+
+  if (!items.length) {
+    const commissionBase = getCommissionBaseFromOrder(order);
+    const sellerCommissionAmount = roundMoney((commissionBase * fallbackSellerRate) / 100);
+    const recruitmentCommissionAmount = roundMoney((commissionBase * fallbackRecruitmentRate) / 100);
+
+    return {
+      commissionBase,
+      sellerRate: fallbackSellerRate,
+      sellerCommissionAmount,
+      recruitmentRate: fallbackRecruitmentRate,
+      recruitmentCommissionAmount,
+    };
+  }
+
+  const pricingMap = await fetchProductPricingMap(items.map((item) => item.product_id));
+
+  return calculateCommissionPolicyFromCartItems({
+    items,
+    discountAmount: order.discount_amount || 0,
+    fallbackSellerRate,
+    fallbackRecruitmentRate,
+    pricingMap,
+  });
+}
+
 
 function slugify(text) {
   return String(text || "")
@@ -491,7 +670,7 @@ async function findActiveAffiliateByRef(refCode) {
   }
 
   const url = new URL(`${env.supabaseUrl}/rest/v1/affiliates`);
-  url.searchParams.set("select", "id,email,ref_code,status");
+  url.searchParams.set("select", "id,email,full_name,ref_code,coupon_code,status,commission_rate,recruitment_commission_rate");
   url.searchParams.set("ref_code", `eq.${cleanRefCode}`);
   url.searchParams.set("status", "eq.active");
   url.searchParams.set("limit", "1");
@@ -601,7 +780,7 @@ async function findAffiliateById(affiliateId) {
   return data[0];
 }
 
-async function createRecruitmentBonusForPaidOrder(order, recruitedAffiliate, orderTotal) {
+async function createRecruitmentBonusForPaidOrder(order, recruitedAffiliate, commissionPolicy = null) {
   if (!order?.id || !recruitedAffiliate?.id) {
     return {
       created: false,
@@ -648,7 +827,9 @@ async function createRecruitmentBonusForPaidOrder(order, recruitedAffiliate, ord
     };
   }
 
-  const safeOrderTotal = Number(orderTotal || order.total_amount || 0) || 0;
+  const safeOrderTotal = roundMoney(
+    Number(commissionPolicy?.commissionBase ?? getCommissionBaseFromOrder(order)) || 0
+  );
 
   if (safeOrderTotal <= 0) {
     return {
@@ -658,10 +839,13 @@ async function createRecruitmentBonusForPaidOrder(order, recruitedAffiliate, ord
     };
   }
 
-  const recruitmentCommissionRate = getRecruitmentCommissionRate(recruiterAffiliate);
+  const recruitmentCommissionRate = normalizePercentValue(
+    commissionPolicy?.recruitmentRate ?? getRecruitmentCommissionRate(recruiterAffiliate)
+  );
 
-  const recruitmentCommissionAmount = Number(
-    ((safeOrderTotal * recruitmentCommissionRate) / 100).toFixed(2)
+  const recruitmentCommissionAmount = roundMoney(
+    commissionPolicy?.recruitmentCommissionAmount ??
+      ((safeOrderTotal * recruitmentCommissionRate) / 100)
   );
 
   if (recruitmentCommissionRate <= 0 || recruitmentCommissionAmount <= 0) {
@@ -723,6 +907,12 @@ async function createRecruitmentBonusForPaidOrder(order, recruitedAffiliate, ord
       order_id: order.id,
       order_number: order.order_number || "",
       order_total: safeOrderTotal,
+      commission_base: safeOrderTotal,
+      subtotal: roundMoney(order.subtotal || 0),
+      shipping_amount: roundMoney(order.shipping_amount || 0),
+      discount_amount: roundMoney(order.discount_amount || 0),
+      payment_total: roundMoney(order.total_amount || 0),
+      freight_excluded_from_commission: true,
       recruitment_commission_rate: recruitmentCommissionRate,
       recruitment_commission_amount: recruitmentCommissionAmount,
       recruiter_affiliate_id: recruiterAffiliate.id,
@@ -731,7 +921,7 @@ async function createRecruitmentBonusForPaidOrder(order, recruitedAffiliate, ord
       recruited_affiliate_email: recruitedAffiliate.email || "",
       recruited_affiliate_ref_code: recruitedAffiliate.ref_code || ""
     },
-    notes: `Comissão de recrutamento de ${recruitmentCommissionRate}% criada automaticamente pelo pedido ${order.order_number || order.id}, venda feita pelo afiliado ${recruitedAffiliate.full_name || recruitedAffiliate.ref_code || recruitedAffiliate.id}.`
+    notes: `Comissão de recrutamento de ${recruitmentCommissionRate}% criada automaticamente pelo pedido ${order.order_number || order.id}, venda feita pelo afiliado ${recruitedAffiliate.full_name || recruitedAffiliate.ref_code || recruitedAffiliate.id}. Frete não incluído na base da comissão.`
   };
 
   const createResponse = await fetch(`${env.supabaseUrl}/rest/v1/affiliate_conversions`, {
@@ -800,8 +990,9 @@ async function createAffiliateConversionForPaidOrder(order) {
     };
   }
 
-  const orderTotal = Number(order.total_amount || 0) || 0;
   const sellerAffiliate = await findAffiliateById(order.affiliate_id);
+  const commissionPolicy = await calculateCommissionPolicyForOrder(order, sellerAffiliate);
+  const orderTotal = commissionPolicy.commissionBase;
 
   const checkUrl = new URL(`${env.supabaseUrl}/rest/v1/affiliate_conversions`);
   checkUrl.searchParams.set("select", "id");
@@ -825,7 +1016,7 @@ async function createAffiliateConversionForPaidOrder(order) {
     const recruitmentBonusResult = await createRecruitmentBonusForPaidOrder(
       order,
       sellerAffiliate,
-      orderTotal
+      commissionPolicy
     );
 
     return {
@@ -837,15 +1028,8 @@ async function createAffiliateConversionForPaidOrder(order) {
     };
   }
 
-  let commissionRate = Number(order.affiliate_commission_rate || 0) || 0;
-
-  if (commissionRate <= 0 && sellerAffiliate?.commission_rate) {
-    commissionRate = Number(sellerAffiliate.commission_rate || 0) || 0;
-  }
-
-  const commissionAmount = Number(
-    ((orderTotal * commissionRate) / 100).toFixed(2)
-  );
+  const commissionRate = normalizePercentValue(commissionPolicy.sellerRate);
+  const commissionAmount = roundMoney(commissionPolicy.sellerCommissionAmount);
 
   if (commissionRate <= 0 || commissionAmount <= 0) {
     return {
@@ -868,7 +1052,16 @@ async function createAffiliateConversionForPaidOrder(order) {
     status: "approved",
     approved_at: new Date().toISOString(),
     released_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
-    notes: `Comissão criada automaticamente pelo pedido ${order.order_number || order.id}.`
+    metadata: {
+      source: "affiliate_sale_commission",
+      commission_base: orderTotal,
+      subtotal: roundMoney(order.subtotal || 0),
+      shipping_amount: roundMoney(order.shipping_amount || 0),
+      discount_amount: roundMoney(order.discount_amount || 0),
+      payment_total: roundMoney(order.total_amount || 0),
+      freight_excluded_from_commission: true,
+    },
+    notes: `Comissão criada automaticamente pelo pedido ${order.order_number || order.id}. Frete não incluído na base da comissão.`
   };
 
   const createResponse = await fetch(`${env.supabaseUrl}/rest/v1/affiliate_conversions`, {
@@ -927,7 +1120,7 @@ async function createAffiliateConversionForPaidOrder(order) {
   const recruitmentBonusResult = await createRecruitmentBonusForPaidOrder(
     order,
     sellerAffiliate,
-    orderTotal
+    commissionPolicy
   );
 
   return {
@@ -2606,6 +2799,17 @@ router.post("/orders", async (req, res) => {
 
     const totalAmount = subtotal + shippingAmount - discountAmount;
 
+    const productPricingMap = await fetchProductPricingMap(
+      normalizedItems.map((item) => item.product.id)
+    );
+    const orderCommissionPolicy = calculateCommissionPolicyFromCartItems({
+      items: normalizedItems,
+      discountAmount,
+      fallbackSellerRate: affiliate?.commission_rate || 0,
+      fallbackRecruitmentRate: getRecruitmentCommissionRate(affiliate || {}),
+      pricingMap: productPricingMap,
+    });
+
 
 
     await findOrCreateCustomer(customer);
@@ -2638,11 +2842,11 @@ router.post("/orders", async (req, res) => {
       affiliate_id: affiliate?.id || null,
       affiliate_ref_code: affiliate?.ref_code || affiliateRef || "",
       affiliate_coupon_code: affiliate?.coupon_code || "",
-      affiliate_commission_rate: affiliate?.commission_rate
-        ? Number(affiliate.commission_rate)
+      affiliate_commission_rate: affiliate?.id
+        ? orderCommissionPolicy.sellerRate
         : null,
-      affiliate_commission_amount: affiliate?.commission_rate
-        ? Number(((totalAmount * Number(affiliate.commission_rate || 0)) / 100).toFixed(2))
+      affiliate_commission_amount: affiliate?.id
+        ? orderCommissionPolicy.sellerCommissionAmount
         : null,
 
       payment_status: "pending",
