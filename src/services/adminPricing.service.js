@@ -754,6 +754,43 @@ function calculatePricing(input, goalLevels = [], product = null) {
     currentProductPrice,
   });
 
+  const goalRequiredPrices = Array.isArray(goalAnalysis?.levels)
+    ? goalAnalysis.levels
+        .map((level) => roundMoney(level?.required_price_default || 0))
+        .filter((value) => value > 0)
+    : [];
+
+  const allGoalsSafePrice = roundMoney(
+    Math.max(
+      suggestedPrice || 0,
+      priceWithDefaultCommission || 0,
+      safePrice || 0,
+      ...goalRequiredPrices
+    )
+  );
+
+  const allGoalsSafeProfitData = calculateProfitForPrice({
+    price: allGoalsSafePrice,
+    baseCost,
+    gatewayFeePercent,
+    taxPercent,
+    commissionPercent: affiliateCommissionPercent,
+    networkCommissionPercent,
+    fixedAffiliateCost: goalBonusPerSale,
+  });
+
+  const currentPriceForGoalGap = currentProductPrice > 0 ? currentProductPrice : 0;
+  const allGoalsSafeGapValue = roundMoney(
+    Math.max(allGoalsSafePrice - currentPriceForGoalGap, 0)
+  );
+
+  const allGoalsSafeStatus = allGoalsSafeGapValue <= 0 ? "healthy" : "attention";
+  const allGoalsSafeMessage = goalRequiredPrices.length
+    ? allGoalsSafeStatus === "healthy"
+      ? "O preço atual já suporta todas as metas ativas, comissão padrão, comissão de rede e margem mínima."
+      : "O preço atual não suporta todas as metas ativas. Use o preço seguro sugerido para cobrir bônus de meta, comissão padrão, comissão de rede e margem mínima."
+    : "Nenhuma meta ativa foi encontrada. O preço seguro considera comissão padrão, comissão de rede e margem mínima.";
+
   const risk = buildRiskStatus({
     suggestedPrice,
     priceWithMaxCommission,
@@ -798,6 +835,12 @@ function calculatePricing(input, goalLevels = [], product = null) {
     worst_goal_level_name: goalAnalysis.worst_level?.name || null,
     worst_goal_bonus_per_sale: roundMoney(goalAnalysis.worst_bonus_per_sale || 0),
     goal_analysis: goalAnalysis,
+    all_goals_safe_price: roundMoney(allGoalsSafePrice),
+    all_goals_safe_gap_value: roundMoney(allGoalsSafeGapValue),
+    all_goals_safe_status: allGoalsSafeStatus,
+    all_goals_safe_message: allGoalsSafeMessage,
+    all_goals_safe_profit: roundMoney(allGoalsSafeProfitData.profit),
+    all_goals_safe_margin_percent: roundMoney(allGoalsSafeProfitData.margin_percent),
 
     cost_total: roundMoney(baseCost),
     minimum_price: roundMoney(minimumPrice),
@@ -866,6 +909,12 @@ function stripTransientPricingFields(pricing = {}) {
     safe_commission_protected_cost_total,
     safe_commission_available_before_direct,
     minimum_company_profit_value,
+    all_goals_safe_price,
+    all_goals_safe_gap_value,
+    all_goals_safe_status,
+    all_goals_safe_message,
+    all_goals_safe_profit,
+    all_goals_safe_margin_percent,
     ...persistablePricing
   } = pricing || {};
 
