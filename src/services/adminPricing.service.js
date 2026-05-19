@@ -563,21 +563,19 @@ function calculatePricing(input, goalLevels = [], product = null) {
     getAutoPercent(input.affiliate_commission_percent, 10)
   );
 
-  const maxAffiliateCommissionPercent = normalizePercent(
-    getAutoPercent(input.max_affiliate_commission_percent, 50)
-  );
+  // A precificação agora trabalha somente com 2 comissões:
+  // 1) comissão padrão do afiliado vendedor; 2) comissão de rede/recrutamento.
+  // Mantemos os campos de máxima/especial por compatibilidade com histórico e banco,
+  // mas eles seguem sempre a comissão padrão para evitar simulações confusas.
+  const maxAffiliateCommissionPercent = affiliateCommissionPercent;
 
-  const specialAffiliateCommissionPercent = normalizePercent(
-    getAutoPercent(input.special_affiliate_commission_percent, 50)
-  );
+  const specialAffiliateCommissionPercent = affiliateCommissionPercent;
 
   const minimumCompanyMarginPercent = normalizePercent(
     getAutoPercent(input.minimum_company_margin_percent, 15)
   );
 
-  const commissionScenarioPercent = normalizePercent(
-    getAutoPercent(input.commission_scenario_percent, 50)
-  );
+  const commissionScenarioPercent = affiliateCommissionPercent;
 
   const networkCommissionPercent = normalizePercent(
     input.network_commission_percent ?? input.recruitment_commission_rate ?? input.networkCommissionPercent ?? 0
