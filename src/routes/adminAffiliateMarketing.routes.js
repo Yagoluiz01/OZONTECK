@@ -313,6 +313,9 @@ router.post('/messages', async (req, res) => {
       channel,
       message_text,
       cta_text,
+      media_type,
+      media_url,
+      media_thumbnail_url,
       sort_order,
       is_featured,
       is_active
@@ -332,6 +335,9 @@ router.post('/messages', async (req, res) => {
       channel,
       message_text,
       cta_text: cta_text || null,
+      media_type: media_type || null,
+      media_url: media_url || null,
+      media_thumbnail_url: media_thumbnail_url || null,
       sort_order: toInteger(sort_order, 0),
       is_featured: toBoolean(is_featured, false),
       is_active: toBoolean(is_active, true)
@@ -367,6 +373,9 @@ router.put('/messages/:id', async (req, res) => {
       'channel',
       'message_text',
       'cta_text',
+      'media_type',
+      'media_url',
+      'media_thumbnail_url',
       'sort_order',
       'is_featured',
       'is_active'
@@ -652,7 +661,7 @@ function sanitizeFileName(fileName = 'arquivo') {
 }
 
 function sanitizeFolder(folder = 'assets') {
-  const allowedFolders = ['assets', 'trainings', 'thumbnails'];
+  const allowedFolders = ['assets', 'messages', 'trainings', 'thumbnails'];
 
   if (allowedFolders.includes(folder)) {
     return folder;
