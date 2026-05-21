@@ -10,6 +10,15 @@ const SUPABASE_SERVICE_ROLE_KEY =
   process.env.SUPABASE_SERVICE_ROLE_KEY ||
   process.env.SUPABASE_SERVICE_KEY;
 
+const SIMPLES_ANEXO_I_TABLE = [
+  { limit: 180000, rate: 4, deduction: 0 },
+  { limit: 360000, rate: 7.3, deduction: 5940 },
+  { limit: 720000, rate: 9.5, deduction: 13860 },
+  { limit: 1800000, rate: 10.7, deduction: 22500 },
+  { limit: 3600000, rate: 14.3, deduction: 87300 },
+  { limit: 4800000, rate: 19, deduction: 378000 },
+];
+
 function ensureSupabaseConfig() {
   if (!SUPABASE_URL) {
     throw new Error("SUPABASE_URL não configurado.");
@@ -57,6 +66,75 @@ function normalizePercent(value) {
   if (percent > 100) return 100;
 
   return percent;
+}
+
+
+function calculateSimplesAnexoIEffectiveTax(revenue12mInput) {
+  const revenue12m = toNumber(revenue12mInput, 0);
+
+  if (revenue12m <= 0) {
+    return {
+      effective_percent: 4,
+      nominal_percent: 4,
+      deduction: 0,
+      revenue_12m: 0,
+      bracket_label: "1ª faixa • até R$ 180 mil",
+      warning: "Sem faturamento informado, foi usada a primeira faixa do Simples Nacional Comércio como estimativa inicial.",
+    };
+  }
+
+  const bracketIndex = SIMPLES_ANEXO_I_TABLE.findIndex((item) => revenue12m <= item.limit);
+  const bracket = bracketIndex >= 0
+    ? SIMPLES_ANEXO_I_TABLE[bracketIndex]
+    : SIMPLES_ANEXO_I_TABLE[SIMPLES_ANEXO_I_TABLE.length - 1];
+
+  const effectivePercent = ((revenue12m * (bracket.rate / 100) - bracket.deduction) / revenue12m) * 100;
+  const safeEffectivePercent = normalizePercent(effectivePercent);
+
+  return {
+    effective_percent: roundMoney(safeEffectivePercent),
+    nominal_percent: roundMoney(bracket.rate),
+    deduction: roundMoney(bracket.deduction),
+    revenue_12m: roundMoney(revenue12m),
+    bracket_label: `${bracketIndex >= 0 ? bracketIndex + 1 : 6}ª faixa • até ${formatCurrencyBRL(bracket.limit)}`,
+    warning: revenue12m > 4800000
+      ? "Receita acima do limite anual do Simples Nacional. Confirme com o contador antes de usar na precificação."
+      : null,
+  };
+}
+
+function resolveTaxPercent(input = {}) {
+  const manualTaxPercent = normalizePercent(input.tax_percent);
+
+  if (manualTaxPercent > 0) {
+    return {
+      tax_percent: manualTaxPercent,
+      source: "manual",
+      automation: null,
+    };
+  }
+
+  const automationEnabled = normalizeBoolean(input.tax_automation_enabled ?? input.auto_tax_enabled, false);
+  const regime = String(input.tax_regime || "").trim().toLowerCase();
+  const annex = String(input.tax_annex || "").trim().toLowerCase();
+
+  const isSimplesMe = automationEnabled && (!regime || regime.includes("simples") || regime.includes("me"));
+  const isAnexoI = !annex || annex.includes("anexo_i") || annex.includes("comercio") || annex.includes("comércio");
+
+  if (isSimplesMe && isAnexoI) {
+    const automation = calculateSimplesAnexoIEffectiveTax(input.tax_revenue_12m ?? input.revenue_12m);
+    return {
+      tax_percent: automation.effective_percent,
+      source: "simples_anexo_i_auto",
+      automation,
+    };
+  }
+
+  return {
+    tax_percent: 0,
+    source: "none",
+    automation: null,
+  };
 }
 
 function normalizeBoolean(value, fallback = true) {
@@ -472,7 +550,7 @@ function buildRiskStatus({
     return {
       status: "danger",
       risk_message:
-        "A comissão máxima informada é muito alta para a margem atual. Aumente o preço, reduza custos ou reduza comissão.",
+        "A comissão padrão informada é muito alta para a margem atual. Aumente o preço, reduza custos ou reduza a comissão.",
     };
   }
 
@@ -480,7 +558,7 @@ function buildRiskStatus({
     return {
       status: "loss",
       risk_message:
-        "Com a comissão máxima, este produto pode dar prejuízo. Não aplique comissão especial sem revisar o preço.",
+        "Com a comissão padrão, este produto pode dar prejuízo. Revise o preço, os custos ou a comissão antes de liberar para afiliados.",
     };
   }
 
@@ -488,17 +566,10 @@ function buildRiskStatus({
     return {
       status: "attention",
       risk_message:
-        "Com a comissão máxima, a margem da empresa fica abaixo do mínimo definido.",
+        "Com a comissão padrão, a margem da empresa fica abaixo do mínimo definido.",
     };
   }
 
-  if (specialAffiliateCommissionPercent > maxAffiliateCommissionPercent) {
-    return {
-      status: "attention",
-      risk_message:
-        "A comissão especial está maior que a comissão máxima segura definida para este produto.",
-    };
-  }
 
   return {
     status: "healthy",
@@ -629,7 +700,8 @@ function calculatePricing(input, goalLevels = [], product = null) {
   const packagingCost = roundMoney(input.packaging_cost);
   const trafficCost = roundMoney(input.traffic_cost);
   const gatewayFeePercent = normalizePercent(input.gateway_fee_percent);
-  const taxPercent = normalizePercent(input.tax_percent);
+  const taxResolution = resolveTaxPercent(input);
+  const taxPercent = taxResolution.tax_percent;
   const otherCosts = roundMoney(input.other_costs);
   const desiredMarginPercent = normalizePercent(input.desired_margin_percent);
   const averageShippingCost = roundMoney(input.average_shipping_cost);
@@ -822,7 +894,7 @@ function calculatePricing(input, goalLevels = [], product = null) {
     safeCommissionStatus === "healthy"
       ? "A comissão atual está segura no preço atual do produto, mantendo a margem mínima da empresa."
       : safeCommissionAnalysis.safe_commission_percent > 0
-        ? "A comissão atual passa do limite seguro no preço atual. Use a comissão sugerida ou aumente o preço antes de liberar uma comissão maior."
+        ? "A comissão padrão passa do limite seguro no preço atual. Use a comissão sugerida ou aumente o preço antes de manter essa comissão para todos os afiliados."
         : "O preço atual não suporta comissão direta mantendo custos, comissão de rede, bônus de meta e margem mínima. Revise custos, margem ou preço.";
 
   const goalAnalysis = buildGoalAnalysisForPricing({
@@ -976,6 +1048,8 @@ function calculatePricing(input, goalLevels = [], product = null) {
     traffic_cost: roundMoney(trafficCost),
     gateway_fee_percent: roundMoney(gatewayFeePercent),
     tax_percent: roundMoney(taxPercent),
+    tax_percent_source: taxResolution.source,
+    tax_automation: taxResolution.automation,
     other_costs: roundMoney(otherCosts),
     average_shipping_cost: roundMoney(averageShippingCost),
     shipping_policy: shippingPolicy,
@@ -1083,6 +1157,8 @@ function calculatePricing(input, goalLevels = [], product = null) {
 
 function stripTransientPricingFields(pricing = {}) {
   const {
+    tax_percent_source,
+    tax_automation,
     current_product_price,
     safe_commission_reference_price,
     safe_affiliate_commission_percent,
