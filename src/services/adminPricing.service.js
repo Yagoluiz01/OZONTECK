@@ -136,6 +136,82 @@ function buildGoalLevelsAnalysis(levelRows = []) {
   };
 }
 
+
+function resolveManualGoalBonusPerSale(input = {}) {
+  const explicitPerSale = roundMoney(
+    input.goal_bonus_per_sale ??
+      input.goalBonusPerSale ??
+      input.bonus_per_sale ??
+      input.bonusPerSale ??
+      0
+  );
+
+  if (explicitPerSale > 0) {
+    return {
+      value: explicitPerSale,
+      source: "manual_per_sale",
+      total_bonus_amount: 0,
+      required_conversions: 0,
+      warning: null,
+    };
+  }
+
+  const totalBonusAmount = roundMoney(
+    input.goal_bonus_amount ??
+      input.goalBonusAmount ??
+      input.goal_bonus_value ??
+      input.goalBonusValue ??
+      input.bonus_amount ??
+      input.bonusAmount ??
+      0
+  );
+
+  const requiredConversions = Math.trunc(
+    toNumber(
+      input.goal_required_conversions ??
+        input.goalRequiredConversions ??
+        input.required_conversions ??
+        input.requiredConversions ??
+        input.minimum_sales ??
+        input.minimumSales ??
+        input.sales_required ??
+        input.salesRequired ??
+        0,
+      0
+    )
+  );
+
+  if (totalBonusAmount > 0 && requiredConversions > 0) {
+    return {
+      value: roundMoney(totalBonusAmount / requiredConversions),
+      source: "manual_total_divided_by_goal",
+      total_bonus_amount: totalBonusAmount,
+      required_conversions: requiredConversions,
+      warning: null,
+    };
+  }
+
+  if (totalBonusAmount > 0) {
+    return {
+      value: 0,
+      source: "manual_total_ignored_without_goal",
+      total_bonus_amount: totalBonusAmount,
+      required_conversions: 0,
+      warning:
+        "Bônus total de meta informado sem quantidade mínima de vendas. Para evitar encarecer uma unidade, esse valor não foi embutido como custo unitário.",
+    };
+  }
+
+  return {
+    value: 0,
+    source: "none",
+    total_bonus_amount: 0,
+    required_conversions: 0,
+    warning: null,
+  };
+}
+
+
 function sumAffiliatePercent({ directCommissionPercent = 0, networkCommissionPercent = 0 } = {}) {
   return Math.min(
     normalizePercent(directCommissionPercent) + normalizePercent(networkCommissionPercent),
@@ -581,9 +657,8 @@ function calculatePricing(input, goalLevels = [], product = null) {
     input.network_commission_percent ?? input.recruitment_commission_rate ?? input.networkCommissionPercent ?? 0
   );
 
-  const manualGoalBonusPerSale = roundMoney(
-    input.goal_bonus_per_sale ?? input.goal_bonus_value ?? input.goalBonusPerSale ?? 0
-  );
+  const manualGoalBonusResolution = resolveManualGoalBonusPerSale(input);
+  const manualGoalBonusPerSale = roundMoney(manualGoalBonusResolution.value || 0);
 
   const goalLevelsBase = buildGoalLevelsAnalysis(goalLevels);
   const automaticGoalBonusPerSale = roundMoney(goalLevelsBase.worst_bonus_per_sale || 0);
@@ -591,7 +666,17 @@ function calculatePricing(input, goalLevels = [], product = null) {
     ? manualGoalBonusPerSale
     : automaticGoalBonusPerSale;
 
-  const selectedGoalLevel = goalLevelsBase.worst_level || null;
+  const selectedGoalLevel = manualGoalBonusPerSale > 0
+    ? {
+        name: manualGoalBonusResolution.source === "manual_total_divided_by_goal"
+          ? "Meta manual"
+          : "Bônus manual por venda",
+        level_order: null,
+        accumulated_bonus_amount: manualGoalBonusResolution.total_bonus_amount || manualGoalBonusPerSale,
+        required_conversions: manualGoalBonusResolution.required_conversions || 1,
+        bonus_per_sale: manualGoalBonusPerSale,
+      }
+    : goalLevelsBase.worst_level || null;
 
   const baseCost = roundMoney(
     costPrice + packagingCost + trafficCost + otherCosts
@@ -903,7 +988,17 @@ function calculatePricing(input, goalLevels = [], product = null) {
     commission_scenario_percent: roundMoney(commissionScenarioPercent),
     network_commission_percent: roundMoney(networkCommissionPercent),
 
-    goal_pricing_mode: goalLevels?.length ? "auto_worst_goal_per_sale" : "no_active_goal",
+    goal_pricing_mode: manualGoalBonusPerSale > 0
+      ? manualGoalBonusResolution.source
+      : goalLevels?.length
+        ? "auto_worst_goal_per_sale"
+        : "no_active_goal",
+    goal_bonus_source: manualGoalBonusPerSale > 0
+      ? manualGoalBonusResolution.source
+      : goalLevels?.length
+        ? "affiliate_levels"
+        : "none",
+    goal_bonus_warning: manualGoalBonusResolution.warning,
     goal_bonus_amount: roundMoney(selectedGoalLevel?.accumulated_bonus_amount || 0),
     goal_required_conversions: Math.trunc(toNumber(selectedGoalLevel?.required_conversions || 0, 0)),
     goal_bonus_per_sale: roundMoney(goalBonusPerSale),
@@ -1279,10 +1374,22 @@ export async function calculateProductPricing(payload) {
     throw new Error("product_id é obrigatório.");
   }
 
-  const [goalLevels, product] = await Promise.all([
-    listAffiliateLevelsForPricing(),
+  const payloadGoalLevels = Array.isArray(payload.affiliate_goal_levels)
+    ? payload.affiliate_goal_levels
+    : Array.isArray(payload.goal_levels)
+      ? payload.goal_levels
+      : [];
+
+  const [databaseGoalLevels, product] = await Promise.all([
+    payloadGoalLevels.length ? Promise.resolve([]) : listAffiliateLevelsForPricing(),
     getProductById(productId).catch(() => null),
   ]);
+
+  // A aba de Metas e Bônus conversa com a Precificação de duas formas:
+  // 1) pelo banco affiliate_levels, quando a API busca sozinha;
+  // 2) pelo payload affiliate_goal_levels/goal_levels, quando o admin já carregou as metas.
+  // O payload tem prioridade para refletir imediatamente o que está ativo no admin.
+  const goalLevels = payloadGoalLevels.length ? payloadGoalLevels : databaseGoalLevels;
 
   const pricing = calculatePricing(payload, goalLevels, product);
 

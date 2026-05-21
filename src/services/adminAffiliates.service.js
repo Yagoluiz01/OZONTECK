@@ -1711,7 +1711,8 @@ function normalizeAffiliateLevelPayload(input = {}, { partial = false } = {}) {
     payload.is_active = Boolean(input.is_active ?? input.isActive);
   }
 
-  payload.updated_at = new Date().toISOString();
+  // A tabela affiliate_levels do Supabase deste projeto não possui a coluna updated_at.
+  // Não envie updated_at aqui para evitar erro 400 ao criar/editar metas.
   return payload;
 }
 
