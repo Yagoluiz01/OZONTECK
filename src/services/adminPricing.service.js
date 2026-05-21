@@ -343,6 +343,16 @@ function normalizeInstallments(value) {
   return installments;
 }
 
+function normalizeInstallmentInterestPolicy(value) {
+  const policy = String(value || "customer_pays").trim().toLowerCase();
+
+  if (["merchant_absorbs", "store_absorbs", "absorver", "loja_absorve"].includes(policy)) {
+    return "merchant_absorbs";
+  }
+
+  return "customer_pays";
+}
+
 async function supabaseFetch(path, options = {}) {
   ensureSupabaseConfig();
 
@@ -1053,6 +1063,9 @@ function calculatePricing(input, goalLevels = [], product = null) {
     other_costs: roundMoney(otherCosts),
     average_shipping_cost: roundMoney(averageShippingCost),
     shipping_policy: shippingPolicy,
+    installment_interest_policy: normalizeInstallmentInterestPolicy(
+      input.installment_interest_policy || input.payment_interest_policy
+    ),
     desired_margin_percent: roundMoney(desiredMarginPercent),
 
     affiliate_commission_percent: roundMoney(affiliateCommissionPercent),
@@ -1159,6 +1172,8 @@ function stripTransientPricingFields(pricing = {}) {
   const {
     tax_percent_source,
     tax_automation,
+    installment_interest_policy,
+    payment_interest_policy,
     current_product_price,
     safe_commission_reference_price,
     safe_affiliate_commission_percent,
@@ -1549,6 +1564,23 @@ function resolveInstallmentCount(pricing = {}) {
 
 function buildProductPricingPatch(suggestedPrice, pricing = {}) {
   const installmentCount = resolveInstallmentCount(pricing);
+  const interestPolicy = normalizeInstallmentInterestPolicy(
+    pricing.installment_interest_policy || pricing.payment_interest_policy
+  );
+
+  if (interestPolicy === "customer_pays") {
+    return {
+      price: suggestedPrice,
+      installment_count: installmentCount,
+      installment_value: null,
+      installment_label: "Parcelamento com juros no Mercado Pago",
+      payment_method_simulated: "credit_card_customer_interest",
+      payment_fee_value: null,
+      payment_net_value: null,
+      pricing_updated_at: new Date().toISOString(),
+    };
+  }
+
   const installmentValue = roundMoney(
     pricing.installment_value ||
       pricing.installmentValue ||
@@ -1647,7 +1679,10 @@ export async function applySuggestedPriceToProduct(productId, payload = {}) {
     headers: {
       Prefer: "return=representation",
     },
-    body: JSON.stringify(buildProductPricingPatch(suggestedPrice, pricing)),
+    body: JSON.stringify(buildProductPricingPatch(suggestedPrice, {
+      ...pricing,
+      ...(payload || {}),
+    })),
   });
 
   const product = updatedProduct?.[0] || null;
