@@ -806,10 +806,9 @@ function calculatePricing(input, goalLevels = [], product = null) {
       0
   );
 
-  const suggestedPrice =
-    manualSuggestedPrice > calculatedSuggestedPrice
-      ? manualSuggestedPrice
-      : calculatedSuggestedPrice;
+  let suggestedPrice = manualSuggestedPrice > 0
+    ? manualSuggestedPrice
+    : calculatedSuggestedPrice;
 
   const priceWithMaxCommission = calculatePriceForCommission({
     baseCost,
@@ -861,7 +860,7 @@ function calculatePricing(input, goalLevels = [], product = null) {
     fixedAffiliateCost: goalBonusPerSale,
   });
 
-  const suggestedProfitData = calculateProfitForPrice({
+  let suggestedProfitData = calculateProfitForPrice({
     price: suggestedPrice,
     baseCost,
     gatewayFeePercent,
@@ -927,14 +926,32 @@ function calculatePricing(input, goalLevels = [], product = null) {
         .filter((value) => value > 0)
     : [];
 
-  const allGoalsSafePrice = roundMoney(
+  const lowestSafePrice = roundMoney(
     Math.max(
-      suggestedPrice || 0,
-      priceWithDefaultCommission || 0,
-      safePrice || 0,
+      minimumPrice || 0,
+      priceWithMaxCommission || 0,
+      priceWithSpecialCommission || 0,
       ...goalRequiredPrices
     )
   );
+
+  suggestedPrice = roundMoney(
+    manualSuggestedPrice > 0
+      ? Math.max(manualSuggestedPrice, lowestSafePrice || 0)
+      : Math.max(suggestedPrice || 0, lowestSafePrice || 0)
+  );
+
+  suggestedProfitData = calculateProfitForPrice({
+    price: suggestedPrice,
+    baseCost,
+    gatewayFeePercent,
+    taxPercent,
+    commissionPercent: affiliateCommissionPercent,
+    networkCommissionPercent,
+    fixedAffiliateCost: goalBonusPerSale,
+  });
+
+  const allGoalsSafePrice = lowestSafePrice;
 
   const allGoalsSafeProfitData = calculateProfitForPrice({
     price: allGoalsSafePrice,
@@ -1096,6 +1113,8 @@ function calculatePricing(input, goalLevels = [], product = null) {
     worst_goal_level_name: goalAnalysis.worst_level?.name || null,
     worst_goal_bonus_per_sale: roundMoney(goalAnalysis.worst_bonus_per_sale || 0),
     goal_analysis: goalAnalysis,
+    lowest_safe_price: roundMoney(lowestSafePrice),
+    lowest_safe_price_message: "Menor preço seguro que cobre custos, taxas, comissão padrão, comissão de rede, bônus/metas e margem mínima.",
     all_goals_safe_price: roundMoney(allGoalsSafePrice),
     all_goals_safe_reference_price: roundMoney(allGoalsSafeReferencePrice),
     all_goals_safe_reference_type: allGoalsSafeReferenceType,
@@ -1185,6 +1204,8 @@ function stripTransientPricingFields(pricing = {}) {
     safe_commission_protected_cost_total,
     safe_commission_available_before_direct,
     minimum_company_profit_value,
+    lowest_safe_price,
+    lowest_safe_price_message,
     all_goals_safe_price,
     all_goals_safe_reference_price,
     all_goals_safe_reference_type,
@@ -1652,9 +1673,7 @@ export async function applySuggestedPriceToProduct(productId, payload = {}) {
   }
 
   const suggestedPrice = roundMoney(
-    requestedSuggestedPrice > 0
-      ? Math.max(requestedSuggestedPrice, pricing.suggested_price || 0)
-      : pricing.suggested_price
+    pricing.suggested_price || requestedSuggestedPrice || 0
   );
 
   if (!suggestedPrice || suggestedPrice <= 0) {
