@@ -76,6 +76,12 @@ export async function me(req, res) {
 
 export async function summary(req, res) {
   try {
+    res.set({
+      "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+      Pragma: "no-cache",
+      Expires: "0",
+    });
+
     const result = await getAffiliateSummary(req.affiliateId);
 
     return res.json({
@@ -84,6 +90,7 @@ export async function summary(req, res) {
       summary: result.summary,
       level_goal: result.level_goal,
       level_bonuses: result.level_bonuses,
+      refreshed_at: new Date().toISOString(),
     });
   } catch (error) {
     return sendError(res, error);
