@@ -537,7 +537,14 @@ export async function getAffiliateSummary(affiliateId) {
     });
   }
 
-  const [conversions, payouts, goalRows, bonusRows, affiliateOrdersTableRows] = await Promise.all([
+  const [
+    conversions,
+    payouts,
+    goalRows,
+    bonusRows,
+    affiliateOrdersTableRows,
+    activeLevelRows,
+  ] = await Promise.all([
     supabaseRequest(
       `/affiliate_conversions?affiliate_id=eq.${encodeURIComponent(
         affiliateId
@@ -559,6 +566,9 @@ export async function getAffiliateSummary(affiliateId) {
       )}&select=*&order=released_at.desc&limit=50`
     ),
     getAffiliateOrdersTableRows(affiliateId),
+    supabaseRequest(
+      `/affiliate_levels?is_active=eq.true&select=*&order=level_order.asc`
+    ),
   ]);
 
   const safeConversions = Array.isArray(conversions) ? conversions : [];
@@ -566,6 +576,7 @@ export async function getAffiliateSummary(affiliateId) {
   const safeAffiliateOrdersTableRows = Array.isArray(affiliateOrdersTableRows)
     ? affiliateOrdersTableRows
     : [];
+  const safeActiveLevels = Array.isArray(activeLevelRows) ? activeLevelRows : [];
   const goal = Array.isArray(goalRows) ? goalRows[0] : null;
   const bonuses = Array.isArray(bonusRows) ? bonusRows : [];
 
@@ -668,35 +679,62 @@ export async function getAffiliateSummary(affiliateId) {
     0
   );
 
+  const goalLevelOrder = Number(goal?.current_level_order || 1);
+  const currentLevel =
+    safeActiveLevels.find((level) => Number(level.level_order || 0) === goalLevelOrder) ||
+    safeActiveLevels.find((level) => cleanText(level.name).toLowerCase() === cleanText(goal?.current_level_name).toLowerCase()) ||
+    safeActiveLevels[0] ||
+    null;
+  const currentLevelOrder = Number(currentLevel?.level_order || goalLevelOrder || 1);
+  const nextLevel =
+    safeActiveLevels.find((level) => Number(level.level_order || 0) > currentLevelOrder) || null;
+  const paidConversions = Number(goal?.paid_conversions || 0);
+  const currentGoal = Math.max(
+    1,
+    Number(
+      currentLevel?.required_conversions ||
+        goal?.current_goal ||
+        goal?.required_conversions ||
+        3
+    )
+  );
+  const remainingToGoal = Math.max(currentGoal - paidConversions, 0);
+  const progressPercent = Math.min(
+    Math.max((paidConversions / currentGoal) * 100, 0),
+    100
+  );
+
   const level_goal = goal
     ? {
         affiliate_id: goal.affiliate_id,
-        current_level_order: Number(goal.current_level_order || 1),
-        current_level_name: goal.current_level_name || "Iniciante",
-        current_goal: Number(goal.current_goal || 3),
-        paid_conversions: Number(goal.paid_conversions || 0),
-        progress_percent: Number(goal.progress_percent || 0),
-        remaining_to_goal: Number(goal.remaining_to_goal || 0),
-        current_bonus_amount: normalizeMoney(goal.current_bonus_amount),
-        current_bonus_type: goal.current_bonus_type || "money",
-        next_level_order: goal.next_level_order || null,
-        next_level_name: goal.next_level_name || null,
+        current_level_order: currentLevelOrder,
+        current_level_name: currentLevel?.name || goal.current_level_name || "Iniciante",
+        current_goal: currentGoal,
+        paid_conversions: paidConversions,
+        progress_percent: progressPercent,
+        remaining_to_goal: remainingToGoal,
+        current_bonus_amount: normalizeMoney(
+          currentLevel?.bonus_amount ?? goal.current_bonus_amount
+        ),
+        current_bonus_type: currentLevel?.bonus_type || goal.current_bonus_type || "money",
+        next_level_order: nextLevel?.level_order || goal.next_level_order || null,
+        next_level_name: nextLevel?.name || goal.next_level_name || null,
         pending_bonus_amount: normalizeMoney(goal.pending_bonus_amount),
         paid_bonus_amount: normalizeMoney(goal.paid_bonus_amount),
         total_bonus_amount: normalizeMoney(goal.total_bonus_amount),
       }
     : {
         affiliate_id: affiliateId,
-        current_level_order: 1,
-        current_level_name: "Iniciante",
-        current_goal: 3,
+        current_level_order: currentLevelOrder,
+        current_level_name: currentLevel?.name || "Iniciante",
+        current_goal: currentGoal,
         paid_conversions: 0,
         progress_percent: 0,
-        remaining_to_goal: 3,
-        current_bonus_amount: 20,
-        current_bonus_type: "money",
-        next_level_order: 2,
-        next_level_name: "Bronze",
+        remaining_to_goal: currentGoal,
+        current_bonus_amount: normalizeMoney(currentLevel?.bonus_amount ?? 20),
+        current_bonus_type: currentLevel?.bonus_type || "money",
+        next_level_order: nextLevel?.level_order || null,
+        next_level_name: nextLevel?.name || null,
         pending_bonus_amount: 0,
         paid_bonus_amount: 0,
         total_bonus_amount: 0,
