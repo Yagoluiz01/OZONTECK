@@ -90,6 +90,7 @@ export async function summary(req, res) {
       summary: result.summary,
       level_goal: result.level_goal,
       level_bonuses: result.level_bonuses,
+      levels: result.levels || [],
       refreshed_at: new Date().toISOString(),
     });
   } catch (error) {

@@ -755,11 +755,27 @@ export async function getAffiliateSummary(affiliateId) {
     created_at: bonus.created_at || null,
   }));
 
+  const levels = safeActiveLevels.map((level) => ({
+    id: level.id,
+    level_order: Number(level.level_order || 0),
+    name: level.name || level.level_name || "Nível",
+    required_conversions: Math.max(
+      1,
+      Number(level.required_conversions || level.goal_sales_quantity || 1)
+    ),
+    bonus_amount: normalizeMoney(level.bonus_amount),
+    bonus_type: level.bonus_type || "money",
+    badge_color: level.badge_color || "#16d45d",
+    description: level.description || null,
+    is_active: level.is_active !== false,
+  }));
+
   return {
     affiliate,
     summary,
     level_goal,
     level_bonuses,
+    levels,
   };
 }
 
