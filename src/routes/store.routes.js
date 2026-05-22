@@ -278,6 +278,24 @@ function toNumber(value, fallback = 0) {
   return Number.isFinite(n) ? n : fallback;
 }
 
+function toBoolean(value, fallback = false) {
+  if (value === true || value === 1) return true;
+  if (value === false || value === 0) return false;
+  if (value === null || value === undefined || value === "") return fallback;
+
+  const text = String(value).trim().toLowerCase();
+
+  if (["true", "1", "yes", "sim", "on", "active", "ativo"].includes(text)) {
+    return true;
+  }
+
+  if (["false", "0", "no", "nao", "não", "off", "inactive", "inativo"].includes(text)) {
+    return false;
+  }
+
+  return fallback;
+}
+
 function onlyDigits(value) {
   return String(value || "").replace(/\D/g, "");
 }
@@ -1131,6 +1149,85 @@ async function createAffiliateConversionForPaidOrder(order) {
   };
 }
 
+
+function getPublicProductIdentity(product = {}) {
+  return String(product.id || product.slug || product.sku || product.name || "").trim();
+}
+
+function getPublicVariantGroup(product = {}) {
+  return String(product.variant_group || product.variantGroup || "").trim();
+}
+
+function isPublicKitProduct(product = {}) {
+  const variantType = String(product.variant_type || product.variantType || "").trim().toLowerCase();
+
+  if (variantType === "kit") {
+    return true;
+  }
+
+  const text = String([
+    product.name,
+    product.slug,
+    product.sku,
+    product.variant_label,
+    product.variantLabel
+  ].filter(Boolean).join(" "))
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+
+  return /\b(kit|combo|conjunto|completo)\b/.test(text);
+}
+
+function filterKitChildrenForStorefront(products = []) {
+  const groups = new Map();
+
+  products.forEach((product) => {
+    const group = getPublicVariantGroup(product);
+    if (!group) return;
+
+    const key = group
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase()
+      .trim();
+
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(product);
+  });
+
+  const visibleKitByGroup = new Map();
+
+  groups.forEach((members, group) => {
+    const kitProduct = members.find(isPublicKitProduct);
+
+    if (kitProduct) {
+      visibleKitByGroup.set(group, getPublicProductIdentity(kitProduct));
+    }
+  });
+
+  return products.filter((product) => {
+    const group = getPublicVariantGroup(product);
+
+    if (!group) {
+      return true;
+    }
+
+    const key = group
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase()
+      .trim();
+    const kitIdentity = visibleKitByGroup.get(key);
+
+    if (!kitIdentity) {
+      return true;
+    }
+
+    return getPublicProductIdentity(product) === kitIdentity;
+  });
+}
+
 function normalizeProduct(product) {
   const id = String(product?.id || "").trim();
   const name = String(product?.name || "").trim();
@@ -1177,6 +1274,21 @@ function normalizeProduct(product) {
     compare_at_price: toNumber(product?.compare_at_price, 0),
     stockQuantity: toNumber(product?.stock_quantity, 0),
     status: String(product?.status || "").trim().toLowerCase(),
+    is_active: toBoolean(product?.is_active, String(product?.status || "").trim().toLowerCase() === "active"),
+    isActive: toBoolean(product?.is_active, String(product?.status || "").trim().toLowerCase() === "active"),
+    featured: toBoolean(product?.featured ?? product?.is_featured, false),
+    show_home: toBoolean(product?.show_home ?? product?.show_on_home ?? product?.showHome ?? product?.showOnHome, false),
+    show_on_home: toBoolean(product?.show_on_home ?? product?.show_home ?? product?.showOnHome ?? product?.showHome, false),
+    showHome: toBoolean(product?.show_home ?? product?.show_on_home ?? product?.showHome ?? product?.showOnHome, false),
+    showOnHome: toBoolean(product?.show_on_home ?? product?.show_home ?? product?.showOnHome ?? product?.showHome, false),
+    variant_group: String(product?.variant_group || product?.variantGroup || "").trim(),
+    variantGroup: String(product?.variant_group || product?.variantGroup || "").trim(),
+    variant_type: String(product?.variant_type || product?.variantType || "").trim(),
+    variantType: String(product?.variant_type || product?.variantType || "").trim(),
+    variant_label: String(product?.variant_label || product?.variantLabel || "").trim(),
+    variantLabel: String(product?.variant_label || product?.variantLabel || "").trim(),
+    variant_order: toNumber(product?.variant_order ?? product?.variantOrder, 0),
+    variantOrder: toNumber(product?.variant_order ?? product?.variantOrder, 0),
     weightKg: toNumber(product?.weight_kg, 0),
     heightCm: toNumber(product?.height_cm, 0),
     widthCm: toNumber(product?.width_cm, 0),
@@ -1215,8 +1327,6 @@ function normalizeProduct(product) {
       product?.payment_net_value === null || product?.payment_net_value === undefined
         ? null
         : toNumber(product?.payment_net_value, 0),
-    show_on_home: Boolean(product?.show_on_home),
-    showOnHome: Boolean(product?.show_on_home),
     home_order: toNumber(product?.home_order, 0),
     homeOrder: toNumber(product?.home_order, 0),
     pricing_updated_at: product?.pricing_updated_at || null,
@@ -2521,13 +2631,16 @@ router.get("/products/home", async (req, res) => {
 
     const limit = Math.max(1, Math.min(24, Number(req.query.limit || 8) || 8));
 
-    const products = response.data
-      .map(normalizeProduct)
-      .filter((product) => {
-        const isActive = String(product.status || "").toLowerCase() === "active";
-        const hasStock = Number(product.stockQuantity || 0) > 0;
-        return product.id && product.name && product.showOnHome && isActive && hasStock;
-      })
+    const products = filterKitChildrenForStorefront(
+      response.data
+        .map(normalizeProduct)
+        .filter((product) => {
+          const isActive = String(product.status || "").toLowerCase() === "active";
+          const hasStock = Number(product.stockQuantity || 0) > 0;
+          return product.id && product.name && isActive && hasStock;
+        })
+    )
+      .filter((product) => product.showOnHome || product.show_on_home || product.showHome)
       .sort((a, b) => {
         const orderA = Number(a.homeOrder || 0);
         const orderB = Number(b.homeOrder || 0);
