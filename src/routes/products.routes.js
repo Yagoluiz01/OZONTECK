@@ -122,9 +122,38 @@ function sanitizeFileName(name = "arquivo") {
     .toLowerCase();
 }
 
+function parseMoneyInput(value, fallback = 0) {
+  if (value === undefined || value === null || value === "") return fallback;
+  if (typeof value === "number") return Number.isFinite(value) && value >= 0 ? value : fallback;
+
+  const raw = String(value).trim();
+  if (!raw) return fallback;
+
+  const cleaned = raw
+    .replace(/R\$/gi, "")
+    .replace(/\s+/g, "")
+    .replace(/[^0-9,.-]/g, "");
+
+  const hasComma = cleaned.includes(",");
+  const hasDot = cleaned.includes(".");
+  let normalized = cleaned;
+
+  if (hasComma) {
+    normalized = cleaned.replace(/\./g, "").replace(",", ".");
+  } else if (hasDot) {
+    const parts = cleaned.split(".");
+    const last = parts[parts.length - 1] || "";
+    normalized = parts.length > 2 || last.length === 3
+      ? cleaned.replace(/\./g, "")
+      : cleaned;
+  }
+
+  const number = Number(normalized);
+  return Number.isFinite(number) && number >= 0 ? number : fallback;
+}
+
 function parseNonNegativeNumber(value, fallback = 0) {
-  const num = Number(value);
-  return Number.isFinite(num) && num >= 0 ? num : fallback;
+  return parseMoneyInput(value, fallback);
 }
 
 function parseBoolean(value, fallback = false) {
@@ -258,14 +287,18 @@ function validateProductPayload(body) {
     height_cm,
     width_cm,
     length_cm,
+    variant_group,
+    variant_type,
+    variant_label,
+    variant_order,
   } = body;
 
   if (!name || !sku) {
     return { ok: false, message: "Nome e SKU são obrigatórios" };
   }
 
-  const parsedPrice = Number(price || 0);
-  const parsedCompareAtPriceInput = Number(compare_at_price || 0);
+  const parsedPrice = parseMoneyInput(price, 0);
+  const parsedCompareAtPriceInput = parseMoneyInput(compare_at_price, 0);
   const parsedCompareAtPrice =
     parsedPrice > 0 &&
     Number.isFinite(parsedCompareAtPriceInput) &&
@@ -274,7 +307,7 @@ function validateProductPayload(body) {
       : parsedPrice > 0
         ? Number((parsedPrice + 1).toFixed(2))
         : 0;
-  const parsedStock = Number(stock_quantity || 0);
+  const parsedStock = parseMoneyInput(stock_quantity, 0);
   const normalizedStatus = String(status || "draft").trim().toLowerCase();
 
   const parsedWeight = parseNonNegativeNumber(weight_kg, 0);
@@ -283,6 +316,11 @@ function validateProductPayload(body) {
   const parsedLength = parseNonNegativeNumber(length_cm, 0);
   const parsedShowOnHome = parseBoolean(show_on_home, false);
   const parsedHomeOrder = Math.max(0, Math.trunc(parseNonNegativeNumber(home_order, 0)));
+  const parsedVariantOrder = Math.max(0, Math.trunc(parseNonNegativeNumber(variant_order, 0)));
+  const normalizedVariantType = String(variant_type || "").trim().toLowerCase();
+  const allowedVariantType = ["", "kit", "outro", "product", "produto", "bundle", "combo"].includes(normalizedVariantType)
+    ? normalizedVariantType
+    : "outro";
 
   if (Number.isNaN(parsedPrice) || parsedPrice < 0) {
     return { ok: false, message: "Preço inválido" };
@@ -315,6 +353,10 @@ function validateProductPayload(body) {
       height_cm: parsedHeight,
       width_cm: parsedWidth,
       length_cm: parsedLength,
+      variant_group: String(variant_group || "").trim(),
+      variant_type: allowedVariantType,
+      variant_label: String(variant_label || "").trim(),
+      variant_order: parsedVariantOrder,
     },
   };
 }
@@ -414,6 +456,14 @@ router.get("/", requireAuth, async (req, res) => {
         height_cm: Number(product.height_cm || 0),
         width_cm: Number(product.width_cm || 0),
         length_cm: Number(product.length_cm || 0),
+        variant_group: product.variant_group || "",
+        variantGroup: product.variant_group || "",
+        variant_type: product.variant_type || "",
+        variantType: product.variant_type || "",
+        variant_label: product.variant_label || "",
+        variantLabel: product.variant_label || "",
+        variant_order: Number(product.variant_order || 0),
+        variantOrder: Number(product.variant_order || 0),
 
         installment_count: Number(product.installment_count || 12),
         installmentCount: Number(product.installment_count || 12),
@@ -476,6 +526,10 @@ router.post(
         height_cm,
         width_cm,
         length_cm,
+        variant_group,
+        variant_type,
+        variant_label,
+        variant_order,
       } = validation.data;
 
       const existingProduct = await getProductBySku(sku);
@@ -528,6 +582,10 @@ router.post(
         height_cm,
         width_cm,
         length_cm,
+        variant_group,
+        variant_type,
+        variant_label,
+        variant_order,
         image_url: uploadedImageUrl || "",
         image_url_2: uploadedImageUrl2 || "",
       };
@@ -628,6 +686,10 @@ router.put(
         height_cm,
         width_cm,
         length_cm,
+        variant_group,
+        variant_type,
+        variant_label,
+        variant_order,
       } = validation.data;
 
       const existingProduct = await getProductBySku(sku);
@@ -678,6 +740,10 @@ router.put(
         height_cm,
         width_cm,
         length_cm,
+        variant_group,
+        variant_type,
+        variant_label,
+        variant_order,
         image_url: finalImageUrl || "",
         image_url_2: finalImageUrl2 || "",
       };
