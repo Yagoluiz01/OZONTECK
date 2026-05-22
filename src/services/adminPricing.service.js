@@ -68,6 +68,20 @@ function normalizePercent(value) {
   return percent;
 }
 
+function normalizeBusinessPercent(value, fallback = 0, maxAllowed = 100) {
+  const percent = normalizePercent(value);
+
+  if (!Number.isFinite(percent) || percent <= 0) {
+    return normalizePercent(fallback);
+  }
+
+  if (percent > maxAllowed) {
+    return normalizePercent(fallback);
+  }
+
+  return percent;
+}
+
 
 function calculateSimplesAnexoIEffectiveTax(revenue12mInput) {
   const revenue12m = toNumber(revenue12mInput, 0);
@@ -717,8 +731,10 @@ function calculatePricing(input, goalLevels = [], product = null) {
   const averageShippingCost = roundMoney(input.average_shipping_cost);
   const shippingPolicy = input.shipping_policy || "customer_paid";
 
-  const affiliateCommissionPercent = normalizePercent(
-    getAutoPercent(input.affiliate_commission_percent, 10)
+  const affiliateCommissionPercent = normalizeBusinessPercent(
+    getAutoPercent(input.affiliate_commission_percent, 10),
+    10,
+    50
   );
 
   // A precificação agora trabalha somente com 2 comissões:
@@ -729,14 +745,18 @@ function calculatePricing(input, goalLevels = [], product = null) {
 
   const specialAffiliateCommissionPercent = affiliateCommissionPercent;
 
-  const minimumCompanyMarginPercent = normalizePercent(
-    getAutoPercent(input.minimum_company_margin_percent, 15)
+  const minimumCompanyMarginPercent = normalizeBusinessPercent(
+    getAutoPercent(input.minimum_company_margin_percent, 15),
+    15,
+    60
   );
 
   const commissionScenarioPercent = affiliateCommissionPercent;
 
-  const networkCommissionPercent = normalizePercent(
-    input.network_commission_percent ?? input.recruitment_commission_rate ?? input.networkCommissionPercent ?? 0
+  const networkCommissionPercent = normalizeBusinessPercent(
+    input.network_commission_percent ?? input.recruitment_commission_rate ?? input.networkCommissionPercent ?? 0,
+    0,
+    30
   );
 
   const manualGoalBonusResolution = resolveManualGoalBonusPerSale(input);
