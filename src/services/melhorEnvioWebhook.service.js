@@ -14,6 +14,16 @@ function normalizeStatus(value) {
     .replace(/[\u0300-\u036f]/g, "");
 }
 
+const MELHOR_ENVIO_WEBHOOK_MATCHER_VERSION = "2026-05-22-v2-shipment-ilike";
+
+function normalizeIdentifierForCompare(value) {
+  return normalizeStatus(value).replace(/\s+/g, "");
+}
+
+function escapeIlikeValue(value) {
+  return normalizeString(value).replace(/[%_]/g, "\\$&");
+}
+
 function safeObject(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
@@ -84,6 +94,7 @@ export function verifyMelhorEnvioWebhookSignature({ rawBody, signature }) {
 
 function collectWebhookIdentifiers(payload = {}) {
   const data = safeObject(payload.data);
+  const metadata = safeObject(data.metadata || payload.metadata);
   const identifiers = [];
 
   const add = (field, value, label) => {
@@ -98,42 +109,89 @@ function collectWebhookIdentifiers(payload = {}) {
 
   add("shipping_shipment_id", data.id, "data.id");
   add("shipping_shipment_id", data.protocol, "data.protocol");
+  add("shipping_shipment_id", data.order_id, "data.order_id");
+  add("shipping_shipment_id", data.shipment_id, "data.shipment_id");
+  add("shipping_shipment_id", data.cart_id, "data.cart_id");
   add("shipping_tracking_code", data.tracking, "data.tracking");
   add("tracking_code", data.tracking, "data.tracking");
+  add("shipping_tracking_code", data.tracking_code, "data.tracking_code");
+  add("tracking_code", data.tracking_code, "data.tracking_code");
   add("shipping_tracking_code", data.self_tracking, "data.self_tracking");
   add("tracking_code", data.self_tracking, "data.self_tracking");
 
+  add("order_number", data.order_number, "data.order_number");
+  add("order_number", data.external_reference, "data.external_reference");
+  add("order_number", data.reference, "data.reference");
+  add("order_number", data.ref, "data.ref");
+  add("order_number", metadata.order_number, "data.metadata.order_number");
+  add("order_number", metadata.external_reference, "data.metadata.external_reference");
+  add("order_number", payload.order_number, "payload.order_number");
+  add("order_number", payload.external_reference, "payload.external_reference");
+
+  const inspectTextForOrderNumber = (value, label) => {
+    const text = normalizeString(value);
+    if (!text) return;
+
+    const orderMatch = text.match(/(?:pedido|order)\s*#?:?\s*([A-Za-z0-9._-]+)/i);
+    if (orderMatch?.[1]) {
+      add("order_number", orderMatch[1], label);
+    }
+
+    const ozonteckOrderMatch = text.match(/\bOZT[-_][0-9]{4}[-_][0-9]+\b/i);
+    if (ozonteckOrderMatch?.[0]) {
+      add("order_number", ozonteckOrderMatch[0].replace(/_/g, "-"), label);
+    }
+  };
+
   if (Array.isArray(data.tags)) {
     for (const tagItem of data.tags) {
-      const tagValue = normalizeString(tagItem?.tag || tagItem?.value || tagItem?.name);
-      const orderMatch = tagValue.match(/(?:pedido|order)\s*#?:?\s*([A-Za-z0-9._-]+)/i);
-      if (orderMatch?.[1]) {
-        add("order_number", orderMatch[1], "data.tags.order_number");
-      }
+      inspectTextForOrderNumber(tagItem?.tag || tagItem?.value || tagItem?.name, "data.tags.order_number");
     }
   }
+
+  inspectTextForOrderNumber(data.description, "data.description");
+  inspectTextForOrderNumber(data.observation, "data.observation");
+  inspectTextForOrderNumber(data.notes, "data.notes");
+  inspectTextForOrderNumber(data.reference, "data.reference_text");
 
   return identifiers;
 }
 
 async function fetchOrderByColumn(field, value) {
-  const { data, error } = await supabaseAdmin
-    .from("orders")
-    .select("*")
-    .eq(field, value)
-    .order("created_at", { ascending: false })
-    .limit(1);
+  const cleanValue = normalizeString(value);
+  if (!cleanValue) return null;
 
-  if (error) {
-    console.warn("[MELHOR_ENVIO_WEBHOOK_FIND_ORDER_COLUMN_ERROR]", {
-      field,
-      value,
-      message: error.message,
-    });
-    return null;
-  }
+  const runQuery = async (mode) => {
+    let query = supabaseAdmin
+      .from("orders")
+      .select("*")
+      .order("created_at", { ascending: false })
+      .limit(1);
 
-  return Array.isArray(data) ? data[0] || null : null;
+    if (mode === "eq") {
+      query = query.eq(field, cleanValue);
+    } else if (mode === "ilike") {
+      query = query.ilike(field, escapeIlikeValue(cleanValue));
+    } else {
+      query = query.ilike(field, `%${escapeIlikeValue(cleanValue)}%`);
+    }
+
+    const { data, error } = await query;
+
+    if (error) {
+      console.warn("[MELHOR_ENVIO_WEBHOOK_FIND_ORDER_COLUMN_ERROR]", {
+        field,
+        value: cleanValue,
+        mode,
+        message: error.message,
+      });
+      return null;
+    }
+
+    return Array.isArray(data) ? data[0] || null : null;
+  };
+
+  return (await runQuery("eq")) || (await runQuery("ilike")) || (await runQuery("contains"));
 }
 
 async function fetchOrderByRawContains(patch = {}, label = "shipping_label_raw") {
@@ -154,6 +212,68 @@ async function fetchOrderByRawContains(patch = {}, label = "shipping_label_raw")
   }
 
   return Array.isArray(data) ? data[0] || null : null;
+}
+
+async function fetchOrderByFlexibleIdentifiers(identifiers = []) {
+  const validIdentifiers = identifiers
+    .map((identifier) => ({
+      ...identifier,
+      normalizedValue: normalizeIdentifierForCompare(identifier.value),
+    }))
+    .filter((identifier) => identifier.normalizedValue);
+
+  if (!validIdentifiers.length) {
+    return null;
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from("orders")
+    .select("*")
+    .order("created_at", { ascending: false })
+    .limit(1000);
+
+  if (error) {
+    console.warn("[MELHOR_ENVIO_WEBHOOK_FIND_ORDER_FLEX_ERROR]", {
+      message: error.message,
+    });
+    return null;
+  }
+
+  const orders = Array.isArray(data) ? data : [];
+
+  for (const order of orders) {
+    const rawText = JSON.stringify(safeObject(order.shipping_label_raw));
+    const fields = [
+      { field: "order_number", value: order.order_number },
+      { field: "shipping_shipment_id", value: order.shipping_shipment_id },
+      { field: "shipping_tracking_code", value: order.shipping_tracking_code },
+      { field: "tracking_code", value: order.tracking_code },
+      { field: "shipping_label_raw", value: rawText },
+    ];
+
+    for (const identifier of validIdentifiers) {
+      for (const candidate of fields) {
+        const normalizedCandidate = normalizeIdentifierForCompare(candidate.value);
+        if (!normalizedCandidate) continue;
+
+        const exactMatch = normalizedCandidate === identifier.normalizedValue;
+        const rawContainsMatch =
+          candidate.field === "shipping_label_raw" &&
+          normalizedCandidate.includes(identifier.normalizedValue);
+
+        if (exactMatch || rawContainsMatch) {
+          return {
+            order,
+            matchedBy: `flex.${identifier.label}`,
+            matchedField: candidate.field,
+            matchedValue: identifier.value,
+          };
+        }
+      }
+    }
+  }
+
+  return null;
 }
 
 async function findOrderForMelhorEnvioWebhook(payload = {}) {
@@ -197,6 +317,11 @@ async function findOrderForMelhorEnvioWebhook(payload = {}) {
         matchedValue: protocol,
       };
     }
+  }
+
+  const flexibleMatch = await fetchOrderByFlexibleIdentifiers(identifiers);
+  if (flexibleMatch?.order?.id) {
+    return flexibleMatch;
   }
 
   return {
@@ -284,6 +409,7 @@ async function markOrderAsDeliveredFromWebhook(order, payload, meta = {}) {
     ...basePayload,
     delivery_status: "delivered",
     tracking_status: "delivered",
+    shipping_label_status: "delivered",
   };
 
   return patchOrderWithFallbacks(order.id, [fullPayload, basePayload]);
@@ -375,6 +501,7 @@ export async function handleMelhorEnvioWebhook({ payload, rawBody, signature }) 
       shipmentId: payload?.data?.id || null,
       protocol: payload?.data?.protocol || null,
       tracking: payload?.data?.tracking || null,
+      matcherVersion: MELHOR_ENVIO_WEBHOOK_MATCHER_VERSION,
     };
   }
 
@@ -399,5 +526,6 @@ export async function handleMelhorEnvioWebhook({ payload, rawBody, signature }) 
     matchedField: match.matchedField,
     matchedValue: match.matchedValue,
     lifecycleResult,
+    matcherVersion: MELHOR_ENVIO_WEBHOOK_MATCHER_VERSION,
   };
 }
