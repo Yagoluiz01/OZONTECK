@@ -445,7 +445,7 @@ async function buildSafeAffiliateSummaries(affiliateIds = []) {
     "orders",
     "id",
     orderIds,
-    "id,total_amount,payment_status,payment_raw_status,order_status,shipping_label_status,shipping_state,delivery_status,tracking_status,shipping_tracking_code,tracking_code,shipped_at,delivered_at,shipping_label_raw"
+    "id,total_amount,payment_status,payment_raw_status,order_status,shipping_label_status,shipping_state,shipping_shipment_id,shipping_tracking_code,delivered_at,shipping_label_raw"
   );
   const orderMap = buildMapById(orders);
 
