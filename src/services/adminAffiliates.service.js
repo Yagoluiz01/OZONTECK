@@ -309,6 +309,7 @@ function isAdminOrderDelivered(order = {}) {
   return (
     isOrderDeliveredLikeStatus(order.order_status) ||
     isOrderDeliveredLikeStatus(order.shipping_status) ||
+    isOrderDeliveredLikeStatus(order.shipping_state) ||
     isOrderDeliveredLikeStatus(order.delivery_status) ||
     isOrderDeliveredLikeStatus(order.tracking_status) ||
     isOrderDeliveredLikeStatus(raw.sync_tracking_status) ||
@@ -321,7 +322,11 @@ function getAdminAffiliateConversionLifecycle({ conversion = {}, order = {} } = 
     return "cancelled";
   }
 
-  if (isAdminOrderDelivered(order) || isCommissionReleasedLikeStatus(conversion.status)) {
+  if (
+    isAdminOrderDelivered(order) ||
+    isCommissionReleasedLikeStatus(conversion.status) ||
+    Boolean(conversion.released_at)
+  ) {
     return "delivered";
   }
 
@@ -425,7 +430,7 @@ async function buildSafeAffiliateSummaries(affiliateIds = []) {
       "affiliate_conversions",
       "affiliate_id",
       cleanAffiliateIds,
-      "id,affiliate_id,order_id,order_total,commission_amount,recruitment_bonus_amount,network_commission,conversion_type,status"
+      "id,affiliate_id,order_id,order_total,commission_amount,recruitment_bonus_amount,network_commission,conversion_type,status,released_at"
     ),
     fetchRowsByInFilter(
       "affiliate_payouts",
@@ -440,7 +445,7 @@ async function buildSafeAffiliateSummaries(affiliateIds = []) {
     "orders",
     "id",
     orderIds,
-    "id,total_amount,payment_status,payment_raw_status,order_status,shipping_label_status,shipping_status,delivery_status,tracking_status,shipping_tracking_code,tracking_code,shipped_at,delivered_at,shipping_label_raw"
+    "id,total_amount,payment_status,payment_raw_status,order_status,shipping_label_status,shipping_state,delivery_status,tracking_status,shipping_tracking_code,tracking_code,shipped_at,delivered_at,shipping_label_raw"
   );
   const orderMap = buildMapById(orders);
 
@@ -471,7 +476,7 @@ async function buildSafeAffiliateSummaries(affiliateIds = []) {
       summary.recruitment_bonus_total += commission;
       summary.approved_commission += commission;
 
-      if (isCommissionReleasedLikeStatus(conversion.status)) {
+      if (lifecycle === "delivered") {
         summary.released_commission += commission;
       }
 
