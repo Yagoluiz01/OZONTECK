@@ -1,4 +1,5 @@
 import { env } from "../config/env.js";
+import { createAdminNotification } from "./adminNotifications.service.js";
 
 function getHeaders() {
   return {
@@ -69,6 +70,86 @@ function safeMetadata(value) {
   }
 
   return {};
+}
+
+function formatMoneyBR(value) {
+  const number = Number(value || 0);
+
+  return number.toLocaleString("pt-BR", {
+    style: "currency",
+    currency: "BRL",
+  });
+}
+
+function getCommissionAmount(conversion = {}) {
+  return Number(
+    conversion.commission_amount ||
+      conversion.recruitment_bonus_amount ||
+      conversion.network_commission ||
+      0
+  );
+}
+
+function wasAlreadyReleasedByDelivery(conversion = {}) {
+  const metadata = safeMetadata(conversion.metadata);
+
+  return Boolean(
+    isAlreadyReleased(conversion.status) ||
+      (conversion.released_at && metadata.released_by_delivery)
+  );
+}
+
+function getAffiliateLabel(conversion = {}) {
+  return (
+    conversion.affiliate_name ||
+    conversion.full_name ||
+    conversion.affiliate_email ||
+    conversion.email ||
+    conversion.ref_code ||
+    conversion.affiliate_id ||
+    "Afiliado"
+  );
+}
+
+async function notifyAdminCommissionReadyToPay(conversion = {}, order = {}, source = "") {
+  try {
+    const amount = getCommissionAmount(conversion);
+    const amountLabel = formatMoneyBR(amount);
+    const orderNumber = order?.order_number || order?.id || conversion.order_id || "sem número";
+    const affiliateLabel = getAffiliateLabel(conversion);
+
+    return await createAdminNotification({
+      type: "affiliate_commission_ready_to_pay",
+      title: "Comissão liberada para pagamento",
+      message: `Pedido ${orderNumber} foi entregue. ${affiliateLabel} tem ${amountLabel} liberado para pagamento.`,
+      entity_type: "affiliate_conversion",
+      entity_id: conversion.id || null,
+      priority: "high",
+      metadata: {
+        affiliate_id: conversion.affiliate_id || null,
+        affiliate_label: affiliateLabel,
+        conversion_id: conversion.id || null,
+        conversion_type: conversion.conversion_type || "",
+        order_id: order?.id || conversion.order_id || null,
+        order_number: orderNumber,
+        commission_amount: amount,
+        commission_amount_label: amountLabel,
+        order_status: order?.order_status || "",
+        delivered_at: order?.delivered_at || "",
+        source,
+      },
+    });
+  } catch (error) {
+    console.error("AFFILIATE COMMISSION READY NOTIFICATION ERROR:", {
+      conversionId: conversion?.id || null,
+      affiliateId: conversion?.affiliate_id || null,
+      orderId: order?.id || conversion?.order_id || null,
+      orderNumber: order?.order_number || null,
+      message: error?.message || String(error),
+    });
+
+    return null;
+  }
 }
 
 async function fetchAffiliateConversionsByOrderId(orderId) {
@@ -165,7 +246,7 @@ async function releaseAffiliateConversion(conversion, order, source) {
     };
   }
 
-  if (isAlreadyReleased(conversion.status)) {
+  if (wasAlreadyReleasedByDelivery(conversion)) {
     return {
       updated: false,
       skipped: true,
@@ -202,13 +283,22 @@ async function releaseAffiliateConversion(conversion, order, source) {
   ];
 
   const result = await tryPatchAffiliateConversion(conversion.id, payloads);
+  const updatedConversion = result.result?.data?.[0] || {
+    ...conversion,
+    ...(result.payload || {}),
+  };
+
+  const notification = result.success
+    ? await notifyAdminCommissionReadyToPay(updatedConversion, order, source)
+    : null;
 
   return {
     updated: result.success,
     skipped: false,
     action: "released_after_delivery",
     conversionId: conversion.id,
-    status: result.result?.status || null,
+    status: updatedConversion?.status || result.result?.status || null,
+    notificationCreated: Boolean(notification?.success || notification?.notification?.id),
     details: result.result?.raw || null,
   };
 }
