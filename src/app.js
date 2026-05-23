@@ -26,6 +26,7 @@ import adminFiscalRoutes from "./routes/adminFiscal.routes.js";
 import adminAffiliatesRoutes from "./routes/adminAffiliates.routes.js";
 import affiliatePortalRoutes from "./routes/affiliatePortal.routes.js";
 import affiliatePasswordRoutes from "./routes/affiliatePassword.routes.js";
+import melhorEnvioWebhookRoutes from "./routes/melhorEnvioWebhook.routes.js";
 
 const app = express();
 
@@ -118,6 +119,11 @@ const corsMiddleware = cors({
     "X-Requested-With",
     "X-Signature",
     "X-Request-Id",
+    "X-ME-Attempt",
+    "X-ME-Topic",
+    "X-ME-Event-ID",
+    "X-ME-WEBHOOK-SIGNATURE",
+    "X-ME-Signature",
   ],
   optionsSuccessStatus: 204,
 });
@@ -152,7 +158,16 @@ app.use(
 );
 
 app.use(morgan("dev"));
-app.use(express.json({ limit: "80mb" }));
+app.use(
+  express.json({
+    limit: "80mb",
+    verify(req, res, buf) {
+      if (req.originalUrl?.startsWith("/api/integrations/melhor-envio/webhook")) {
+        req.rawBody = Buffer.from(buf);
+      }
+    },
+  })
+);
 
 app.use("/labels", express.static(path.join(__dirname, "../public/labels")));
 
@@ -165,6 +180,7 @@ app.get("/api/health", (req, res) => {
 
 app.use("/api/tracking", trackingRoutes);
 app.use("/api/store", storeRoutes);
+app.use("/api/integrations/melhor-envio", melhorEnvioWebhookRoutes);
 
 app.use("/api/admin/affiliate-marketing", adminAffiliateMarketingRoutes);
 app.use('/api/affiliate/marketing-kit', affiliateMarketingRoutes);
