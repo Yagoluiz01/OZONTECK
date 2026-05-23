@@ -430,7 +430,7 @@ async function buildSafeAffiliateSummaries(affiliateIds = []) {
       "affiliate_conversions",
       "affiliate_id",
       cleanAffiliateIds,
-      "id,affiliate_id,order_id,order_total,commission_amount,recruitment_bonus_amount,network_commission,conversion_type,status,released_at"
+      "id,affiliate_id,order_id,order_total,commission_amount,conversion_type,status,released_at"
     ),
     fetchRowsByInFilter(
       "affiliate_payouts",
