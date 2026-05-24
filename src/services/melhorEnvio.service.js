@@ -274,9 +274,105 @@ export async function getMelhorEnvioTokenRecord() {
   return Array.isArray(data) ? data[0] || null : null;
 }
 
+function getMelhorEnvioTokenUrl(baseUrl) {
+  return baseUrl.includes("sandbox")
+    ? "https://sandbox.melhorenvio.com.br/oauth/token"
+    : "https://melhorenvio.com.br/oauth/token";
+}
+
+function isMelhorEnvioTokenExpired(expiresAt) {
+  if (!expiresAt) return false;
+
+  const expiresTime = new Date(expiresAt).getTime();
+
+  if (!Number.isFinite(expiresTime)) {
+    return true;
+  }
+
+  const safetyWindowMs = 60 * 1000;
+
+  return expiresTime <= Date.now() + safetyWindowMs;
+}
+
+export async function refreshMelhorEnvioAccessToken(record) {
+  const refreshToken = String(record?.refresh_token || "").trim();
+
+  if (!refreshToken) {
+    throw new Error("Melhor Envio precisa ser reconectado");
+  }
+
+  const { clientId, clientSecret, baseUrl } = getMelhorEnvioConfig();
+  const tokenUrl = getMelhorEnvioTokenUrl(baseUrl);
+
+  console.log(
+    "MELHOR ENVIO REFRESH TOKEN: " +
+      JSON.stringify({
+        tokenUrl,
+        provider: record?.provider || null,
+        hasRefreshToken: Boolean(refreshToken),
+        expiresAt: record?.expires_at || null
+      })
+  );
+
+  const body = new URLSearchParams({
+    grant_type: "refresh_token",
+    client_id: clientId,
+    client_secret: clientSecret,
+    refresh_token: refreshToken
+  });
+
+  const response = await fetch(tokenUrl, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    body: body.toString()
+  });
+
+  const data = await response.json().catch(() => null);
+
+  if (!response.ok || !data?.access_token) {
+    console.error(
+      "MELHOR ENVIO REFRESH TOKEN ERROR: " +
+        JSON.stringify({
+          status: response.status,
+          message: data?.message || data?.error_description || data?.error || null,
+          hasAccessToken: Boolean(data?.access_token),
+          hasRefreshToken: Boolean(data?.refresh_token)
+        })
+    );
+
+    throw new Error(
+      data?.message ||
+        data?.error_description ||
+        data?.error ||
+        "Erro ao renovar token do Melhor Envio"
+    );
+  }
+
+  const saved = await saveMelhorEnvioTokens({
+    ...data,
+    refresh_token: data?.refresh_token || refreshToken
+  });
+
+  console.log(
+    "MELHOR ENVIO REFRESH TOKEN OK: " +
+      JSON.stringify({
+        provider: saved?.provider || null,
+        hasAccessToken: Boolean(String(saved?.access_token || "").trim()),
+        hasRefreshToken: Boolean(String(saved?.refresh_token || "").trim()),
+        expiresAt: saved?.expires_at || null
+      })
+  );
+
+  return String(saved?.access_token || data.access_token || "").trim();
+}
+
 export async function getMelhorEnvioAccessToken() {
   const record = await getMelhorEnvioTokenRecord();
   const accessToken = String(record?.access_token || "").trim();
+  const tokenExpired = isMelhorEnvioTokenExpired(record?.expires_at);
 
   console.log(
     "MELHOR ENVIO ACCESS TOKEN CHECK: " +
@@ -284,12 +380,18 @@ export async function getMelhorEnvioAccessToken() {
         hasRecord: Boolean(record),
         provider: record?.provider || null,
         hasAccessToken: Boolean(accessToken),
-        expiresAt: record?.expires_at || null
+        hasRefreshToken: Boolean(String(record?.refresh_token || "").trim()),
+        expiresAt: record?.expires_at || null,
+        tokenExpired
       })
   );
 
   if (!accessToken) {
-    throw new Error("Melhor Envio não está conectado");
+    throw new Error("Melhor Envio nÃ£o estÃ¡ conectado");
+  }
+
+  if (tokenExpired) {
+    return refreshMelhorEnvioAccessToken(record);
   }
 
   return accessToken;
@@ -304,10 +406,15 @@ export function buildMelhorEnvioHeaders(accessToken) {
   };
 }
 
-export async function calculateShippingWithMelhorEnvio(payload) {
-  const accessToken = await getMelhorEnvioAccessToken();
-  const { baseUrl } = getMelhorEnvioConfig();
+function isMelhorEnvioUnauthenticated(response, data) {
+  const message = String(
+    data?.message || data?.error_description || data?.error || ""
+  ).toLowerCase();
 
+  return response.status === 401 || message.includes("unauthenticated");
+}
+
+async function requestMelhorEnvioShippingQuote(baseUrl, accessToken, payload) {
   const response = await fetch(`${baseUrl}/me/shipment/calculate`, {
     method: "POST",
     headers: buildMelhorEnvioHeaders(accessToken),
@@ -316,9 +423,42 @@ export async function calculateShippingWithMelhorEnvio(payload) {
 
   const data = await response.json().catch(() => null);
 
+  return { response, data };
+}
+
+export async function calculateShippingWithMelhorEnvio(payload) {
+  const { baseUrl } = getMelhorEnvioConfig();
+
+  let accessToken = await getMelhorEnvioAccessToken();
+
+  let { response, data } = await requestMelhorEnvioShippingQuote(
+    baseUrl,
+    accessToken,
+    payload
+  );
+
+  if (!response.ok && isMelhorEnvioUnauthenticated(response, data)) {
+    console.warn(
+      "MELHOR ENVIO QUOTE UNAUTHENTICATED: tentando renovar token e repetir cotacao"
+    );
+
+    const record = await getMelhorEnvioTokenRecord();
+    accessToken = await refreshMelhorEnvioAccessToken(record);
+
+    const retry = await requestMelhorEnvioShippingQuote(
+      baseUrl,
+      accessToken,
+      payload
+    );
+
+    response = retry.response;
+    data = retry.data;
+  }
+
   if (!response.ok) {
     throw new Error(
       data?.message ||
+        data?.error_description ||
         data?.error ||
         "Erro ao calcular frete no Melhor Envio"
     );
