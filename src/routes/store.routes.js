@@ -30,6 +30,83 @@ import {
 
 const router = express.Router();
 
+function getMarketingPixelSupabaseHeaders() {
+  return {
+    apikey: env.supabaseServiceRoleKey,
+    Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
+    "Content-Type": "application/json",
+    Accept: "application/json",
+  };
+}
+
+function normalizeMarketingPixel(row = {}) {
+  return {
+    id: row.id,
+    provider: String(row.provider || "").trim(),
+    name: String(row.name || "").trim(),
+    pixelId: String(row.pixel_id || "").trim(),
+    isActive: Boolean(row.is_active),
+    enabledEvents: Array.isArray(row.enabled_events) ? row.enabled_events : [],
+    pageRules: Array.isArray(row.page_rules) ? row.page_rules : ["all"],
+    extraConfig:
+      row.extra_config && typeof row.extra_config === "object"
+        ? row.extra_config
+        : {},
+  };
+}
+
+router.get("/marketing/pixels", async (req, res) => {
+  try {
+    const url = new URL(`${env.supabaseUrl}/rest/v1/marketing_pixels`);
+
+    url.searchParams.set("is_active", "eq.true");
+    url.searchParams.set(
+      "select",
+      "id,provider,name,pixel_id,is_active,enabled_events,page_rules,extra_config,created_at,updated_at"
+    );
+    url.searchParams.set("order", "created_at.asc");
+
+    const response = await fetch(url.toString(), {
+      method: "GET",
+      headers: getMarketingPixelSupabaseHeaders(),
+    });
+
+    const data = await response.json().catch(() => []);
+
+    if (!response.ok) {
+      console.error("ERRO AO BUSCAR PIXELS DE MARKETING:", {
+        status: response.status,
+        message: data?.message || data?.error || null,
+      });
+
+      return res.status(500).json({
+        success: false,
+        message: "Erro ao buscar pixels de marketing",
+        pixels: [],
+      });
+    }
+
+    const pixels = Array.isArray(data)
+      ? data
+          .map(normalizeMarketingPixel)
+          .filter((pixel) => pixel.provider && pixel.pixelId && pixel.isActive)
+      : [];
+
+    return res.json({
+      success: true,
+      pixels,
+    });
+  } catch (error) {
+    console.error("ERRO GERAL AO BUSCAR PIXELS DE MARKETING:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Erro ao buscar pixels de marketing",
+      pixels: [],
+    });
+  }
+});
+
 
 async function safeCustomerOrderPush(label, order, callback) {
   try {
