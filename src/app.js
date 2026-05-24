@@ -1,3 +1,4 @@
+import adminMarketingPixelsRoutes from "./routes/adminMarketingPixels.routes.js";
 import adminAffiliateMarketingRoutes from "./routes/adminAffiliateMarketing.routes.js";
 import affiliateMarketingRoutes from './routes/affiliateMarketing.routes.js';
 import express from "express";
@@ -182,6 +183,7 @@ app.use("/api/tracking", trackingRoutes);
 app.use("/api/store", storeRoutes);
 app.use("/api/integrations/melhor-envio", melhorEnvioWebhookRoutes);
 
+app.use("/api/admin/marketing-pixels", adminMarketingPixelsRoutes);
 app.use("/api/admin/affiliate-marketing", adminAffiliateMarketingRoutes);
 app.use('/api/affiliate/marketing-kit', affiliateMarketingRoutes);
 app.use("/api/admin/financial", adminFinancialRoutes);
