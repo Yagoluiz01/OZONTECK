@@ -92,11 +92,13 @@ function getCommissionAmount(conversion = {}) {
 
 function wasAlreadyReleasedByDelivery(conversion = {}) {
   const metadata = safeMetadata(conversion.metadata);
+  const status = normalizeStatus(conversion.status);
 
-  return Boolean(
-    isAlreadyReleased(conversion.status) ||
-      (conversion.released_at && metadata.released_by_delivery)
-  );
+  if (["paid", "pago"].includes(status)) {
+    return true;
+  }
+
+  return Boolean(conversion.released_at && metadata.released_by_delivery);
 }
 
 function getAffiliateLabel(conversion = {}) {
@@ -337,16 +339,19 @@ async function cancelAffiliateConversion(conversion, order, source) {
   const payloads = [
     {
       status: "cancelled",
+      released_at: null,
       metadata,
       notes: `${conversion.notes || ""}\nComissão cancelada automaticamente porque o pedido foi cancelado.`.trim(),
     },
     {
       status: "rejected",
+      released_at: null,
       metadata,
       notes: `${conversion.notes || ""}\nComissão rejeitada automaticamente porque o pedido foi cancelado.`.trim(),
     },
     {
       status: "failed",
+      released_at: null,
       metadata,
       notes: `${conversion.notes || ""}\nComissão invalidada automaticamente porque o pedido foi cancelado.`.trim(),
     },

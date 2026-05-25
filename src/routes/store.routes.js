@@ -996,9 +996,10 @@ async function createRecruitmentBonusForPaidOrder(order, recruitedAffiliate, com
     recruitment_bonus_amount: recruitmentCommissionAmount,
     status: "approved",
     approved_at: new Date().toISOString(),
-    released_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+    released_at: null,
     metadata: {
       source: "affiliate_recruitment_commission",
+      release_policy: "after_delivery",
       order_id: order.id,
       order_number: order.order_number || "",
       order_total: safeOrderTotal,
@@ -1146,9 +1147,10 @@ async function createAffiliateConversionForPaidOrder(order) {
     conversion_type: "sale_commission",
     status: "approved",
     approved_at: new Date().toISOString(),
-    released_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+    released_at: null,
     metadata: {
       source: "affiliate_sale_commission",
+      release_policy: "after_delivery",
       commission_base: orderTotal,
       subtotal: roundMoney(order.subtotal || 0),
       shipping_amount: roundMoney(order.shipping_amount || 0),

@@ -322,11 +322,7 @@ function getAdminAffiliateConversionLifecycle({ conversion = {}, order = {} } = 
     return "cancelled";
   }
 
-  if (
-    isAdminOrderDelivered(order) ||
-    isCommissionReleasedLikeStatus(conversion.status) ||
-    Boolean(conversion.released_at)
-  ) {
+  if (isAdminOrderDelivered(order)) {
     return "delivered";
   }
 

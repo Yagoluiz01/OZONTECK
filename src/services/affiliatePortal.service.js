@@ -249,7 +249,7 @@ function getAffiliateOrderLifecycle({ conversion = {}, order = {} } = {}) {
     return "cancelled";
   }
 
-  if (isReleasedLikeStatus(conversion.status) || isOrderDelivered(order)) {
+  if (isOrderDelivered(order)) {
     return "delivered";
   }
 
@@ -628,7 +628,7 @@ export async function getAffiliateSummary(affiliateId) {
       acc.total_conversions += 1;
       acc.total_referred_sales += total;
 
-      if (lifecycle === "delivered" || isReleasedLikeStatus(conversion.status)) {
+      if (lifecycle === "delivered") {
         acc.released_commission += commission;
       } else if (isPaidConversionStatus(conversion.status)) {
         acc.paid_commission_by_conversion += commission;
