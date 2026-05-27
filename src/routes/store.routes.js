@@ -9,6 +9,7 @@ import {
   notifyAffiliateCommissionCreated
 } from "../services/affiliateNotification.service.js";
 import { sendPushToAffiliate } from "../services/affiliatePush.service.js";
+import { getPublicAffiliateStorefront } from "../services/affiliatePortal.service.js";
 import express from "express";
 import bcrypt from "bcryptjs";
 import { requireAdminAuth } from "../middlewares/auth.middleware.js";
@@ -2692,6 +2693,28 @@ router.post("/orders/:orderNumber/notifications/subscribe", async (req, res) => 
     return res.status(500).json({
       success: false,
       message: error.message || "Erro ao ativar notificações do pedido"
+    });
+  }
+});
+
+router.get("/affiliate-storefront/:slug", async (req, res) => {
+  try {
+    const result = await getPublicAffiliateStorefront(req.params.slug);
+
+    res.set("Cache-Control", "no-store");
+
+    return res.status(200).json({
+      success: true,
+      ...result,
+    });
+  } catch (error) {
+    const statusCode = error.statusCode || 500;
+
+    console.error("ERRO AO BUSCAR LOJA DO AFILIADO:", error);
+
+    return res.status(statusCode).json({
+      success: false,
+      message: error.message || "Erro interno ao buscar loja do afiliado",
     });
   }
 });
