@@ -10,6 +10,10 @@ import {
   summary,
   network,
   products,
+  storefront,
+  addStorefrontItem,
+  removeStorefrontItem,
+  updateStorefrontProfilePhoto,
   updateProfile,
 } from "../controllers/affiliatePortal.controller.js";
 
@@ -33,6 +37,10 @@ router.get("/orders", requireAffiliateAuth, orders);
 router.get("/payouts", requireAffiliateAuth, payouts);
 router.get("/network", requireAffiliateAuth, network);
 router.get("/products", requireAffiliateAuth, products);
+router.get("/storefront", requireAffiliateAuth, storefront);
+router.post("/storefront/items", requireAffiliateAuth, addStorefrontItem);
+router.patch("/storefront/profile-photo", requireAffiliateAuth, updateStorefrontProfilePhoto);
+router.delete("/storefront/items/:productId", requireAffiliateAuth, removeStorefrontItem);
 router.put("/profile", requireAffiliateAuth, updateProfile);
 
 router.get("/push/config", requireAffiliateAuth, getPushConfig);

@@ -5,6 +5,15 @@ import { env } from "../config/env.js";
 import { notifyAffiliatePasswordReset } from "./affiliateNotification.service.js";
 
 const AFFILIATE_TOKEN_EXPIRES_IN = "7d";
+const AFFILIATE_PROFILE_PHOTOS_BUCKET =
+  process.env.AFFILIATE_PROFILE_PHOTOS_BUCKET || "affiliate-profile-photos";
+const AFFILIATE_PROFILE_PHOTO_MAX_BYTES = 3 * 1024 * 1024;
+const AFFILIATE_PROFILE_PHOTO_ALLOWED_MIMES = new Set([
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+  "image/gif",
+]);
 
 
 async function supabaseRequest(endpoint, options = {}) {
@@ -65,6 +74,120 @@ async function supabaseRequest(endpoint, options = {}) {
 }
 
 
+function sanitizeStorageFileName(name = "foto") {
+  const cleanName = String(name || "foto")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-zA-Z0-9.\-_]/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
+  return cleanName || "foto";
+}
+
+function getExtensionFromMimeType(mimeType = "") {
+  const normalized = String(mimeType || "").toLowerCase();
+
+  if (normalized === "image/png") return "png";
+  if (normalized === "image/webp") return "webp";
+  if (normalized === "image/gif") return "gif";
+
+  return "jpg";
+}
+
+function parseBase64ImagePayload(payload = {}) {
+  const mimeType = String(payload.mimeType || payload.mime_type || "")
+    .trim()
+    .toLowerCase();
+  const rawBase64 = String(payload.base64 || payload.file || payload.image || "").trim();
+
+  if (!rawBase64) {
+    const error = new Error("Envie uma foto para salvar no perfil da loja.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const detectedMime = rawBase64.match(/^data:([^;]+);base64,/)?.[1]?.toLowerCase() || mimeType;
+  const cleanBase64 = rawBase64.includes(",") ? rawBase64.split(",").pop() : rawBase64;
+  const finalMimeType = detectedMime || "image/jpeg";
+
+  if (!AFFILIATE_PROFILE_PHOTO_ALLOWED_MIMES.has(finalMimeType)) {
+    const error = new Error("Formato inválido. Envie JPG, PNG, WEBP ou GIF.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const buffer = Buffer.from(cleanBase64, "base64");
+
+  if (!buffer.length) {
+    const error = new Error("Foto inválida. Escolha outra imagem.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (buffer.length > AFFILIATE_PROFILE_PHOTO_MAX_BYTES) {
+    const error = new Error("Foto muito grande. Envie uma imagem de até 3 MB.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return {
+    buffer,
+    mimeType: finalMimeType,
+    originalName: sanitizeStorageFileName(payload.fileName || payload.file_name || "foto-perfil"),
+  };
+}
+
+async function uploadAffiliateProfilePhoto({ affiliateId, file }) {
+  const { buffer, mimeType, originalName } = parseBase64ImagePayload(file);
+  const extension = getExtensionFromMimeType(mimeType);
+  const nameWithoutExtension = originalName.replace(/\.[a-zA-Z0-9]+$/, "") || "foto-perfil";
+  const objectPath = `${encodeURIComponent(affiliateId)}/${Date.now()}-${crypto
+    .randomBytes(5)
+    .toString("hex")}-${nameWithoutExtension}.${extension}`;
+
+  const uploadResponse = await fetch(
+    `${env.supabaseUrl}/storage/v1/object/${AFFILIATE_PROFILE_PHOTOS_BUCKET}/${objectPath}`,
+    {
+      method: "POST",
+      headers: {
+        apikey: env.supabaseServiceRoleKey,
+        Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
+        "Content-Type": mimeType,
+        "x-upsert": "false",
+      },
+      body: buffer,
+    }
+  );
+
+  const uploadText = await uploadResponse.text();
+  let uploadData = null;
+
+  try {
+    uploadData = uploadText ? JSON.parse(uploadText) : null;
+  } catch {
+    uploadData = uploadText;
+  }
+
+  if (!uploadResponse.ok) {
+    console.error("AFFILIATE PROFILE PHOTO UPLOAD ERROR:", {
+      status: uploadResponse.status,
+      details: uploadData,
+    });
+
+    const error = new Error(
+      uploadData?.message ||
+        uploadData?.error ||
+        "Erro ao enviar foto de perfil. Verifique o bucket affiliate-profile-photos."
+    );
+    error.statusCode = uploadResponse.status;
+    throw error;
+  }
+
+  return `${env.supabaseUrl}/storage/v1/object/public/${AFFILIATE_PROFILE_PHOTOS_BUCKET}/${objectPath}`;
+}
+
+
 function getJwtSecret() {
   const secret = process.env.JWT_SECRET || process.env.jwtSecret;
 
@@ -78,6 +201,27 @@ function getJwtSecret() {
 function normalizeEmail(email) {
   return String(email || "").trim().toLowerCase();
 }
+
+
+async function findAffiliateByEmail(normalizedEmail, selectFields) {
+  const email = normalizeEmail(normalizedEmail);
+
+  if (!email) return null;
+
+  const encodedEmail = encodeURIComponent(email);
+  const rows = await supabaseRequest(
+    `/affiliates?or=(email.eq.${encodedEmail},email.ilike.${encodedEmail})&select=${selectFields}&limit=5`
+  );
+
+  const list = Array.isArray(rows) ? rows : [];
+
+  return (
+    list.find((item) => normalizeEmail(item?.email) === email) ||
+    list[0] ||
+    null
+  );
+}
+
 
 function normalizeMoney(value) {
   const number = Number(value || 0);
@@ -385,6 +529,7 @@ function buildAffiliatePayload(affiliate) {
     commission_rate: normalizeMoney(affiliate.commission_rate),
     pix_key: affiliate.pix_key || null,
     pix_key_type: affiliate.pix_key_type || null,
+    profile_photo_url: affiliate.profile_photo_url || null,
     created_at: affiliate.created_at || null,
   };
 }
@@ -422,13 +567,10 @@ export async function loginAffiliate({ email, password }) {
     throw error;
   }
 
-  const affiliates = await supabaseRequest(
-    `/affiliates?email=eq.${encodeURIComponent(
-      normalizedEmail
-    )}&select=id,full_name,email,phone,ref_code,coupon_code,status,commission_rate,password_hash,access_enabled,pix_key,pix_key_type,created_at&limit=1`
+  const affiliate = await findAffiliateByEmail(
+    normalizedEmail,
+    "id,full_name,email,phone,ref_code,coupon_code,status,commission_rate,password_hash,access_enabled,pix_key,pix_key_type,created_at"
   );
-
-  const affiliate = Array.isArray(affiliates) ? affiliates[0] : null;
 
   if (!affiliate) {
     const error = new Error("E-mail ou senha inválidos.");
@@ -1057,6 +1199,366 @@ export async function getAffiliateNetwork(affiliateId) {
   };
 }
 
+
+function normalizeSlug(value) {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function buildAffiliateStorefrontSlug(affiliate = {}) {
+  const base = normalizeSlug(affiliate.ref_code || affiliate.full_name || affiliate.email);
+  const suffix = String(affiliate.id || "").replace(/[^a-zA-Z0-9]/g, "").slice(0, 8);
+
+  return normalizeSlug(["loja", base || "afiliado", suffix].filter(Boolean).join("-"));
+}
+
+function buildAffiliateStorefrontUrl(storefront = {}, affiliate = {}) {
+  const params = new URLSearchParams();
+
+  if (storefront.slug) {
+    params.set("loja", storefront.slug);
+  }
+
+  if (affiliate.ref_code) {
+    params.set("ref", affiliate.ref_code);
+  }
+
+  return `${STORE_BASE_URL}/pages-html/minha-loja.html?${params.toString()}`;
+}
+
+function normalizeStorefront(row = {}, affiliate = {}) {
+  return {
+    id: row.id,
+    affiliate_id: row.affiliate_id,
+    slug: row.slug,
+    title: row.title || `Loja de ${affiliate.full_name || "Afiliado OZONTECK"}`,
+    description:
+      row.description ||
+      "Produtos selecionados por um afiliado OZONTECK para facilitar sua escolha.",
+    banner_url: row.banner_url || null,
+    profile_photo_url: row.profile_photo_url || null,
+    is_active: row.is_active !== false,
+    public_url: buildAffiliateStorefrontUrl(row, affiliate),
+    created_at: row.created_at || null,
+    updated_at: row.updated_at || null,
+  };
+}
+
+async function findAffiliateStorefrontByAffiliateId(affiliateId) {
+  const rows = await supabaseRequest(
+    `/affiliate_storefronts?affiliate_id=eq.${encodeURIComponent(
+      affiliateId
+    )}&select=id,affiliate_id,slug,title,description,banner_url,profile_photo_url,is_active,created_at,updated_at&limit=1`
+  );
+
+  return Array.isArray(rows) ? rows[0] || null : null;
+}
+
+async function getOrCreateAffiliateStorefront(affiliate) {
+  const existing = await findAffiliateStorefrontByAffiliateId(affiliate.id);
+
+  if (existing) {
+    return existing;
+  }
+
+  const slug = buildAffiliateStorefrontSlug(affiliate);
+  const payload = {
+    affiliate_id: affiliate.id,
+    slug,
+    title: `Loja de ${affiliate.full_name || "Afiliado OZONTECK"}`,
+    description:
+      "Produtos selecionados por um afiliado OZONTECK para facilitar sua escolha.",
+    is_active: true,
+    updated_at: new Date().toISOString(),
+  };
+
+  const created = await supabaseRequest("/affiliate_storefronts", {
+    method: "POST",
+    body: payload,
+  });
+
+  const row = Array.isArray(created) ? created[0] : null;
+
+  if (!row?.id) {
+    const error = new Error("Não foi possível criar a loja do afiliado.");
+    error.statusCode = 500;
+    throw error;
+  }
+
+  return row;
+}
+
+async function getAffiliateStorefrontItems(storefrontId) {
+  const rows = await supabaseRequest(
+    `/affiliate_storefront_items?storefront_id=eq.${encodeURIComponent(
+      storefrontId
+    )}&select=id,storefront_id,product_id,position,custom_note,created_at&order=position.asc&order=created_at.asc`
+  );
+
+  return Array.isArray(rows) ? rows : [];
+}
+
+function sortStorefrontProductsByItems(products = [], items = []) {
+  const positionMap = new Map(
+    items.map((item, index) => [
+      String(item.product_id || ""),
+      Number.isFinite(Number(item.position)) ? Number(item.position) : index,
+    ])
+  );
+
+  return [...products].sort((a, b) => {
+    const positionA = positionMap.get(String(a.product_id || a.id || "")) ?? 999999;
+    const positionB = positionMap.get(String(b.product_id || b.id || "")) ?? 999999;
+
+    if (positionA !== positionB) {
+      return positionA - positionB;
+    }
+
+    return String(a.name || "").localeCompare(String(b.name || ""), "pt-BR");
+  });
+}
+
+function buildStorefrontPayload({ affiliate, storefront, items, products }) {
+  const selectedIds = new Set(items.map((item) => String(item.product_id || "")));
+  const selectedProducts = sortStorefrontProductsByItems(
+    products.filter((product) => selectedIds.has(String(product.product_id || product.id || ""))),
+    items
+  );
+
+  return {
+    affiliate,
+    storefront: normalizeStorefront(storefront, affiliate),
+    selected_product_ids: Array.from(selectedIds),
+    selected_products: selectedProducts,
+    available_products: products.map((product) => ({
+      ...product,
+      selected: selectedIds.has(String(product.product_id || product.id || "")),
+    })),
+  };
+}
+
+export async function getAffiliateStorefront(affiliateId) {
+  const result = await getAffiliatePromotionalProducts(affiliateId);
+  const storefront = await getOrCreateAffiliateStorefront(result.affiliate);
+  const items = await getAffiliateStorefrontItems(storefront.id);
+
+  return buildStorefrontPayload({
+    affiliate: result.affiliate,
+    storefront,
+    items,
+    products: result.products,
+  });
+}
+
+export async function addAffiliateStorefrontItem(affiliateId, payload = {}) {
+  const productId = String(payload.product_id || payload.productId || "").trim();
+
+  if (!productId) {
+    const error = new Error("Informe o produto para adicionar à loja.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const result = await getAffiliatePromotionalProducts(affiliateId);
+  const product = result.products.find((item) => String(item.product_id) === productId);
+
+  if (!product) {
+    const error = new Error("Produto não encontrado ou indisponível para divulgação.");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  if (!product.can_promote) {
+    const error = new Error("Este produto ainda não está seguro para divulgação pelo afiliado.");
+    error.statusCode = 409;
+    throw error;
+  }
+
+  const storefront = await getOrCreateAffiliateStorefront(result.affiliate);
+  const items = await getAffiliateStorefrontItems(storefront.id);
+  const alreadySelected = items.some((item) => String(item.product_id) === productId);
+
+  if (!alreadySelected) {
+    const nextPosition = items.reduce((max, item) => {
+      const position = Number(item.position || 0);
+      return Number.isFinite(position) && position > max ? position : max;
+    }, -1) + 1;
+
+    await supabaseRequest("/affiliate_storefront_items", {
+      method: "POST",
+      body: {
+        storefront_id: storefront.id,
+        product_id: productId,
+        position: nextPosition,
+        custom_note: String(payload.custom_note || payload.customNote || "").trim() || null,
+      },
+    });
+
+    await supabaseRequest(`/affiliate_storefronts?id=eq.${encodeURIComponent(storefront.id)}`, {
+      method: "PATCH",
+      body: {
+        updated_at: new Date().toISOString(),
+      },
+    });
+  }
+
+  return getAffiliateStorefront(affiliateId);
+}
+
+export async function removeAffiliateStorefrontItem(affiliateId, productId) {
+  const cleanProductId = String(productId || "").trim();
+
+  if (!cleanProductId) {
+    const error = new Error("Informe o produto para remover da loja.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const affiliate = await getAffiliateById(affiliateId);
+  const storefront = await getOrCreateAffiliateStorefront(affiliate);
+
+  await supabaseRequest(
+    `/affiliate_storefront_items?storefront_id=eq.${encodeURIComponent(
+      storefront.id
+    )}&product_id=eq.${encodeURIComponent(cleanProductId)}`,
+    {
+      method: "DELETE",
+      headers: {
+        Prefer: "return=minimal",
+      },
+    }
+  );
+
+  await supabaseRequest(`/affiliate_storefronts?id=eq.${encodeURIComponent(storefront.id)}`, {
+    method: "PATCH",
+    body: {
+      updated_at: new Date().toISOString(),
+    },
+  });
+
+  return getAffiliateStorefront(affiliateId);
+}
+
+
+export async function updateAffiliateStorefrontProfilePhoto(affiliateId, payload = {}) {
+  const affiliate = await getAffiliateById(affiliateId);
+  const storefront = await getOrCreateAffiliateStorefront(affiliate);
+  let profilePhotoUrl = null;
+
+  if (payload.remove === true || payload.remove_photo === true) {
+    profilePhotoUrl = null;
+  } else if (payload.profile_photo_url || payload.profilePhotoUrl) {
+    const directUrl = String(payload.profile_photo_url || payload.profilePhotoUrl || "").trim();
+
+    if (!/^https?:\/\//i.test(directUrl)) {
+      const error = new Error("URL da foto inválida.");
+      error.statusCode = 400;
+      throw error;
+    }
+
+    profilePhotoUrl = directUrl;
+  } else {
+    profilePhotoUrl = await uploadAffiliateProfilePhoto({
+      affiliateId,
+      file: payload,
+    });
+  }
+
+  const updated = await supabaseRequest(
+    `/affiliate_storefronts?id=eq.${encodeURIComponent(storefront.id)}`,
+    {
+      method: "PATCH",
+      body: {
+        profile_photo_url: profilePhotoUrl,
+        updated_at: new Date().toISOString(),
+      },
+    }
+  );
+
+  const updatedStorefront = Array.isArray(updated) ? updated[0] || storefront : storefront;
+
+  return {
+    affiliate,
+    storefront: normalizeStorefront(
+      {
+        ...storefront,
+        ...updatedStorefront,
+        profile_photo_url: profilePhotoUrl,
+      },
+      affiliate
+    ),
+  };
+}
+
+
+export async function getPublicAffiliateStorefront(slug) {
+  const cleanSlug = normalizeSlug(slug);
+
+  if (!cleanSlug) {
+    const error = new Error("Loja do afiliado não informada.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const storefrontRows = await supabaseRequest(
+    `/affiliate_storefronts?slug=eq.${encodeURIComponent(
+      cleanSlug
+    )}&is_active=eq.true&select=id,affiliate_id,slug,title,description,banner_url,profile_photo_url,is_active,created_at,updated_at&limit=1`
+  );
+
+  const storefront = Array.isArray(storefrontRows) ? storefrontRows[0] : null;
+
+  if (!storefront?.id) {
+    const error = new Error("Loja do afiliado não encontrada.");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const affiliate = await getAffiliateById(storefront.affiliate_id);
+  const items = await getAffiliateStorefrontItems(storefront.id);
+  const selectedIds = items.map((item) => String(item.product_id || "")).filter(Boolean);
+
+  if (!selectedIds.length) {
+    return {
+      affiliate: {
+        id: affiliate.id,
+        full_name: affiliate.full_name,
+        ref_code: affiliate.ref_code,
+        coupon_code: affiliate.coupon_code || null,
+        profile_photo_url: storefront.profile_photo_url || null,
+      },
+      storefront: normalizeStorefront(storefront, affiliate),
+      products: [],
+    };
+  }
+
+  const rows = await supabaseRequest(
+    `/product_pricing?product_id=in.(${selectedIds.join(",")})&select=id,product_id,affiliate_commission_percent,special_affiliate_commission_percent,status,risk_message,updated_at,products(id,name,sku,price,category,status,image_url,image_url_2,short_description)&limit=200`
+  );
+
+  const products = (Array.isArray(rows) ? rows : [])
+    .filter((row) => row?.products && isProductPublic(row.products))
+    .map((row) => normalizeAffiliateProduct(row, affiliate))
+    .filter((product) => product.product_id && product.price > 0 && product.can_promote);
+
+  return {
+    affiliate: {
+      id: affiliate.id,
+      full_name: affiliate.full_name,
+      ref_code: affiliate.ref_code,
+      coupon_code: affiliate.coupon_code || null,
+      profile_photo_url: storefront.profile_photo_url || null,
+    },
+    storefront: normalizeStorefront(storefront, affiliate),
+    products: sortStorefrontProductsByItems(products, items),
+  };
+}
+
 export async function updateAffiliateProfile(affiliateId, payload = {}) {
   const allowedPixTypes = ["cpf", "cnpj", "email", "phone", "random"];
   const pixKey = String(payload.pix_key || "").trim();
@@ -1114,13 +1616,10 @@ export async function requestAffiliatePasswordReset({ email } = {}) {
     throw error;
   }
 
-  const affiliates = await supabaseRequest(
-    `/affiliates?email=eq.${encodeURIComponent(
-      normalizedEmail
-    )}&select=id,full_name,email,phone,ref_code,coupon_code,status,commission_rate,password_hash,access_enabled,pix_key,pix_key_type,created_at&limit=1`
+  const affiliate = await findAffiliateByEmail(
+    normalizedEmail,
+    "id,full_name,email,phone,ref_code,coupon_code,status,commission_rate,password_hash,access_enabled,pix_key,pix_key_type,created_at"
   );
-
-  const affiliate = Array.isArray(affiliates) ? affiliates[0] : null;
 
   /*
     Resposta propositalmente genérica:
@@ -1174,13 +1673,10 @@ export async function checkAffiliateAccessByEmail({ email } = {}) {
     throw error;
   }
 
-  const affiliates = await supabaseRequest(
-    `/affiliates?email=eq.${encodeURIComponent(
-      normalizedEmail
-    )}&select=id,full_name,email,status,access_enabled,password_hash,ref_code&limit=1`
+  const affiliate = await findAffiliateByEmail(
+    normalizedEmail,
+    "id,full_name,email,status,access_enabled,password_hash,ref_code"
   );
-
-  const affiliate = Array.isArray(affiliates) ? affiliates[0] : null;
 
   if (affiliate) {
     const active = isAffiliateActive(affiliate);

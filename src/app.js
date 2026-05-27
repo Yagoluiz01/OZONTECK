@@ -27,6 +27,8 @@ import adminFiscalRoutes from "./routes/adminFiscal.routes.js";
 import adminAffiliatesRoutes from "./routes/adminAffiliates.routes.js";
 import affiliatePortalRoutes from "./routes/affiliatePortal.routes.js";
 import affiliatePasswordRoutes from "./routes/affiliatePassword.routes.js";
+import { updateStorefrontProfilePhoto } from "./controllers/affiliatePortal.controller.js";
+import { requireAffiliateAuth } from "./middlewares/affiliateAuth.middleware.js";
 import melhorEnvioWebhookRoutes from "./routes/melhorEnvioWebhook.routes.js";
 
 const app = express();
@@ -202,6 +204,12 @@ app.use("/api/shipping", shippingRoutes);
 app.use("/api/tracking", trackingRoutes);
 app.use("/api/store", storeRoutes);
 app.use("/api/affiliate", affiliatePortalRoutes);
+
+// Alias direto de segurança para a foto da loja do afiliado.
+// Mantém a rota funcionando mesmo se o roteador do portal não for recarregado em ambiente local.
+app.patch("/api/affiliate/storefront/profile-photo", requireAffiliateAuth, updateStorefrontProfilePhoto);
+app.post("/api/affiliate/storefront/profile-photo", requireAffiliateAuth, updateStorefrontProfilePhoto);
+
 app.use('/api/public/affiliates/password', affiliatePasswordRoutes);
 
 app.use("/api/admin/financial", adminFinancialRoutes);

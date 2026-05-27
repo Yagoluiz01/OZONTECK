@@ -5,6 +5,10 @@ import {
   getAffiliateSummary,
   getAffiliateNetwork,
   getAffiliatePromotionalProducts,
+  getAffiliateStorefront,
+  addAffiliateStorefrontItem,
+  removeAffiliateStorefrontItem,
+  updateAffiliateStorefrontProfilePhoto,
   loginAffiliate,
   requestAffiliatePasswordReset,
   updateAffiliateProfile,
@@ -133,6 +137,76 @@ export async function products(req, res) {
       success: true,
       affiliate: result.affiliate,
       products: result.products,
+    });
+  } catch (error) {
+    return sendError(res, error);
+  }
+}
+
+export async function storefront(req, res) {
+  try {
+    const result = await getAffiliateStorefront(req.affiliateId);
+
+    res.set({
+      "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+      Pragma: "no-cache",
+      Expires: "0",
+    });
+
+    return res.json({
+      success: true,
+      ...result,
+    });
+  } catch (error) {
+    return sendError(res, error);
+  }
+}
+
+export async function addStorefrontItem(req, res) {
+  try {
+    const result = await addAffiliateStorefrontItem(req.affiliateId, req.body || {});
+
+    return res.status(201).json({
+      success: true,
+      message: "Produto adicionado à sua loja.",
+      ...result,
+    });
+  } catch (error) {
+    return sendError(res, error);
+  }
+}
+
+export async function removeStorefrontItem(req, res) {
+  try {
+    const result = await removeAffiliateStorefrontItem(
+      req.affiliateId,
+      req.params.productId
+    );
+
+    return res.json({
+      success: true,
+      message: "Produto removido da sua loja.",
+      ...result,
+    });
+  } catch (error) {
+    return sendError(res, error);
+  }
+}
+
+
+export async function updateStorefrontProfilePhoto(req, res) {
+  try {
+    const result = await updateAffiliateStorefrontProfilePhoto(
+      req.affiliateId,
+      req.body || {}
+    );
+
+    return res.json({
+      success: true,
+      message: result?.storefront?.profile_photo_url
+        ? "Foto de perfil da loja atualizada."
+        : "Foto de perfil da loja removida.",
+      ...result,
     });
   } catch (error) {
     return sendError(res, error);
