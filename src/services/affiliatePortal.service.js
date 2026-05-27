@@ -1036,9 +1036,10 @@ export async function getAffiliatePayouts(affiliateId) {
 
 
 const STORE_BASE_URL = String(
-  process.env.STORE_BASE_URL ||
-    process.env.FRONTEND_URL ||
-    "https://ozonteck-loja.onrender.com"
+  // IMPORTANTE: não usar FRONTEND_URL aqui.
+  // Em alguns ambientes ela aponta para o Admin/Vite (localhost:5173),
+  // o que gera links quebrados para os afiliados compartilharem.
+  process.env.STORE_BASE_URL || "https://ozonteck-loja.onrender.com"
 ).replace(/\/+$/, "");
 
 function roundMoney(value) {
