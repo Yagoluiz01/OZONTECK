@@ -10,6 +10,8 @@ import { fileURLToPath } from "url";
 import rateLimit from "express-rate-limit";
 import adminNotificationsRoutes from "./routes/adminNotifications.routes.js";
 import adminPushRoutes from "./routes/adminPush.routes.js";
+import adminStoreThemeRoutes from "./routes/adminStoreTheme.routes.js";
+import storeThemeRoutes from "./routes/storeTheme.routes.js";
 
 import { env } from "./config/env.js";
 import authRoutes from "./routes/auth.routes.js";
@@ -182,9 +184,11 @@ app.get("/api/health", (req, res) => {
 });
 
 app.use("/api/tracking", trackingRoutes);
+app.use("/api/store", storeThemeRoutes);
 app.use("/api/store", storeRoutes);
 app.use("/api/integrations/melhor-envio", melhorEnvioWebhookRoutes);
 
+app.use("/api/admin/store-theme", adminStoreThemeRoutes);
 app.use("/api/admin/marketing-pixels", adminMarketingPixelsRoutes);
 app.use("/api/admin/affiliate-marketing", adminAffiliateMarketingRoutes);
 app.use('/api/affiliate/marketing-kit', affiliateMarketingRoutes);

@@ -1,0 +1,15 @@
+Correção: comissão só fica liberada para pagamento depois da entrega.
+
+Arquivos alterados:
+- routes/store.routes.js
+- services/affiliateCommissionLifecycle.service.js
+- services/adminAffiliates.service.js
+- services/affiliatePortal.service.js
+
+Resumo:
+1. Comissão criada no pagamento agora fica com released_at = null.
+2. released_at só é preenchido pelo lifecycle/webhook de entrega.
+3. Comissão cancelada limpa released_at para não entrar em saldo.
+4. Admin e painel do afiliado só contam como liberado quando o pedido está entregue.
+
+Suba estes arquivos apenas no projeto da API.

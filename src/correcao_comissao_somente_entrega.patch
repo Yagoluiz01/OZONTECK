@@ -1,0 +1,105 @@
+--- original/routes/store.routes.js
++++ corrigido/routes/store.routes.js
+@@ -996,9 +996,10 @@
+     recruitment_bonus_amount: recruitmentCommissionAmount,
+     status: "approved",
+     approved_at: new Date().toISOString(),
+-    released_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
++    released_at: null,
+     metadata: {
+       source: "affiliate_recruitment_commission",
++      release_policy: "after_delivery",
+       order_id: order.id,
+       order_number: order.order_number || "",
+       order_total: safeOrderTotal,
+@@ -1146,9 +1147,10 @@
+     conversion_type: "sale_commission",
+     status: "approved",
+     approved_at: new Date().toISOString(),
+-    released_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
++    released_at: null,
+     metadata: {
+       source: "affiliate_sale_commission",
++      release_policy: "after_delivery",
+       commission_base: orderTotal,
+       subtotal: roundMoney(order.subtotal || 0),
+       shipping_amount: roundMoney(order.shipping_amount || 0),
+
+--- original/services/affiliateCommissionLifecycle.service.js
++++ corrigido/services/affiliateCommissionLifecycle.service.js
+@@ -92,11 +92,13 @@
+ 
+ function wasAlreadyReleasedByDelivery(conversion = {}) {
+   const metadata = safeMetadata(conversion.metadata);
+-
+-  return Boolean(
+-    isAlreadyReleased(conversion.status) ||
+-      (conversion.released_at && metadata.released_by_delivery)
+-  );
++  const status = normalizeStatus(conversion.status);
++
++  if (["paid", "pago"].includes(status)) {
++    return true;
++  }
++
++  return Boolean(conversion.released_at && metadata.released_by_delivery);
+ }
+ 
+ function getAffiliateLabel(conversion = {}) {
+@@ -337,16 +339,19 @@
+   const payloads = [
+     {
+       status: "cancelled",
++      released_at: null,
+       metadata,
+       notes: `${conversion.notes || ""}\nComissão cancelada automaticamente porque o pedido foi cancelado.`.trim(),
+     },
+     {
+       status: "rejected",
++      released_at: null,
+       metadata,
+       notes: `${conversion.notes || ""}\nComissão rejeitada automaticamente porque o pedido foi cancelado.`.trim(),
+     },
+     {
+       status: "failed",
++      released_at: null,
+       metadata,
+       notes: `${conversion.notes || ""}\nComissão invalidada automaticamente porque o pedido foi cancelado.`.trim(),
+     },
+
+--- original/services/adminAffiliates.service.js
++++ corrigido/services/adminAffiliates.service.js
+@@ -322,11 +322,7 @@
+     return "cancelled";
+   }
+ 
+-  if (
+-    isAdminOrderDelivered(order) ||
+-    isCommissionReleasedLikeStatus(conversion.status) ||
+-    Boolean(conversion.released_at)
+-  ) {
++  if (isAdminOrderDelivered(order)) {
+     return "delivered";
+   }
+ 
+
+--- original/services/affiliatePortal.service.js
++++ corrigido/services/affiliatePortal.service.js
+@@ -249,7 +249,7 @@
+     return "cancelled";
+   }
+ 
+-  if (isReleasedLikeStatus(conversion.status) || isOrderDelivered(order)) {
++  if (isOrderDelivered(order)) {
+     return "delivered";
+   }
+ 
+@@ -628,7 +628,7 @@
+       acc.total_conversions += 1;
+       acc.total_referred_sales += total;
+ 
+-      if (lifecycle === "delivered" || isReleasedLikeStatus(conversion.status)) {
++      if (lifecycle === "delivered") {
+         acc.released_commission += commission;
+       } else if (isPaidConversionStatus(conversion.status)) {
+         acc.paid_commission_by_conversion += commission;

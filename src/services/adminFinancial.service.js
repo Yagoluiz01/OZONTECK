@@ -1,3 +1,5 @@
+import { getFiscalSettings } from "./adminFiscal.service.js";
+
 const env = globalThis.env || {};
 
 const SUPABASE_URL =
@@ -71,7 +73,7 @@ async function supabaseFetch(path, options = {}) {
   return json;
 }
 
-async function optionalSupabaseFetch(path, options = {}) {
+async function optionalSupabaseFetch(path, options = {}, fallback = []) {
   try {
     return await supabaseFetch(path, options);
   } catch (error) {
@@ -79,7 +81,7 @@ async function optionalSupabaseFetch(path, options = {}) {
       "FINANCEIRO OPTIONAL FETCH:",
       error?.message || "Não foi possível buscar dados opcionais."
     );
-    return [];
+    return fallback;
   }
 }
 
@@ -113,6 +115,184 @@ function getPeriodRange(period) {
     startIso: start.toISOString(),
     endIso: end.toISOString(),
   };
+}
+
+
+function getComparableDate(value) {
+  const date = value ? new Date(value) : null;
+  return date && !Number.isNaN(date.getTime()) ? date : null;
+}
+
+function isDateInsideRange(value, startIso, endIso) {
+  const date = getComparableDate(value);
+
+  if (!date) return false;
+
+  const start = new Date(startIso);
+  const end = new Date(endIso);
+
+  return date >= start && date <= end;
+}
+
+function normalizeStatusValue(value = "") {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, "_");
+}
+
+const PAID_STATUS_VALUES = new Set([
+  "paid",
+  "approved",
+  "completed",
+  "complete",
+  "pago",
+  "aprovado",
+  "concluido",
+]);
+
+const CANCELED_STATUS_VALUES = new Set([
+  "cancelled",
+  "canceled",
+  "cancelado",
+  "rejected",
+  "rejeitado",
+  "refunded",
+  "estornado",
+  "charged_back",
+  "chargeback",
+  "failed",
+  "falhou",
+  "expired",
+  "expirado",
+]);
+
+function getOrderStatusValues(order = {}) {
+  return [
+    order.financial_status,
+    order.payment_status,
+    order.payment_raw_status,
+    order.status,
+    order.order_status,
+  ]
+    .map(normalizeStatusValue)
+    .filter(Boolean);
+}
+
+function isOrderCanceled(order = {}) {
+  return getOrderStatusValues(order).some((status) => CANCELED_STATUS_VALUES.has(status));
+}
+
+function isOrderPaid(order = {}) {
+  if (isOrderCanceled(order)) return false;
+
+  const statusValues = getOrderStatusValues(order);
+  const explicitPaid = statusValues.some((status) => PAID_STATUS_VALUES.has(status));
+
+  if (explicitPaid) return true;
+
+  return Boolean(order.paid_at || order.payment_approved_at || order.approved_at);
+}
+
+function getFinancialStatus(order = {}) {
+  if (isOrderCanceled(order)) return "canceled";
+  if (isOrderPaid(order)) return "paid";
+  return "pending";
+}
+
+function isRevenueOrder(order = {}) {
+  return getFinancialStatus(order) === "paid";
+}
+
+function getOrderFinancialDate(order = {}) {
+  return (
+    order.paid_at ||
+    order.payment_approved_at ||
+    order.approved_at ||
+    order.created_at ||
+    null
+  );
+}
+
+function getOrderAmount(order = {}) {
+  return roundMoney(
+    toNumber(order.gross_amount) ||
+      toNumber(order.total_amount) ||
+      toNumber(order.total) ||
+      toNumber(order.amount) ||
+      toNumber(order.total_price) ||
+      toNumber(order.payment_amount) ||
+      0
+  );
+}
+
+function getShippingChargedAmount(order = {}) {
+  return roundMoney(
+    toNumber(order.shipping_amount) ||
+      toNumber(order.freight_amount) ||
+      toNumber(order.shipping_price) ||
+      toNumber(order.delivery_fee) ||
+      0
+  );
+}
+
+function getShippingRealCost(order = {}) {
+  return roundMoney(
+    toNumber(order.shipping_cost) ||
+      toNumber(order.shipping_label_cost) ||
+      toNumber(order.shipping_quote_price) ||
+      toNumber(order.label_cost) ||
+      0
+  );
+}
+
+function getGatewayFee(order = {}) {
+  return roundMoney(
+    toNumber(order.gateway_fee) ||
+      toNumber(order.payment_gateway_fee) ||
+      toNumber(order.mercado_pago_fee) ||
+      toNumber(order.transaction_fee) ||
+      0
+  );
+}
+
+function getProductCost(order = {}) {
+  return roundMoney(
+    toNumber(order.product_cost) ||
+      toNumber(order.products_cost) ||
+      toNumber(order.cost_total) ||
+      toNumber(order.items_cost) ||
+      0
+  );
+}
+
+function getAdCost(order = {}) {
+  return roundMoney(
+    toNumber(order.ad_cost) ||
+      toNumber(order.traffic_cost) ||
+      toNumber(order.marketing_cost) ||
+      0
+  );
+}
+
+function getOtherCosts(order = {}) {
+  return roundMoney(
+    toNumber(order.other_costs) ||
+      toNumber(order.extra_costs) ||
+      toNumber(order.operational_costs) ||
+      0
+  );
+}
+
+function getRefundAmount(order = {}) {
+  return roundMoney(
+    toNumber(order.refunds_amount) ||
+      toNumber(order.refund_amount) ||
+      toNumber(order.refunded_amount) ||
+      0
+  );
 }
 
 function getShippingRepasseStatus(shippingAmount, shippingCost) {
@@ -193,20 +373,27 @@ function getDirectAffiliateCommission(order) {
       toNumber(order.affiliate_commission) ||
       toNumber(order.commission_amount) ||
       toNumber(order.affiliate_amount) ||
+      toNumber(order.recruitment_bonus_amount) ||
+      toNumber(order.network_commission_amount) ||
+      toNumber(order.level_bonus_amount) ||
       0
   );
 }
 
 function buildCommissionMap(conversions = []) {
   return (conversions || []).reduce((acc, item) => {
-    const status = String(item.status || "").toLowerCase();
+    const status = normalizeStatusValue(item.status);
 
-    if (["canceled", "cancelled", "rejected", "refunded"].includes(status)) {
+    if (CANCELED_STATUS_VALUES.has(status)) {
       return acc;
     }
 
     const amount = roundMoney(
       toNumber(item.commission_amount) ||
+        toNumber(item.recruitment_bonus_amount) ||
+        toNumber(item.network_commission) ||
+        toNumber(item.network_commission_amount) ||
+        toNumber(item.level_bonus_amount) ||
         toNumber(item.amount) ||
         toNumber(item.commission_value) ||
         0
@@ -258,22 +445,17 @@ function getAffiliateCommissionForOrder(order, commissionMap = {}) {
 }
 
 function normalizeOrder(order, commissionMap = {}) {
-  const grossAmount =
-    toNumber(order.gross_amount) ||
-    toNumber(order.total_amount) ||
-    toNumber(order.total) ||
-    toNumber(order.amount) ||
-    toNumber(order.total_price) ||
-    0;
-
-  const shippingAmount = toNumber(order.shipping_amount);
-  const shippingCost = toNumber(order.shipping_cost);
-  const gatewayFee = toNumber(order.gateway_fee);
-  const productCost = toNumber(order.product_cost);
-  const adCost = toNumber(order.ad_cost);
-  const otherCosts = toNumber(order.other_costs);
-  const refundsAmount = toNumber(order.refunds_amount);
+  const grossAmount = getOrderAmount(order);
+  const shippingAmount = getShippingChargedAmount(order);
+  const shippingCost = getShippingRealCost(order);
+  const gatewayFee = getGatewayFee(order);
+  const productCost = getProductCost(order);
+  const adCost = getAdCost(order);
+  const otherCosts = getOtherCosts(order);
+  const refundsAmount = getRefundAmount(order);
   const affiliateCommission = getAffiliateCommissionForOrder(order, commissionMap);
+  const financialStatus = getFinancialStatus(order);
+  const revenueOrder = financialStatus === "paid";
 
   const totalVariableCosts = roundMoney(
     productCost +
@@ -297,13 +479,13 @@ function normalizeOrder(order, commissionMap = {}) {
 
   const calculatedNetProfit = roundMoney(profitBeforeAffiliate - affiliateCommission);
 
-  const netAmount =
-    toNumber(order.net_amount) ||
-    roundMoney(grossAmount - gatewayFee - refundsAmount);
+  const netAmount = roundMoney(
+    toNumber(order.net_amount) || roundMoney(grossAmount - gatewayFee - refundsAmount)
+  );
 
-  const grossProfit =
-    toNumber(order.gross_profit) ||
-    roundMoney(grossAmount - productCost);
+  const grossProfit = roundMoney(
+    toNumber(order.gross_profit) || roundMoney(grossAmount - productCost)
+  );
 
   const netProfit =
     toNumber(order.net_profit) && affiliateCommission <= 0
@@ -315,8 +497,9 @@ function normalizeOrder(order, commissionMap = {}) {
 
   const shippingDifference = roundMoney(shippingAmount - shippingCost);
 
-  const missingGatewayFee = grossAmount > 0 && gatewayFee <= 0;
-  const missingProductCost = grossAmount > 0 && productCost <= 0;
+  const missingGatewayFee = revenueOrder && grossAmount > 0 && gatewayFee <= 0;
+  const missingProductCost = revenueOrder && grossAmount > 0 && productCost <= 0;
+  const missingShippingCost = revenueOrder && shippingAmount > 0 && shippingCost <= 0;
 
   return {
     id: order.id,
@@ -327,18 +510,18 @@ function normalizeOrder(order, commissionMap = {}) {
       order.id,
     customerName:
       order.customer_name ||
+      order.customer_full_name ||
       order.customer?.full_name ||
       order.customer?.name ||
       "Cliente não identificado",
     createdAt: order.created_at,
-    status: order.status || "unknown",
-    financialStatus:
-      order.financial_status ||
-      (["paid", "approved", "completed"].includes(
-        String(order.status || "").toLowerCase()
-      )
-        ? "paid"
-        : "pending"),
+    paidAt: order.paid_at || order.payment_approved_at || order.approved_at || null,
+    financialDate: getOrderFinancialDate(order),
+    status: order.status || order.order_status || order.payment_status || "unknown",
+    paymentStatus: order.payment_status || order.payment_raw_status || null,
+    orderStatus: order.order_status || order.status || null,
+    financialStatus,
+    isRevenueOrder: revenueOrder,
 
     grossAmount: roundMoney(grossAmount),
     shippingAmount: roundMoney(shippingAmount),
@@ -365,9 +548,9 @@ function normalizeOrder(order, commissionMap = {}) {
 
     missingGatewayFee,
     missingProductCost,
+    missingShippingCost,
   };
 }
-
 export async function listFinancialCategories(type = "") {
   const filters = ["select=*"];
 
@@ -561,18 +744,97 @@ async function listAffiliateConversionsForPeriod(period = "30d") {
   );
 }
 
-export async function listFinancialOrders(period = "30d") {
+async function listAffiliateBonusesForPeriod(period = "30d") {
+  const { startIso, endIso } = getPeriodRange(period);
+  const rows = await optionalSupabaseFetch(
+    "affiliate_bonus_overview?select=*&order=released_at.desc.nullslast&limit=1000",
+    { method: "GET" }
+  );
+
+  return (rows || []).filter((item) => {
+    const status = normalizeStatusValue(item.status);
+
+    if (CANCELED_STATUS_VALUES.has(status)) return false;
+
+    const referenceDate =
+      item.paid_at || item.approved_at || item.released_at || item.created_at || null;
+
+    return isDateInsideRange(referenceDate, startIso, endIso);
+  });
+}
+
+function getBonusAmount(item = {}) {
+  return roundMoney(
+    toNumber(item.bonus_amount) ||
+      toNumber(item.amount) ||
+      toNumber(item.current_bonus_amount) ||
+      0
+  );
+}
+
+async function listRawOrdersForPeriod(period = "30d") {
+  const { startIso, endIso } = getPeriodRange(period);
+  const start = encodeURIComponent(startIso);
+  const end = encodeURIComponent(endIso);
+
+  const periodQuery =
+    `orders?select=*&or=(and(created_at.gte.${start},created_at.lte.${end}),and(paid_at.gte.${start},paid_at.lte.${end}))&order=created_at.desc`;
+
+  const fallbackQuery =
+    `orders?select=*&created_at=gte.${start}&created_at=lte.${end}&order=created_at.desc`;
+
+  const rows = await optionalSupabaseFetch(periodQuery, { method: "GET" }, null);
+
+  if (Array.isArray(rows)) {
+    return rows;
+  }
+
+  return await supabaseFetch(fallbackQuery, { method: "GET" });
+}
+
+function filterRevenueOrders(orders = []) {
+  return (orders || []).filter((order) => order.isRevenueOrder === true);
+}
+
+function filterPaidPayableForPeriod(payable = [], period = "30d") {
   const { startIso, endIso } = getPeriodRange(period);
 
+  return (payable || []).filter((item) => {
+    if (normalizeStatusValue(item.status) !== "paid") return false;
+
+    const referenceDate = item.paid_date || item.paid_at || item.created_at || item.due_date;
+    return isDateInsideRange(referenceDate, startIso, endIso);
+  });
+}
+
+async function getFiscalEstimateForRevenue(faturamentoBruto = 0) {
+  try {
+    const settings = await getFiscalSettings();
+    const simplesPercent = toNumber(settings?.estimated_simples_percent, 0);
+    const estimatedSimples = roundMoney((toNumber(faturamentoBruto) * simplesPercent) / 100);
+
+    return {
+      estimatedSimples,
+      simplesPercent,
+      source: "fiscal_settings",
+    };
+  } catch (error) {
+    console.warn(
+      "FINANCEIRO FISCAL ESTIMATE:",
+      error?.message || "Não foi possível estimar impostos."
+    );
+
+    return {
+      estimatedSimples: 0,
+      simplesPercent: 0,
+      source: "unavailable",
+    };
+  }
+}
+
+export async function listFinancialOrders(period = "30d") {
   const [orders, conversions] = await Promise.all([
-    supabaseFetch(
-      `orders?select=*&created_at=gte.${encodeURIComponent(
-        startIso
-      )}&created_at=lte.${encodeURIComponent(endIso)}&order=created_at.desc`,
-      {
-        method: "GET",
-      }
-    ),
+    listRawOrdersForPeriod(period),
     listAffiliateConversionsForPeriod(period),
   ]);
 
@@ -642,7 +904,7 @@ async function getProductsRiskSummary() {
   };
 }
 
-function buildDre({ orders, payable, faturamentoBruto, receitaLiquida, lucroLiquido }) {
+function buildDre({ orders, payable, faturamentoBruto, receitaLiquida, lucroLiquido, estimatedTaxes = 0, affiliateBonuses = 0 }) {
   const custoProdutos = roundMoney(
     orders.reduce((sum, item) => sum + toNumber(item.productCost), 0)
   );
@@ -654,6 +916,9 @@ function buildDre({ orders, payable, faturamentoBruto, receitaLiquida, lucroLiqu
   const comissoesAfiliados = roundMoney(
     orders.reduce((sum, item) => sum + toNumber(item.affiliateCommission), 0)
   );
+
+  const bonusAfiliados = roundMoney(affiliateBonuses);
+  const impostosEstimados = roundMoney(estimatedTaxes);
 
   const custoTrafego = roundMoney(
     orders.reduce((sum, item) => sum + toNumber(item.adCost), 0)
@@ -677,7 +942,7 @@ function buildDre({ orders, payable, faturamentoBruto, receitaLiquida, lucroLiqu
 
   const despesasFixasPagas = roundMoney(
     payable
-      .filter((item) => item.status === "paid")
+      .filter((item) => normalizeStatusValue(item.status) === "paid")
       .reduce((sum, item) => sum + toNumber(item.amount), 0)
   );
 
@@ -685,6 +950,8 @@ function buildDre({ orders, payable, faturamentoBruto, receitaLiquida, lucroLiqu
     custoProdutos +
       taxasGateway +
       comissoesAfiliados +
+      bonusAfiliados +
+      impostosEstimados +
       custoTrafego +
       freteReal +
       outrasDespesasPedidos +
@@ -695,6 +962,8 @@ function buildDre({ orders, payable, faturamentoBruto, receitaLiquida, lucroLiqu
     custoProdutos +
       taxasGateway +
       comissoesAfiliados +
+      bonusAfiliados +
+      impostosEstimados +
       custoTrafego +
       freteReal +
       outrasDespesasPedidos
@@ -736,6 +1005,20 @@ function buildDre({ orders, payable, faturamentoBruto, receitaLiquida, lucroLiqu
       label: "(-) Comissões de afiliados",
       amount: roundMoney(comissoesAfiliados),
       percent: roundMoney((comissoesAfiliados / base) * 100),
+      type: "negative",
+    },
+    {
+      key: "bonus_afiliados",
+      label: "(-) Bônus de metas e níveis",
+      amount: roundMoney(bonusAfiliados),
+      percent: roundMoney((bonusAfiliados / base) * 100),
+      type: "negative",
+    },
+    {
+      key: "impostos_estimados",
+      label: "(-) Impostos estimados",
+      amount: roundMoney(impostosEstimados),
+      percent: roundMoney((impostosEstimados / base) * 100),
       type: "negative",
     },
     {
@@ -788,6 +1071,8 @@ function buildDre({ orders, payable, faturamentoBruto, receitaLiquida, lucroLiqu
     custoProdutos,
     taxasGateway,
     comissoesAfiliados,
+    bonusAfiliados,
+    impostosEstimados,
     custoTrafego,
     freteReal,
     outrasDespesasPedidos,
@@ -805,12 +1090,19 @@ function buildDre({ orders, payable, faturamentoBruto, receitaLiquida, lucroLiqu
 }
 
 export async function getFinancialSummary(period = "30d") {
-  const [orders, payable, receivable, productsRisk] = await Promise.all([
+  const [allOrders, payable, receivable, productsRisk, bonusRows] = await Promise.all([
     listFinancialOrders(period),
     listAccountsPayable(),
     listAccountsReceivable(),
     getProductsRiskSummary(),
+    listAffiliateBonusesForPeriod(period),
   ]);
+
+  const orders = filterRevenueOrders(allOrders);
+  const paidPayableForPeriod = filterPaidPayableForPeriod(payable, period);
+  const affiliateBonuses = roundMoney(
+    (bonusRows || []).reduce((sum, item) => sum + getBonusAmount(item), 0)
+  );
 
   const faturamentoBruto = orders.reduce(
     (sum, item) => sum + toNumber(item.grossAmount),
@@ -822,9 +1114,21 @@ export async function getFinancialSummary(period = "30d") {
     0
   );
 
-  const lucroLiquido = orders.reduce(
+  const fiscalEstimate = await getFiscalEstimateForRevenue(faturamentoBruto);
+  const estimatedTaxes = roundMoney(fiscalEstimate.estimatedSimples);
+
+  const lucroLiquidoAntesFixas = orders.reduce(
     (sum, item) => sum + toNumber(item.netProfit),
     0
+  );
+
+  const despesasFixasPagasPeriodo = paidPayableForPeriod.reduce(
+    (sum, item) => sum + toNumber(item.amount),
+    0
+  );
+
+  const lucroLiquido = roundMoney(
+    lucroLiquidoAntesFixas - despesasFixasPagasPeriodo - affiliateBonuses - estimatedTaxes
   );
 
   const despesasPedidos = orders.reduce((sum, item) => {
@@ -881,18 +1185,18 @@ export async function getFinancialSummary(period = "30d") {
   );
 
   const contasPagarPendentes = payable
-    .filter((item) => item.status === "pending" || item.status === "overdue")
+    .filter((item) => ["pending", "overdue"].includes(normalizeStatusValue(item.status)))
     .reduce((sum, item) => sum + toNumber(item.amount), 0);
 
-  const contasPagarPagas = payable
-    .filter((item) => item.status === "paid")
-    .reduce((sum, item) => sum + toNumber(item.amount), 0);
+  const contasPagarPagas = despesasFixasPagasPeriodo;
 
   const contasReceberPendentes = receivable
-    .filter((item) => item.status === "pending" || item.status === "overdue")
+    .filter((item) => ["pending", "overdue"].includes(normalizeStatusValue(item.status)))
     .reduce((sum, item) => sum + toNumber(item.amount), 0);
 
-  const despesasTotais = roundMoney(despesasPedidos + contasPagarPagas);
+  const despesasTotais = roundMoney(
+    despesasPedidos + contasPagarPagas + affiliateBonuses + estimatedTaxes
+  );
 
   const margem =
     faturamentoBruto > 0
@@ -903,25 +1207,34 @@ export async function getFinancialSummary(period = "30d") {
     orders.length > 0 ? roundMoney(faturamentoBruto / orders.length) : 0;
 
   const overdueBills =
-    payable.filter((item) => item.status === "overdue").length +
-    receivable.filter((item) => item.status === "overdue").length;
+    payable.filter((item) => normalizeStatusValue(item.status) === "overdue").length +
+    receivable.filter((item) => normalizeStatusValue(item.status) === "overdue").length;
 
   const ordersWithLoss = orders.filter((item) => toNumber(item.netProfit) < 0).length;
-  const pedidosPagos = orders.filter((item) => item.financialStatus === "paid").length;
-  const pedidosPendentes = orders.filter((item) => item.financialStatus !== "paid").length;
+  const pedidosPagos = orders.length;
+  const pedidosPendentes = allOrders.filter((item) => item.financialStatus === "pending").length;
+  const pedidosCancelados = allOrders.filter((item) => item.financialStatus === "canceled").length;
   const ordersWithoutGatewayFee = orders.filter((item) => item.missingGatewayFee).length;
   const ordersWithoutProductCost = orders.filter((item) => item.missingProductCost).length;
+  const ordersWithoutShippingCost = orders.filter((item) => item.missingShippingCost).length;
 
   const dre = buildDre({
     orders,
-    payable,
+    payable: paidPayableForPeriod,
     faturamentoBruto,
     receitaLiquida,
     lucroLiquido,
+    estimatedTaxes,
+    affiliateBonuses,
   });
 
   return {
     period,
+    calculationPolicy: {
+      revenue: "Somente pedidos pagos/aprovados entram no faturamento, lucro, frete e custos.",
+      excludedOrders: "Pedidos pendentes/cancelados aparecem na aba de pedidos, mas ficam fora dos cards e DRE.",
+      taxes: "Impostos são estimados pela configuração fiscal e devem ser validados pelo contador.",
+    },
     cards: {
       faturamentoBruto: roundMoney(faturamentoBruto),
       receitaLiquida: roundMoney(receitaLiquida),
@@ -935,15 +1248,19 @@ export async function getFinancialSummary(period = "30d") {
     costs: {
       totalGatewayFees: roundMoney(totalGatewayFees),
       totalAffiliateCommissions: roundMoney(totalAffiliateCommissions),
+      totalAffiliateBonuses: roundMoney(affiliateBonuses),
+      estimatedTaxes: roundMoney(estimatedTaxes),
+      estimatedTaxPercent: roundMoney(fiscalEstimate.simplesPercent),
       totalProductCosts: roundMoney(totalProductCosts),
       totalShippingReal: roundMoney(totalShippingReal),
       totalAdCosts: roundMoney(totalAdCosts),
       totalOtherCosts: roundMoney(totalOtherCosts),
-      totalVariableCosts: roundMoney(despesasPedidos),
+      totalVariableCosts: roundMoney(despesasPedidos + affiliateBonuses + estimatedTaxes),
       fixedExpensesPaid: roundMoney(contasPagarPagas),
       totalCostsWithFixedExpenses: roundMoney(despesasTotais),
       ordersWithoutGatewayFee,
       ordersWithoutProductCost,
+      ordersWithoutShippingCost,
     },
     shipping: {
       totalCharged: roundMoney(totalShippingCharged),
@@ -956,10 +1273,15 @@ export async function getFinancialSummary(period = "30d") {
     highlights: {
       pedidosPagos,
       pedidosPendentes,
+      pedidosCancelados,
+      totalOrdersInPeriod: allOrders.length,
+      revenueOrdersInPeriod: orders.length,
+      excludedOrdersFromRevenue: allOrders.length - orders.length,
       overdueBills,
       ordersWithLoss,
       ordersWithoutGatewayFee,
       ordersWithoutProductCost,
+      ordersWithoutShippingCost,
       productsWithoutPricing: productsRisk.withoutPricing,
       productsBelowSafe: productsRisk.belowSafe,
       productsBelowSuggested: productsRisk.belowSuggested,
@@ -969,6 +1291,30 @@ export async function getFinancialSummary(period = "30d") {
     },
     productAlerts: productsRisk.alertItems,
   };
+}
+
+async function listAffiliateConversionsForOrder(order = {}) {
+  const keys = [
+    order.id,
+    order.order_number,
+    order.external_reference,
+    order.payment_external_reference,
+  ].filter(Boolean);
+
+  if (!keys.length) return [];
+
+  const safeKeys = keys.map((key) => String(key).replace(/"/g, ""));
+  const orParts = safeKeys.flatMap((key) => [
+    `order_id.eq.${encodeURIComponent(key)}`,
+    `order_number.eq.${encodeURIComponent(key)}`,
+    `external_reference.eq.${encodeURIComponent(key)}`,
+    `payment_external_reference.eq.${encodeURIComponent(key)}`,
+  ]);
+
+  return await optionalSupabaseFetch(
+    `affiliate_conversions?select=*&or=(${orParts.join(",")})&order=created_at.desc`,
+    { method: "GET" }
+  );
 }
 
 export async function syncOrderFinancialData(orderId) {
@@ -985,7 +1331,7 @@ export async function syncOrderFinancialData(orderId) {
     throw new Error("Pedido não encontrado.");
   }
 
-  const conversions = await listAffiliateConversionsForPeriod("30d");
+  const conversions = await listAffiliateConversionsForOrder(order);
   const commissionMap = buildCommissionMap(conversions);
   const normalized = normalizeOrder(order, commissionMap);
 
