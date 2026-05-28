@@ -247,6 +247,55 @@ async function fetchSettingsRow() {
   return Array.isArray(rows) ? rows[0] || null : null;
 }
 
+
+function normalizePublicStoreSettings(row = {}) {
+  const storeName = normalizeText(row.store_name || row.brand_name || "OZONTECK") || "OZONTECK";
+  const storeEmail = normalizeText(row.store_email);
+  const whatsapp = normalizeText(row.whatsapp);
+  const supportPhone = normalizeText(row.support_phone);
+  const whatsappUrl = normalizeText(row.whatsapp_url);
+
+  return {
+    storeName,
+    storeEmail,
+    whatsapp,
+    supportPhone,
+    baseCity: normalizeText(row.base_city),
+    baseState: normalizeText(row.base_state),
+    currencyCode: normalizeText(row.currency_code) || "BRL",
+    timezone: normalizeText(row.timezone) || "America/Bahia",
+    instagramUrl: normalizeText(row.instagram_url),
+    facebookUrl: normalizeText(row.facebook_url),
+    tiktokUrl: normalizeText(row.tiktok_url),
+    whatsappUrl,
+    brandName: normalizeText(row.brand_name) || storeName,
+    brandSlogan: normalizeText(row.brand_slogan),
+  };
+}
+
+async function fetchPublicStoreSettings() {
+  try {
+    const response = await fetch(`${env.supabaseUrl}/rest/v1/rpc/get_store_settings`, {
+      method: "POST",
+      headers: supabaseHeaders(),
+      body: JSON.stringify({}),
+    });
+
+    const data = await response.json().catch(() => null);
+
+    if (!response.ok) {
+      console.warn("TEMA DA LOJA: configurações gerais indisponíveis.", data?.message || data?.error || response.status);
+      return null;
+    }
+
+    const row = Array.isArray(data) ? data[0] : data;
+    return row ? normalizePublicStoreSettings(row) : null;
+  } catch (error) {
+    console.warn("TEMA DA LOJA: erro ao buscar configurações gerais.", error?.message || error);
+    return null;
+  }
+}
+
 async function fetchCustomPaletteRows() {
   const params = new URLSearchParams({
     select: "*",
@@ -297,10 +346,20 @@ export async function getStoreThemeBundle() {
 }
 
 export async function getPublicStoreTheme() {
-  const bundle = await getStoreThemeBundle();
+  const [bundle, publicSettings] = await Promise.all([
+    getStoreThemeBundle(),
+    fetchPublicStoreSettings(),
+  ]);
+
+  const publicTheme = {
+    ...bundle.theme,
+    brandName: publicSettings?.storeName || bundle.theme.brandName,
+    brandSlogan: bundle.theme.brandSlogan || publicSettings?.brandSlogan || "",
+  };
 
   return {
-    theme: bundle.theme,
+    theme: publicTheme,
+    settings: publicSettings,
     setupRequired: bundle.setupRequired,
     setupMessage: bundle.setupMessage,
   };
