@@ -253,7 +253,9 @@ function normalizePublicStoreSettings(row = {}) {
   const storeEmail = normalizeText(row.store_email);
   const whatsapp = normalizeText(row.whatsapp);
   const supportPhone = normalizeText(row.support_phone);
-  const whatsappUrl = normalizeText(row.whatsapp_url);
+  // O link antigo não pode sobrescrever o número novo salvo em Configurações > Geral.
+  // Se existir número de WhatsApp, a loja monta o link dinâmico a partir desse número.
+  const whatsappUrl = whatsapp ? "" : normalizeText(row.whatsapp_url);
 
   return {
     storeName,
