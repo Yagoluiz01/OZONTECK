@@ -202,6 +202,21 @@ function normalizeEmail(email) {
   return String(email || "").trim().toLowerCase();
 }
 
+function hashPasswordResetToken(token) {
+  return crypto.createHash("sha256").update(token).digest("hex");
+}
+
+function getAffiliateResetStoreBaseUrl() {
+  return (
+    process.env.STORE_PUBLIC_URL ||
+    process.env.STORE_BASE_URL ||
+    process.env.STORE_FRONTEND_URL ||
+    process.env.FRONTEND_URL ||
+    env.frontendUrl ||
+    "https://ozonteck-loja.onrender.com"
+  ).replace(/\/+$/, "");
+}
+
 
 async function findAffiliateByEmail(normalizedEmail, selectFields) {
   const email = normalizeEmail(normalizedEmail);
@@ -1590,14 +1605,6 @@ export async function updateAffiliateProfile(affiliateId, payload = {}) {
 }
 
 
-function generateTemporaryPassword() {
-  const prefix = "OZ";
-  const random = crypto.randomBytes(4).toString("hex").toUpperCase();
-  const suffix = Math.floor(100 + Math.random() * 900);
-
-  return `${prefix}${random}@${suffix}`;
-}
-
 function isAffiliateActive(affiliate = {}) {
   const normalizedStatus = String(affiliate.status || "active")
     .trim()
@@ -1642,25 +1649,53 @@ export async function requestAffiliatePasswordReset({ email } = {}) {
     };
   }
 
-  const temporaryPassword = generateTemporaryPassword();
-  const passwordHash = await bcrypt.hash(temporaryPassword, 10);
+  const rawToken = crypto.randomBytes(32).toString("hex");
+  const tokenHash = hashPasswordResetToken(rawToken);
+  const expiresInMinutes = 30;
+  const expiresAt = new Date(Date.now() + expiresInMinutes * 60 * 1000).toISOString();
+  const now = new Date().toISOString();
 
-  await supabaseRequest(`/affiliates?id=eq.${encodeURIComponent(affiliate.id)}`, {
-    method: "PATCH",
+  await supabaseRequest(
+    `/affiliate_password_resets?affiliate_id=eq.${encodeURIComponent(
+      affiliate.id
+    )}&used_at=is.null`,
+    {
+      method: "PATCH",
+      body: {
+        used_at: now,
+      },
+    }
+  );
+
+  await supabaseRequest("/affiliate_password_resets", {
+    method: "POST",
     body: {
-      password_hash: passwordHash,
-      updated_at: new Date().toISOString(),
+      affiliate_id: affiliate.id,
+      email: normalizedEmail,
+      token_hash: tokenHash,
+      expires_at: expiresAt,
     },
   });
 
-  const notification = await notifyAffiliatePasswordReset(
-    affiliate,
-    temporaryPassword
-  );
+  const resetLink = `${getAffiliateResetStoreBaseUrl()}/pages-html/afiliado-redefinir-senha.html?token=${rawToken}`;
+
+  const notification = await notifyAffiliatePasswordReset(affiliate, {
+    resetLink,
+    expiresInMinutes,
+  });
+
+  if (!notification?.sent) {
+    const error = new Error(
+      "Não foi possível enviar o link de redefinição pelo Brevo. Verifique as variáveis SMTP no Render."
+    );
+    error.statusCode = 502;
+    error.details = notification;
+    throw error;
+  }
 
   return {
-    sent: Boolean(notification?.sent),
-    skipped: Boolean(notification?.skipped),
+    sent: true,
+    skipped: false,
     notification,
   };
 }

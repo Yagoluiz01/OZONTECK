@@ -632,11 +632,18 @@ export async function notifyAffiliateRejected(application = {}) {
   return adminNotification;
 }
 
-export async function notifyAffiliatePasswordReset(affiliate = {}) {
+export async function notifyAffiliatePasswordReset(affiliate = {}, options = {}) {
+  const resetLink = String(options.resetLink || "").trim();
+  const expiresInMinutes = Number(options.expiresInMinutes || 30);
+  const isResetLinkRequest = Boolean(resetLink);
+  const title = isResetLinkRequest
+    ? "Solicitação de redefinição de senha"
+    : "Senha de afiliado redefinida";
+
   const adminNotification = await safeCreateAdminNotification({
     type: "affiliate_password_reset",
-    title: "Senha de afiliado redefinida",
-    message: `${getAffiliateName(affiliate)} redefiniu ou solicitou redefinição de senha no painel de afiliado.`,
+    title,
+    message: `${getAffiliateName(affiliate)} solicitou redefinição de senha no painel de afiliado.`,
     entity_type: "affiliate",
     entity_id: affiliate.id || affiliate.affiliate_id || null,
     priority: "normal",
@@ -648,18 +655,58 @@ export async function notifyAffiliatePasswordReset(affiliate = {}) {
       ref_code: affiliate.ref_code || "",
       status: affiliate.status || "",
       reset_at: affiliate.reset_at || affiliate.updated_at || new Date().toISOString(),
+      has_reset_link: isResetLinkRequest,
     },
   });
 
-  await notifyAdminByEmail({
-    subject: "Senha de afiliado redefinida - OZONTECK",
-    title: "Senha de afiliado redefinida",
+  const adminEmailResult = await notifyAdminByEmail({
+    subject: `${title} - OZONTECK`,
+    title,
     lines: [
-      `${getAffiliateName(affiliate)} redefiniu ou solicitou redefinição de senha no painel de afiliado.`,
+      `${getAffiliateName(affiliate)} solicitou redefinição de senha no painel de afiliado.`,
       affiliate.email ? `Email: ${affiliate.email}` : "",
       affiliate.ref_code ? `Código: ${affiliate.ref_code}` : "",
     ],
   });
 
-  return adminNotification;
+  let affiliateEmailResult = {
+    success: false,
+    skipped: true,
+    reason: "missing_reset_link_or_email",
+  };
+
+  if (affiliate.email && resetLink) {
+    affiliateEmailResult = await sendBrevoEmail({
+      to: affiliate.email,
+      subject: "Crie uma nova senha para seu painel OZONTECK",
+      text: [
+        `Olá, ${getAffiliateName(affiliate)}.`,
+        "Recebemos uma solicitação para redefinir a senha do seu painel de afiliado OZONTECK.",
+        `Clique no link abaixo para criar uma nova senha. O link expira em ${expiresInMinutes} minutos.`,
+        resetLink,
+        "Se você não solicitou essa alteração, ignore este e-mail.",
+      ].join("\n\n"),
+      html: buildHtmlEmail({
+        title: "Crie uma nova senha",
+        greeting: `Olá, ${getAffiliateName(affiliate)}.`,
+        lines: [
+          "Recebemos uma solicitação para redefinir a senha do seu painel de afiliado OZONTECK.",
+          `Clique no botão abaixo para criar uma nova senha. O link expira em ${expiresInMinutes} minutos.`,
+          "Nenhuma senha temporária foi gerada. A senha só será alterada depois que você criar a nova senha pelo link seguro.",
+          "Se você não solicitou essa alteração, ignore este e-mail.",
+        ],
+        actionUrl: resetLink,
+        actionLabel: "Criar nova senha",
+      }),
+    });
+  }
+
+  return {
+    adminNotification,
+    adminEmail: adminEmailResult,
+    affiliateEmail: affiliateEmailResult,
+    sent: Boolean(affiliateEmailResult?.success),
+    skipped: Boolean(affiliateEmailResult?.skipped),
+    reason: affiliateEmailResult?.reason || null,
+  };
 }
