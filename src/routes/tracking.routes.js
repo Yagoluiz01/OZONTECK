@@ -36,6 +36,160 @@ function safeJsonParse(value, fallback = null) {
   }
 }
 
+
+const CHECKOUT_RECOVERY_DELAY_MINUTES = 15;
+const ORDER_RECOVERY_DELAY_MINUTES = 30;
+const RECOVERY_ORDER_EVENT_TYPES = [
+  "checkout_order_created",
+  "checkout_payment_confirmed",
+  "payment_success",
+  "purchase",
+];
+
+function clampMinutes(value, fallback, max = 24 * 60) {
+  const minutes = Number(value);
+  if (!Number.isFinite(minutes) || minutes < 0) return fallback;
+  return Math.min(Math.floor(minutes), max);
+}
+
+function addMinutesIso(value, minutes) {
+  const time = Date.parse(value || "");
+  if (!Number.isFinite(time)) return null;
+  return new Date(time + minutes * 60 * 1000).toISOString();
+}
+
+function secondsUntil(value, nowMs = Date.now()) {
+  const time = Date.parse(value || "");
+  if (!Number.isFinite(time)) return 0;
+  return Math.max(0, Math.ceil((time - nowMs) / 1000));
+}
+
+function isPaidStatus(value) {
+  const status = String(value || "").trim().toLowerCase();
+  return ["paid", "pago", "approved", "aprovado", "confirmed", "confirmado"].includes(status);
+}
+
+function parseTrackingMetadata(value) {
+  const parsed = safeJsonParse(value, null);
+  return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+}
+
+function normalizeOrderTrackingEvent(row = {}) {
+  const metadata = parseTrackingMetadata(row.section);
+
+  return {
+    id: row.id,
+    session_id: row.session_id,
+    event_type: row.event_type,
+    created_at: row.created_at,
+    order_number: normalizeText(
+      metadata.order_number ||
+        metadata.orderNumber ||
+        metadata.external_reference ||
+        metadata.externalReference
+    ),
+    payment_status: normalizeText(metadata.payment_status || metadata.paymentStatus),
+    payment_gateway: normalizeText(metadata.payment_gateway || metadata.paymentGateway),
+    payment_method: normalizeText(metadata.payment_method || metadata.paymentMethod),
+  };
+}
+
+function applyCheckoutRecoveryState(lead, options = {}) {
+  const nowMs = Number(options.nowMs || Date.now());
+  const checkoutDelayMinutes = Number(options.checkoutDelayMinutes ?? CHECKOUT_RECOVERY_DELAY_MINUTES);
+  const orderDelayMinutes = Number(options.orderDelayMinutes ?? ORDER_RECOVERY_DELAY_MINUTES);
+  const orderEvent = options.orderEvent || null;
+  const order = options.order || null;
+  const paid = isPaidStatus(order?.payment_status) || isPaidStatus(orderEvent?.payment_status);
+  const hasPhone = Boolean(lead.phone_digits || normalizePhone(lead.phone));
+
+  const base = {
+    ...lead,
+    order_number: order?.order_number || orderEvent?.order_number || null,
+    order_payment_status: order?.payment_status || orderEvent?.payment_status || null,
+    order_status: order?.order_status || null,
+    payment_gateway: order?.payment_gateway || orderEvent?.payment_gateway || null,
+    recovery_delay_minutes: checkoutDelayMinutes,
+    order_recovery_delay_minutes: orderDelayMinutes,
+    recovery_status: "waiting",
+    recovery_label: "Aguardando prazo",
+    recovery_message: "Cliente ainda pode estar finalizando o checkout.",
+    recovery_ready_at: addMinutesIso(lead.created_at, checkoutDelayMinutes),
+    wait_seconds_remaining: 0,
+    is_recoverable: false,
+  };
+
+  if (paid) {
+    return {
+      ...base,
+      recovery_status: "converted",
+      recovery_label: "Pedido pago",
+      recovery_message: "Cliente já confirmou o pagamento. Não chamar para recuperação.",
+      recovery_ready_at: null,
+      wait_seconds_remaining: 0,
+      is_recoverable: false,
+    };
+  }
+
+  if (orderEvent) {
+    const readyAt = addMinutesIso(orderEvent.created_at, orderDelayMinutes);
+    const remaining = secondsUntil(readyAt, nowMs);
+    const ready = remaining <= 0;
+
+    if (!hasPhone) {
+      return {
+        ...base,
+        recovery_status: "missing_phone",
+        recovery_label: "Sem WhatsApp",
+        recovery_message: "Pedido criado, mas ainda não existe telefone para chamar no WhatsApp.",
+        recovery_ready_at: readyAt,
+        wait_seconds_remaining: remaining,
+        is_recoverable: false,
+      };
+    }
+
+    return {
+      ...base,
+      recovery_status: ready ? "payment_pending" : "order_waiting",
+      recovery_label: ready ? "Pagamento pendente" : "Pedido em andamento",
+      recovery_message: ready
+        ? "Pedido criado e prazo mínimo finalizado. Pode chamar com cuidado."
+        : "Pedido foi criado recentemente. Aguarde antes de chamar para não atrapalhar a finalização.",
+      recovery_ready_at: readyAt,
+      wait_seconds_remaining: remaining,
+      is_recoverable: ready,
+    };
+  }
+
+  const readyAt = addMinutesIso(lead.created_at, checkoutDelayMinutes);
+  const remaining = secondsUntil(readyAt, nowMs);
+  const ready = remaining <= 0;
+
+  if (!hasPhone) {
+    return {
+      ...base,
+      recovery_status: "missing_phone",
+      recovery_label: "Sem WhatsApp",
+      recovery_message: "Lead captado, mas sem telefone para recuperação pelo WhatsApp.",
+      recovery_ready_at: readyAt,
+      wait_seconds_remaining: remaining,
+      is_recoverable: false,
+    };
+  }
+
+  return {
+    ...base,
+    recovery_status: ready ? "ready" : "waiting",
+    recovery_label: ready ? "WhatsApp pronto" : "Aguardando prazo",
+    recovery_message: ready
+      ? "Prazo mínimo finalizado. Lead liberado para recuperação."
+      : "Cliente ainda pode estar finalizando a compra. Aguarde o prazo mínimo.",
+    recovery_ready_at: readyAt,
+    wait_seconds_remaining: remaining,
+    is_recoverable: ready,
+  };
+}
+
 function normalizeLeadItems(items = []) {
   if (!Array.isArray(items)) return [];
 
@@ -532,6 +686,14 @@ router.get("/checkout-leads", async (req, res) => {
     const dateFrom = normalizeText(req.query.date_from);
     const dateTo = normalizeText(req.query.date_to);
     const limit = toPositiveInt(req.query.limit, 200);
+    const checkoutDelayMinutes = clampMinutes(
+      req.query.recovery_delay_minutes,
+      CHECKOUT_RECOVERY_DELAY_MINUTES
+    );
+    const orderDelayMinutes = clampMinutes(
+      req.query.order_recovery_delay_minutes,
+      ORDER_RECOVERY_DELAY_MINUTES
+    );
 
     let query = supabase
       .from("lead_events")
@@ -565,10 +727,82 @@ router.get("/checkout-leads", async (req, res) => {
       if (!grouped.has(key)) grouped.set(key, lead);
     });
 
-    const leads = Array.from(grouped.values()).slice(0, limit);
+    const groupedLeads = Array.from(grouped.values());
+    const sessionIds = groupedLeads
+      .map((lead) => normalizeText(lead.session_id))
+      .filter(Boolean);
+
+    const latestOrderEventBySession = new Map();
+
+    if (sessionIds.length) {
+      const { data: orderEvents, error: orderEventsError } = await supabase
+        .from("lead_events")
+        .select("id, session_id, event_type, section, created_at")
+        .in("session_id", sessionIds)
+        .in("event_type", RECOVERY_ORDER_EVENT_TYPES)
+        .order("created_at", { ascending: false })
+        .limit(Math.min(sessionIds.length * 6, 1000));
+
+      if (orderEventsError) {
+        console.error("TRACKING GET CHECKOUT ORDER EVENTS ERROR:", orderEventsError);
+      } else {
+        (Array.isArray(orderEvents) ? orderEvents : []).forEach((row) => {
+          const event = normalizeOrderTrackingEvent(row);
+          if (!event.session_id) return;
+          if (!latestOrderEventBySession.has(event.session_id)) {
+            latestOrderEventBySession.set(event.session_id, event);
+          }
+        });
+      }
+    }
+
+    const orderNumbers = Array.from(latestOrderEventBySession.values())
+      .map((event) => event.order_number)
+      .filter(Boolean);
+    const orderByNumber = new Map();
+
+    if (orderNumbers.length) {
+      const { data: orders, error: ordersError } = await supabase
+        .from("orders")
+        .select("id, order_number, payment_status, order_status, payment_gateway, total_amount, created_at")
+        .in("order_number", orderNumbers)
+        .limit(Math.min(orderNumbers.length, 300));
+
+      if (ordersError) {
+        console.error("TRACKING GET CHECKOUT ORDERS ERROR:", ordersError);
+      } else {
+        (Array.isArray(orders) ? orders : []).forEach((order) => {
+          if (order?.order_number) {
+            orderByNumber.set(String(order.order_number), order);
+          }
+        });
+      }
+    }
+
+    const nowMs = Date.now();
+    const leads = groupedLeads
+      .map((lead) => {
+        const orderEvent = latestOrderEventBySession.get(lead.session_id) || null;
+        const order = orderEvent?.order_number
+          ? orderByNumber.get(String(orderEvent.order_number)) || null
+          : null;
+
+        return applyCheckoutRecoveryState(lead, {
+          nowMs,
+          checkoutDelayMinutes,
+          orderDelayMinutes,
+          orderEvent,
+          order,
+        });
+      })
+      .slice(0, limit);
 
     return res.status(200).json({
       success: true,
+      meta: {
+        checkout_recovery_delay_minutes: checkoutDelayMinutes,
+        order_recovery_delay_minutes: orderDelayMinutes,
+      },
       data: leads,
     });
   } catch (error) {
