@@ -10,6 +10,7 @@ import {
 } from "../services/affiliateNotification.service.js";
 import { sendPushToAffiliate } from "../services/affiliatePush.service.js";
 import { getPublicAffiliateStorefront } from "../services/affiliatePortal.service.js";
+import { rankHomeProducts, rankStorefrontProducts } from "../services/productRanking.service.js";
 import express from "express";
 import bcrypt from "bcryptjs";
 import { requireAdminAuth } from "../middlewares/auth.middleware.js";
@@ -1409,6 +1410,20 @@ function normalizeProduct(product) {
         : toNumber(product?.payment_net_value, 0),
     home_order: toNumber(product?.home_order, 0),
     homeOrder: toNumber(product?.home_order, 0),
+    created_at: product?.created_at || null,
+    createdAt: product?.created_at || null,
+    updated_at: product?.updated_at || null,
+    updatedAt: product?.updated_at || null,
+    sales_count: toNumber(product?.sales_count ?? product?.total_sales, 0),
+    salesCount: toNumber(product?.sales_count ?? product?.total_sales, 0),
+    total_sales: toNumber(product?.total_sales ?? product?.sales_count, 0),
+    totalSales: toNumber(product?.total_sales ?? product?.sales_count, 0),
+    views_count: toNumber(product?.views_count ?? product?.total_views, 0),
+    viewsCount: toNumber(product?.views_count ?? product?.total_views, 0),
+    margin_percent: toNumber(product?.margin_percent ?? product?.real_margin_percent, 0),
+    marginPercent: toNumber(product?.margin_percent ?? product?.real_margin_percent, 0),
+    affiliate_commission_percent: toNumber(product?.affiliate_commission_percent, 0),
+    affiliateCommissionPercent: toNumber(product?.affiliate_commission_percent, 0),
     pricing_updated_at: product?.pricing_updated_at || null,
     pricingUpdatedAt: product?.pricing_updated_at || null
   };
@@ -2733,24 +2748,17 @@ router.get("/products/home", async (req, res) => {
 
     const limit = Math.max(1, Math.min(24, Number(req.query.limit || 8) || 8));
 
-    const products = filterKitChildrenForStorefront(
-      response.data
-        .map(normalizeProduct)
-        .filter((product) => {
-          const isActive = String(product.status || "").toLowerCase() === "active";
-          const hasStock = Number(product.stockQuantity || 0) > 0;
-          return product.id && product.name && isActive && hasStock;
-        })
-    )
-      .filter((product) => product.showOnHome || product.show_on_home || product.showHome)
-      .sort((a, b) => {
-        const orderA = Number(a.homeOrder || 0);
-        const orderB = Number(b.homeOrder || 0);
-
-        if (orderA !== orderB) return orderA - orderB;
-        return String(a.name || "").localeCompare(String(b.name || ""), "pt-BR");
-      })
-      .slice(0, limit);
+    const products = rankHomeProducts(
+      filterKitChildrenForStorefront(
+        response.data
+          .map(normalizeProduct)
+          .filter((product) => {
+            const isActive = String(product.status || "").toLowerCase() === "active";
+            const hasStock = Number(product.stockQuantity || 0) > 0;
+            return product.id && product.name && isActive && hasStock;
+          })
+      ).filter((product) => product.showOnHome || product.show_on_home || product.showHome)
+    ).slice(0, limit);
 
     res.set("Cache-Control", "no-store");
 
@@ -2781,14 +2789,16 @@ router.get("/products", async (req, res) => {
       });
     }
 
-    const products = response.data
-  .map(normalizeProduct)
-  .filter((product) => product.id && product.name);
+    const products = rankStorefrontProducts(
+      response.data
+        .map(normalizeProduct)
+        .filter((product) => product.id && product.name)
+    );
 
-return res.status(200).json({
-  success: true,
-  products
-});
+    return res.status(200).json({
+      success: true,
+      products
+    });
 
   } catch (error) {
     console.error("ERRO AO LISTAR PRODUTOS DA LOJA:", error);
