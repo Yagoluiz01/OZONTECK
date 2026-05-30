@@ -22,6 +22,7 @@ import customersRoutes from "./routes/customers.routes.js";
 import settingsRoutes from "./routes/settings.routes.js";
 import trackingRoutes from "./routes/tracking.routes.js";
 import storeRoutes from "./routes/store.routes.js";
+import storeCustomerAccountRoutes from "./routes/storeCustomerAccount.routes.js";
 import shippingRoutes from "./routes/shipping.routes.js";
 import adminFinancialRoutes from "./routes/adminFinancial.routes.js";
 import adminPricingRoutes from "./routes/adminPricing.routes.js";
@@ -185,6 +186,7 @@ app.get("/api/health", (req, res) => {
 
 app.use("/api/tracking", trackingRoutes);
 app.use("/api/store", storeThemeRoutes);
+app.use("/api/store/customer", storeCustomerAccountRoutes);
 app.use("/api/store", storeRoutes);
 app.use("/api/integrations/melhor-envio", melhorEnvioWebhookRoutes);
 
