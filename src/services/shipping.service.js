@@ -835,13 +835,48 @@ function isMelhorEnvioDeliveredStatus(status) {
   ].includes(normalizeShippingStatus(status));
 }
 
+function pickFirstNonEmptyString(...values) {
+  for (const value of values) {
+    const text = String(value || "").trim();
+
+    if (text) {
+      return text;
+    }
+  }
+
+  return "";
+}
+
+function hasSavedShippingLabelData(order = {}) {
+  return Boolean(
+    pickFirstNonEmptyString(
+      order.shipping_label_url,
+      order.shipping_label_pdf_url,
+      order.shipping_tracking_code,
+      order.tracking_code
+    )
+  );
+}
+
 function shouldMarkAsGenerated({ labelUrl, trackingCode, trackingStatus }) {
-  const normalizedStatus = String(trackingStatus || "").trim().toLowerCase();
+  const normalizedStatus = normalizeShippingStatus(trackingStatus);
 
   return Boolean(
     String(labelUrl || "").trim() ||
       String(trackingCode || "").trim() ||
-      ["released", "generated", "paid", "posted"].includes(normalizedStatus)
+      [
+        "released",
+        "generated",
+        "paid",
+        "posted",
+        "postado",
+        "shipped",
+        "enviado",
+        "in_transit",
+        "em_transito",
+        "delivered",
+        "entregue"
+      ].includes(normalizedStatus)
   );
 }
 
@@ -934,14 +969,37 @@ async function syncSingleCartCreatedOrder(order, accessToken, baseUrl) {
   });
 
  if (!shouldGenerate) {
-  await updateOrderSyncRecord(order.id, {
-    shipping_label_status: "pending",
-    shipping_label_url: "",
-    shipping_label_pdf_url: "",
-    shipping_tracking_code: "",
+  const savedLabelUrl = pickFirstNonEmptyString(order?.shipping_label_url);
+  const savedLabelPdfUrl = pickFirstNonEmptyString(
+    order?.shipping_label_pdf_url,
+    order?.shipping_label_url
+  );
+  const savedTrackingCode = pickFirstNonEmptyString(
+    order?.shipping_tracking_code,
+    order?.tracking_code
+  );
+  const pendingPayload = {
+    shipping_label_status: hasSavedShippingLabelData(order)
+      ? order?.shipping_label_status || "generated"
+      : "pending",
     shipping_label_error: "",
     shipping_label_raw: mergedRaw
-  });
+  };
+
+  if (savedLabelUrl) {
+    pendingPayload.shipping_label_url = savedLabelUrl;
+  }
+
+  if (savedLabelPdfUrl) {
+    pendingPayload.shipping_label_pdf_url = savedLabelPdfUrl;
+  }
+
+  if (savedTrackingCode) {
+    pendingPayload.shipping_tracking_code = savedTrackingCode;
+    pendingPayload.tracking_code = savedTrackingCode;
+  }
+
+  await updateOrderSyncRecord(order.id, pendingPayload);
 
   return {
     orderId: order?.id || null,
@@ -952,13 +1010,28 @@ async function syncSingleCartCreatedOrder(order, accessToken, baseUrl) {
 }
 
   const now = new Date().toISOString();
+  const resolvedLabelUrl = pickFirstNonEmptyString(
+    labelUrl,
+    order?.shipping_label_url,
+    order?.shipping_label_pdf_url
+  );
+  const resolvedLabelPdfUrl = pickFirstNonEmptyString(
+    labelUrl,
+    order?.shipping_label_pdf_url,
+    order?.shipping_label_url
+  );
+  const resolvedTrackingCode = pickFirstNonEmptyString(
+    trackingCode,
+    order?.shipping_tracking_code,
+    order?.tracking_code
+  );
   const syncUpdatePayload = {
     shipping_label_status: "generated",
-    shipping_label_url: labelUrl,
-    shipping_label_pdf_url: labelUrl,
-    shipping_tracking_code: trackingCode,
-    tracking_code: trackingCode || order?.tracking_code || "",
-    shipping_carrier: carrier,
+    shipping_label_url: resolvedLabelUrl,
+    shipping_label_pdf_url: resolvedLabelPdfUrl,
+    shipping_tracking_code: resolvedTrackingCode,
+    tracking_code: resolvedTrackingCode || order?.tracking_code || "",
+    shipping_carrier: carrier || order?.shipping_carrier || "",
     shipping_label_generated_at: order?.shipping_label_generated_at || now,
     shipping_label_error: "",
     shipping_label_raw: mergedRaw

@@ -195,6 +195,18 @@ function buildAddressLine(order) {
   return parts.length ? parts.join(", ") : "-";
 }
 
+function pickFirstNonEmptyString(...values) {
+  for (const value of values) {
+    const text = String(value || "").trim();
+
+    if (text) {
+      return text;
+    }
+  }
+
+  return "";
+}
+
 function buildFullAddress(order) {
   return {
     cep: order.shipping_cep || "",
@@ -771,10 +783,20 @@ router.put("/:id/tracking", requireAuth, async (req, res) => {
       });
     }
 
+    const normalizedTrackingCode = pickFirstNonEmptyString(
+      trackingCode,
+      existingOrder.shipping_tracking_code,
+      existingOrder.tracking_code
+    );
+
     const updatePayload = {
-      tracking_code: String(trackingCode || "").trim(),
+      tracking_code: normalizedTrackingCode,
+      shipping_tracking_code: normalizedTrackingCode,
       order_status: normalizedStatus,
-      shipping_carrier: String(shippingCarrier || "").trim(),
+      shipping_carrier: pickFirstNonEmptyString(
+        shippingCarrier,
+        existingOrder.shipping_carrier
+      ),
       admin_notes: String(adminNotes || "").trim(),
     };
 
@@ -806,22 +828,43 @@ router.put("/:id/tracking", requireAuth, async (req, res) => {
       const shippingItems = await getOrderItemsForShipping(existingOrder.id);
       const labelResult = await generateAutomaticShippingLabel(existingOrder, shippingItems);
 
-      updatePayload.shipping_label_status = labelResult.labelStatus;
-      updatePayload.shipping_label_url = labelResult.labelUrl;
-      updatePayload.shipping_label_pdf_url = labelResult.labelPdfUrl;
-      updatePayload.shipping_tracking_code =
-        labelResult.trackingCode || String(trackingCode || "").trim() || "";
-      updatePayload.shipping_shipment_id = labelResult.shipmentId || "";
-      updatePayload.shipping_label_generated_at = new Date().toISOString();
+      updatePayload.shipping_label_status =
+        labelResult.labelStatus || existingOrder.shipping_label_status || "pending";
+      updatePayload.shipping_label_url = pickFirstNonEmptyString(
+        labelResult.labelUrl,
+        existingOrder.shipping_label_url,
+        existingOrder.shipping_label_pdf_url
+      );
+      updatePayload.shipping_label_pdf_url = pickFirstNonEmptyString(
+        labelResult.labelPdfUrl,
+        labelResult.labelUrl,
+        existingOrder.shipping_label_pdf_url,
+        existingOrder.shipping_label_url
+      );
+      updatePayload.shipping_tracking_code = pickFirstNonEmptyString(
+        labelResult.trackingCode,
+        trackingCode,
+        existingOrder.shipping_tracking_code,
+        existingOrder.tracking_code
+      );
+      updatePayload.shipping_shipment_id = pickFirstNonEmptyString(
+        labelResult.shipmentId,
+        existingOrder.shipping_shipment_id
+      );
+      updatePayload.shipping_label_generated_at =
+        existingOrder.shipping_label_generated_at || new Date().toISOString();
       updatePayload.shipping_label_error = labelResult.error || "";
-      updatePayload.shipping_label_raw = labelResult.raw || null;
+      updatePayload.shipping_label_raw = labelResult.raw || existingOrder.shipping_label_raw || null;
 
       if (!updatePayload.shipping_carrier) {
-        updatePayload.shipping_carrier = labelResult.carrier || "";
+        updatePayload.shipping_carrier = pickFirstNonEmptyString(
+          labelResult.carrier,
+          existingOrder.shipping_carrier
+        );
       }
 
-      if (!updatePayload.tracking_code && labelResult.trackingCode) {
-        updatePayload.tracking_code = labelResult.trackingCode;
+      if (!updatePayload.tracking_code && updatePayload.shipping_tracking_code) {
+        updatePayload.tracking_code = updatePayload.shipping_tracking_code;
       }
     }
 
