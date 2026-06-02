@@ -649,7 +649,7 @@ export async function getAffiliateById(affiliateId) {
   const affiliates = await supabaseRequest(
     `/affiliates?id=eq.${encodeURIComponent(
       affiliateId
-    )}&select=id,full_name,email,phone,ref_code,coupon_code,status,commission_rate,access_enabled,pix_key,pix_key_type,profile_photo_url,created_at&limit=1`
+    )}&select=id,full_name,email,phone,ref_code,coupon_code,status,commission_rate,access_enabled,pix_key,pix_key_type,created_at&limit=1`
   );
 
   const affiliate = Array.isArray(affiliates) ? affiliates[0] : null;
@@ -1153,25 +1153,26 @@ export async function getAffiliatePromotionalProducts(affiliateId) {
   };
 }
 
-async function getAffiliatePhotoMap(affiliateIds = []) {
+async function getAffiliateStorefrontPhotoMap(affiliateIds = []) {
   const ids = [...new Set((affiliateIds || []).filter(Boolean))];
 
   if (!ids.length) {
     return new Map();
   }
 
-  const encodedIds = ids.map((id) => `"${String(id).replace(/"/g, '\\"')}"`).join(",");
+  const encodedIds = ids
+    .map((id) => `"${String(id).replace(/"/g, '\\"')}"`)
+    .join(",");
 
   try {
     const rows = await supabaseRequest(
-      `/affiliates?id=in.(${encodedIds})&select=id,profile_photo_url`
+      `/affiliate_storefronts?affiliate_id=in.(${encodedIds})&select=affiliate_id,profile_photo_url`
     );
 
     return new Map(
-      (Array.isArray(rows) ? rows : []).map((item) => [
-        item.id,
-        item.profile_photo_url || null,
-      ])
+      (Array.isArray(rows) ? rows : [])
+        .filter((item) => item.profile_photo_url)
+        .map((item) => [item.affiliate_id, item.profile_photo_url])
     );
   } catch (error) {
     console.error("AFFILIATE NETWORK PHOTO MAP ERROR:", {
@@ -1199,9 +1200,10 @@ export async function getAffiliateNetwork(affiliateId) {
 
   const recruited = Array.isArray(networkRows) ? networkRows : [];
   const applications = Array.isArray(applicationRows) ? applicationRows : [];
-  const recruitedPhotoMap = await getAffiliatePhotoMap(
-    recruited.map((item) => item.recruited_affiliate_id).filter(Boolean)
-  );
+  const networkPhotoMap = await getAffiliateStorefrontPhotoMap([
+    affiliateId,
+    ...recruited.map((item) => item.recruited_affiliate_id).filter(Boolean),
+  ]);
 
   const pendingApplications = applications.filter((item) =>
     String(item.status || "").toLowerCase() === "pending"
@@ -1220,7 +1222,10 @@ export async function getAffiliateNetwork(affiliateId) {
   };
 
   return {
-    affiliate,
+    affiliate: {
+      ...affiliate,
+      profile_photo_url: networkPhotoMap.get(affiliate.id) || affiliate.profile_photo_url || null,
+    },
     summary,
     recruited: recruited.map((item) => ({
       id: item.recruited_affiliate_id,
@@ -1232,7 +1237,7 @@ export async function getAffiliateNetwork(affiliateId) {
       profile_photo_url:
         item.recruited_profile_photo_url ||
         item.profile_photo_url ||
-        recruitedPhotoMap.get(item.recruited_affiliate_id) ||
+        networkPhotoMap.get(item.recruited_affiliate_id) ||
         null,
       status: item.recruited_status,
       network_status: item.network_status,
