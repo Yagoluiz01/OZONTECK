@@ -154,12 +154,20 @@ async function markOrderAwaitingInvoice(order) {
   });
 }
 
-async function markOrderAwaitingShippingLabel(order) {
-  return updateOrder(order.id, {
-    invoice_status: "authorized",
+async function markOrderAwaitingShippingLabel(order, invoiceResult = null) {
+  const invoiceIsAuthorized =
+    isInvoiceAuthorized(order) || Boolean(invoiceResult?.success);
+
+  const patch = {
     shipping_label_status: "awaiting_shipping_label",
     processed_at: new Date().toISOString()
-  });
+  };
+
+  if (invoiceIsAuthorized) {
+    patch.invoice_status = "authorized";
+  }
+
+  return updateOrder(order.id, patch);
 }
 
 async function saveShippingResult(order, shippingResult) {
@@ -293,39 +301,47 @@ export async function processPaidOrder(input) {
     invoiceResult = await emitInvoiceForOrder(order, items);
   }
 
-  if (!invoiceResult?.success) {
-    await appendOrderProcessingEvent(order.id, "process_paid_order_stopped", {
+  const invoiceFailed = !invoiceResult?.success;
+
+  if (invoiceFailed) {
+    await appendOrderProcessingEvent(order.id, "invoice_error_continue_shipping", {
       status: invoiceResult?.status || "invoice_error",
-      message: invoiceResult?.error || "Processamento interrompido na etapa fiscal",
+      message:
+        invoiceResult?.error ||
+        "Etapa fiscal falhou, mas a geração do carrinho Melhor Envio continuará",
       payload: invoiceResult?.raw || null
     });
-
-    return buildProcessResult({
-      order,
-      invoiceResult,
-      status: "invoice_error",
-      message: invoiceResult?.error || "Erro na emissão da nota fiscal"
+  } else {
+    order = await updateOrderInvoiceFields(order.id, {
+      invoice_status: "authorized",
+      invoice_key: invoiceResult.invoiceKey || null,
+      invoice_number: invoiceResult.invoiceNumber || null,
+      invoice_series: invoiceResult.invoiceSeries || null,
+      invoice_xml_url: invoiceResult.xmlUrl || null,
+      invoice_pdf_url: invoiceResult.pdfUrl || null,
+      invoice_error: null,
+      invoice_raw: invoiceResult.raw || null,
+      invoice_authorized_at: invoiceResult.authorizedAt || new Date().toISOString(),
+      processed_at: new Date().toISOString()
     });
   }
 
-  order = await updateOrderInvoiceFields(order.id, {
-    invoice_status: "authorized",
-    invoice_key: invoiceResult.invoiceKey || null,
-    invoice_number: invoiceResult.invoiceNumber || null,
-    invoice_series: invoiceResult.invoiceSeries || null,
-    invoice_xml_url: invoiceResult.xmlUrl || null,
-    invoice_pdf_url: invoiceResult.pdfUrl || null,
-    invoice_error: null,
-    invoice_raw: invoiceResult.raw || null,
-    invoice_authorized_at: invoiceResult.authorizedAt || new Date().toISOString(),
-    processed_at: new Date().toISOString()
-  });
-
-  order = await markOrderAwaitingShippingLabel(order || { id: orderId });
+  order = await markOrderAwaitingShippingLabel(
+    order || { id: orderId },
+    invoiceResult
+  );
 
   await appendOrderProcessingEvent(order.id, "awaiting_shipping_label", {
     status: "awaiting_shipping_label",
-    message: "Nota autorizada, iniciando geração da etiqueta"
+    message: invoiceFailed
+      ? "Etapa fiscal falhou, iniciando geração da etiqueta mesmo assim"
+      : "Nota autorizada, iniciando geração da etiqueta",
+    payload: invoiceFailed
+      ? {
+          invoiceStatus: invoiceResult?.status || "invoice_error",
+          invoiceError: invoiceResult?.error || null
+        }
+      : null
   });
 
   const shippingResult = await generateAutomaticShippingLabel(order, items);
@@ -350,11 +366,14 @@ export async function processPaidOrder(input) {
 
   await appendOrderProcessingEvent(order.id, "shipping_label_generated", {
     status: "generated",
-    message: "Etiqueta gerada com sucesso",
+    message: invoiceFailed
+      ? "Etiqueta gerada com sucesso; etapa fiscal segue pendente/erro"
+      : "Etiqueta gerada com sucesso",
     payload: {
       trackingCode: shippingResult?.trackingCode || null,
       shipmentId: shippingResult?.shipmentId || null,
-      labelUrl: shippingResult?.labelUrl || null
+      labelUrl: shippingResult?.labelUrl || null,
+      invoiceStatus: invoiceResult?.status || null
     }
   });
 
@@ -363,6 +382,8 @@ export async function processPaidOrder(input) {
     invoiceResult,
     shippingResult,
     status: "done",
-    message: "Pedido processado com sucesso"
+    message: invoiceFailed
+      ? "Pedido processado com etiqueta gerada; etapa fiscal segue pendente/erro"
+      : "Pedido processado com sucesso"
   });
 }
