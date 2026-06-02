@@ -649,7 +649,7 @@ export async function getAffiliateById(affiliateId) {
   const affiliates = await supabaseRequest(
     `/affiliates?id=eq.${encodeURIComponent(
       affiliateId
-    )}&select=id,full_name,email,phone,ref_code,coupon_code,status,commission_rate,access_enabled,pix_key,pix_key_type,created_at&limit=1`
+    )}&select=id,full_name,email,phone,ref_code,coupon_code,status,commission_rate,access_enabled,pix_key,pix_key_type,profile_photo_url,created_at&limit=1`
   );
 
   const affiliate = Array.isArray(affiliates) ? affiliates[0] : null;
@@ -1153,6 +1153,38 @@ export async function getAffiliatePromotionalProducts(affiliateId) {
   };
 }
 
+async function getAffiliatePhotoMap(affiliateIds = []) {
+  const ids = [...new Set((affiliateIds || []).filter(Boolean))];
+
+  if (!ids.length) {
+    return new Map();
+  }
+
+  const encodedIds = ids.map((id) => `"${String(id).replace(/"/g, '\\"')}"`).join(",");
+
+  try {
+    const rows = await supabaseRequest(
+      `/affiliates?id=in.(${encodedIds})&select=id,profile_photo_url`
+    );
+
+    return new Map(
+      (Array.isArray(rows) ? rows : []).map((item) => [
+        item.id,
+        item.profile_photo_url || null,
+      ])
+    );
+  } catch (error) {
+    console.error("AFFILIATE NETWORK PHOTO MAP ERROR:", {
+      affiliateIds: ids,
+      message: error?.message,
+      details: error?.details,
+    });
+
+    return new Map();
+  }
+}
+
+
 export async function getAffiliateNetwork(affiliateId) {
   const affiliate = await getAffiliateById(affiliateId);
 
@@ -1167,6 +1199,9 @@ export async function getAffiliateNetwork(affiliateId) {
 
   const recruited = Array.isArray(networkRows) ? networkRows : [];
   const applications = Array.isArray(applicationRows) ? applicationRows : [];
+  const recruitedPhotoMap = await getAffiliatePhotoMap(
+    recruited.map((item) => item.recruited_affiliate_id).filter(Boolean)
+  );
 
   const pendingApplications = applications.filter((item) =>
     String(item.status || "").toLowerCase() === "pending"
@@ -1194,6 +1229,11 @@ export async function getAffiliateNetwork(affiliateId) {
       phone: item.recruited_phone || null,
       ref_code: item.recruited_ref_code,
       coupon_code: item.recruited_coupon_code,
+      profile_photo_url:
+        item.recruited_profile_photo_url ||
+        item.profile_photo_url ||
+        recruitedPhotoMap.get(item.recruited_affiliate_id) ||
+        null,
       status: item.recruited_status,
       network_status: item.network_status,
       total_sales: normalizeMoney(item.recruited_total_sales),
