@@ -2650,18 +2650,28 @@ async function saveGeneratedLabel(orderId, labelData = {}) {
   const labelStatus = success ? normalizeShippingLabelStatusForSave(labelData) : (labelData?.labelStatus || "error");
   const labelError = success ? "" : String(labelData?.error || labelData?.raw?.reason || "Erro ao gerar etiqueta").trim();
   const trackingCode = String(labelData?.trackingCode || "").trim();
+  const labelUrl = String(labelData?.labelUrl || "").trim();
+  const labelPdfUrl = String(labelData?.labelPdfUrl || "").trim();
+  const shipmentId = String(labelData?.shipmentId || "").trim();
 
-  return updateOrderById(orderId, {
+  const patch = {
     shipping_label_status: labelStatus,
-    shipping_label_url: success ? String(labelData?.labelUrl || "") : "",
-    shipping_label_pdf_url: success ? String(labelData?.labelPdfUrl || "") : "",
-    shipping_tracking_code: success ? trackingCode : "",
-    shipping_shipment_id: success ? String(labelData?.shipmentId || "") : "",
-    shipping_label_generated_at: success ? new Date().toISOString() : null,
     shipping_label_error: labelError,
-    shipping_label_raw: labelData?.raw || null,
-    tracking_code: success ? trackingCode : ""
-  });
+    shipping_label_raw: labelData?.raw || null
+  };
+
+  if (labelUrl) patch.shipping_label_url = labelUrl;
+  if (labelPdfUrl) patch.shipping_label_pdf_url = labelPdfUrl;
+  if (trackingCode) {
+    patch.shipping_tracking_code = trackingCode;
+    patch.tracking_code = trackingCode;
+  }
+  if (shipmentId) patch.shipping_shipment_id = shipmentId;
+  if (success && labelStatus === "generated") {
+    patch.shipping_label_generated_at = new Date().toISOString();
+  }
+
+  return updateOrderById(orderId, patch);
 }
 
 async function saveLabelError(orderId, errorMessage) {

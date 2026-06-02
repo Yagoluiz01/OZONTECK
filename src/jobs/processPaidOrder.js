@@ -167,7 +167,6 @@ async function markOrderAwaitingShippingLabel(order, invoiceResult = null) {
     isInvoiceAuthorized(order) || Boolean(invoiceResult?.success);
 
   const patch = {
-    shipping_label_status: "awaiting_shipping_label",
     processed_at: new Date().toISOString()
   };
 
@@ -197,20 +196,27 @@ function normalizeShippingLabelStatusForOrder(shippingResult) {
 async function saveShippingResult(order, shippingResult) {
   const normalizedLabelStatus = normalizeShippingLabelStatusForOrder(shippingResult);
   const generated = Boolean(shippingResult?.success) && normalizedLabelStatus === "generated";
+  const shipmentId = String(shippingResult?.shipmentId || "").trim();
+  const labelUrl = String(shippingResult?.labelUrl || "").trim();
+  const labelPdfUrl = String(shippingResult?.labelPdfUrl || "").trim();
+  const trackingCode = String(shippingResult?.trackingCode || "").trim();
 
-  return updateOrder(order.id, {
+  const patch = {
     shipping_label_status: normalizedLabelStatus,
-    shipping_label_url: shippingResult?.labelUrl || null,
-    shipping_label_pdf_url: shippingResult?.labelPdfUrl || null,
-    shipping_tracking_code: shippingResult?.trackingCode || null,
-    shipping_shipment_id: shippingResult?.shipmentId || null,
     shipping_label_error: shippingResult?.error || null,
     shipping_label_raw: shippingResult?.raw || null,
     shipping_provider: "melhor_envio",
     shipping_carrier: shippingResult?.carrier || order?.shipping_carrier || null,
-    shipping_label_generated_at: generated ? new Date().toISOString() : null,
     processed_at: new Date().toISOString()
-  });
+  };
+
+  if (labelUrl) patch.shipping_label_url = labelUrl;
+  if (labelPdfUrl) patch.shipping_label_pdf_url = labelPdfUrl;
+  if (trackingCode) patch.shipping_tracking_code = trackingCode;
+  if (shipmentId) patch.shipping_shipment_id = shipmentId;
+  if (generated) patch.shipping_label_generated_at = new Date().toISOString();
+
+  return updateOrder(order.id, patch);
 }
 
 function buildProcessResult({

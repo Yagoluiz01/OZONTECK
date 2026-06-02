@@ -1320,6 +1320,174 @@ export async function syncPendingMelhorEnvioLabels({
   };
 }
 
+
+function extractSavedShipmentId(order = {}) {
+  const directId = String(order?.shipping_shipment_id || "").trim();
+  if (directId) return directId;
+
+  const raw = order?.shipping_label_raw || null;
+  if (!raw || typeof raw !== "object") return "";
+
+  return String(
+    raw.cartId ||
+      raw.shipmentId ||
+      raw.id ||
+      raw.cartData?.id ||
+      raw.data?.id ||
+      ""
+  ).trim();
+}
+
+function buildExistingCartResult(order = {}, reason = "existing_cart") {
+  const shipmentId = extractSavedShipmentId(order);
+  const raw =
+    order?.shipping_label_raw && typeof order.shipping_label_raw === "object"
+      ? order.shipping_label_raw
+      : null;
+
+  return {
+    success: true,
+    skipped: true,
+    mode: "melhor_envio_cart_reused",
+    labelStatus: "awaiting_shipping_label",
+    labelUrl: String(order?.shipping_label_url || ""),
+    labelPdfUrl: String(order?.shipping_label_pdf_url || ""),
+    trackingCode: String(order?.shipping_tracking_code || order?.tracking_code || ""),
+    carrier: String(order?.shipping_carrier || "Melhor Envio").trim(),
+    shipmentId,
+    error: "",
+    raw: raw || {
+      cartId: shipmentId,
+      reason,
+      reused_at: new Date().toISOString()
+    }
+  };
+}
+
+async function fetchOrderShippingSnapshot(orderId) {
+  const id = String(orderId || "").trim();
+  if (!id) return null;
+
+  const url = new URL(`${env.supabaseUrl}/rest/v1/orders`);
+  url.searchParams.set("id", `eq.${id}`);
+  url.searchParams.set(
+    "select",
+    [
+      "id",
+      "order_number",
+      "shipping_label_status",
+      "shipping_label_url",
+      "shipping_label_pdf_url",
+      "shipping_tracking_code",
+      "tracking_code",
+      "shipping_shipment_id",
+      "shipping_label_error",
+      "shipping_label_raw",
+      "shipping_carrier"
+    ].join(",")
+  );
+  url.searchParams.set("limit", "1");
+
+  const response = await fetch(url.toString(), {
+    method: "GET",
+    headers: {
+      apikey: env.supabaseServiceRoleKey,
+      Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
+      "Content-Type": "application/json",
+      Accept: "application/json"
+    }
+  });
+
+  const data = await response.json().catch(() => []);
+
+  if (!response.ok) {
+    console.error(
+      "ERRO AO CONSULTAR SNAPSHOT DE FRETE DO PEDIDO: " +
+        JSON.stringify({ orderId: id, status: response.status, data })
+    );
+    return null;
+  }
+
+  return Array.isArray(data) ? data[0] || null : null;
+}
+
+async function claimMelhorEnvioCartCreation(order) {
+  const orderId = String(order?.id || "").trim();
+  if (!orderId) return null;
+
+  const url = new URL(`${env.supabaseUrl}/rest/v1/orders`);
+  url.searchParams.set("id", `eq.${orderId}`);
+  url.searchParams.set("shipping_shipment_id", "is.null");
+  url.searchParams.set(
+    "or",
+    "(shipping_label_status.is.null,shipping_label_status.in.(pending,error,blocked_me_cart_403,invalid_order,invalid_items,invalid_address,missing_service))"
+  );
+
+  const payload = {
+    shipping_label_status: "awaiting_shipping_label",
+    shipping_label_error: "",
+    processed_at: new Date().toISOString()
+  };
+
+  const response = await fetch(url.toString(), {
+    method: "PATCH",
+    headers: {
+      apikey: env.supabaseServiceRoleKey,
+      Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      Prefer: "return=representation"
+    },
+    body: JSON.stringify(payload)
+  });
+
+  const data = await response.json().catch(() => []);
+
+  if (!response.ok) {
+    console.error(
+      "ERRO AO RESERVAR GERAÇÃO DO CARRINHO MELHOR ENVIO: " +
+        JSON.stringify({ orderId, status: response.status, data })
+    );
+    return null;
+  }
+
+  const claimed = Array.isArray(data) ? data[0] || null : null;
+
+  if (claimed?.id) {
+    console.log(
+      "MELHOR ENVIO IDEMPOTENCY LOCK: " +
+        JSON.stringify({
+          orderId,
+          orderNumber: claimed.order_number || order?.order_number || null,
+          status: claimed.shipping_label_status || null
+        })
+    );
+  }
+
+  return claimed;
+}
+
+function buildShippingAlreadyInProgressResult(order = {}) {
+  return {
+    success: true,
+    skipped: true,
+    mode: "melhor_envio_cart_in_progress",
+    labelStatus: "awaiting_shipping_label",
+    labelUrl: "",
+    labelPdfUrl: "",
+    trackingCode: "",
+    carrier: String(order?.shipping_carrier || "Melhor Envio").trim(),
+    shipmentId: "",
+    error: "",
+    raw: {
+      reason: "shipping_cart_creation_already_in_progress",
+      orderId: order?.id || null,
+      orderNumber: order?.order_number || null,
+      checked_at: new Date().toISOString()
+    }
+  };
+}
+
 export async function generateAutomaticShippingLabel(order, items = []) {
   try {
     if (!order?.id) {
@@ -1327,6 +1495,74 @@ export async function generateAutomaticShippingLabel(order, items = []) {
         labelStatus: "invalid_order"
       });
     }
+
+    const existingShipmentId = extractSavedShipmentId(order);
+    if (existingShipmentId) {
+      console.log(
+        "MELHOR ENVIO CART SKIP EXISTING LOCAL: " +
+          JSON.stringify({
+            orderId: order.id,
+            orderNumber: order.order_number || null,
+            shipmentId: existingShipmentId
+          })
+      );
+      return buildExistingCartResult(order, "existing_order_payload");
+    }
+
+    const latestBeforeClaim = await fetchOrderShippingSnapshot(order.id);
+    const latestShipmentId = extractSavedShipmentId(latestBeforeClaim);
+    if (latestShipmentId) {
+      console.log(
+        "MELHOR ENVIO CART SKIP EXISTING DATABASE: " +
+          JSON.stringify({
+            orderId: order.id,
+            orderNumber: order.order_number || latestBeforeClaim?.order_number || null,
+            shipmentId: latestShipmentId
+          })
+      );
+      return buildExistingCartResult(
+        {
+          ...order,
+          ...latestBeforeClaim
+        },
+        "existing_database_record"
+      );
+    }
+
+    const claimedOrder = await claimMelhorEnvioCartCreation(order);
+    if (!claimedOrder?.id) {
+      const latestAfterClaim = await fetchOrderShippingSnapshot(order.id);
+      const shipmentIdAfterClaim = extractSavedShipmentId(latestAfterClaim);
+
+      if (shipmentIdAfterClaim) {
+        return buildExistingCartResult(
+          {
+            ...order,
+            ...latestAfterClaim
+          },
+          "existing_database_record_after_claim"
+        );
+      }
+
+      console.warn(
+        "MELHOR ENVIO CART SKIP IN PROGRESS: " +
+          JSON.stringify({
+            orderId: order.id,
+            orderNumber: order.order_number || null,
+            status: latestAfterClaim?.shipping_label_status || null
+          })
+      );
+
+      return buildShippingAlreadyInProgressResult({
+        ...order,
+        ...latestAfterClaim
+      });
+    }
+
+    order = {
+      ...order,
+      ...claimedOrder
+    };
 
     if (!items?.length) {
       return buildFailureResult(order, "Pedido sem itens para criar carrinho", {
