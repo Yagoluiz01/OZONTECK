@@ -607,7 +607,7 @@ function normalizeCartCreatedResult({
   return {
     success: true,
     mode: "melhor_envio_cart_created",
-    labelStatus: "cart_created",
+    labelStatus: "awaiting_shipping_label",
     labelUrl: "",
     labelPdfUrl: "",
     trackingCode: "",
@@ -766,7 +766,7 @@ async function fetchPendingCartCreatedOrders(limit = 20) {
       "created_at"
     ].join(",")
   );
-  url.searchParams.set("shipping_label_status", "in.(pending,cart_created,generated)");
+  url.searchParams.set("shipping_label_status", "in.(pending,awaiting_shipping_label,generated)");
   url.searchParams.set("shipping_shipment_id", "not.is.null");
   url.searchParams.set("order", "paid_at.asc.nullslast,created_at.asc");
   url.searchParams.set("limit", String(Math.max(1, Number(limit) || 20)));

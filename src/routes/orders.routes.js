@@ -173,6 +173,7 @@ function mapLabelStatusLabel(status) {
   const labels = {
     pending: "Pendente",
     generated: "Gerada",
+    awaiting_shipping_label: "Carrinho criado / aguardando etiqueta",
     cart_created: "Carrinho criado",
     blocked_me_cart_403: "Bloqueada pelo Melhor Envio",
     invalid_order: "Pedido inválido",
@@ -825,9 +826,14 @@ router.put("/:id/tracking", requireAuth, async (req, res) => {
       .trim()
       .toLowerCase();
 
+    const hasExistingShipmentId = String(existingOrder.shipping_shipment_id || "").trim();
+    const labelAlreadyInProgressOrDone =
+      Boolean(hasExistingShipmentId) ||
+      ["generated", "shipped", "posted", "delivered"].includes(currentLabelStatus);
+
     const shouldGenerateLabel =
       normalizedStatus === "paid" &&
-      !["generated", "cart_created"].includes(currentLabelStatus);
+      !labelAlreadyInProgressOrDone;
 
     if (shouldGenerateLabel) {
       const shippingItems = await getOrderItemsForShipping(existingOrder.id);
@@ -835,7 +841,9 @@ router.put("/:id/tracking", requireAuth, async (req, res) => {
 
       const labelSuccess = Boolean(labelResult?.success);
       const resolvedLabelStatus = labelSuccess
-        ? labelResult.labelStatus || (labelResult.shipmentId ? "cart_created" : "generated")
+        ? String(labelResult.labelStatus || "").trim().toLowerCase() === "cart_created"
+          ? "awaiting_shipping_label"
+          : labelResult.labelStatus || (labelResult.shipmentId ? "awaiting_shipping_label" : "generated")
         : labelResult.labelStatus || "error";
 
       updatePayload.shipping_label_status = resolvedLabelStatus;

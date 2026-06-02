@@ -2608,13 +2608,18 @@ function buildShippingQuoteRawForOrder(selectedShipping = {}) {
 
 function normalizeShippingLabelStatusForSave(labelData = {}) {
   const status = String(labelData?.labelStatus || "").trim().toLowerCase();
+  const hasShipmentId = String(labelData?.shipmentId || "").trim();
+
+  if (status === "cart_created") {
+    return "awaiting_shipping_label";
+  }
 
   if (status) {
     return status;
   }
 
   if (labelData?.success) {
-    return String(labelData?.shipmentId || "").trim() ? "cart_created" : "generated";
+    return hasShipmentId ? "awaiting_shipping_label" : "generated";
   }
 
   return "error";
@@ -2628,13 +2633,15 @@ function hasShippingLabelSuccessData(labelData = {}) {
         String(labelData?.labelPdfUrl || "").trim() ||
         String(labelData?.trackingCode || "").trim() ||
         String(labelData?.shipmentId || "").trim() ||
-        String(labelData?.labelStatus || "").trim().toLowerCase() === "cart_created"
+        ["awaiting_shipping_label", "cart_created"].includes(
+          String(labelData?.labelStatus || "").trim().toLowerCase()
+        )
       )
   );
 }
 
 function isShippingLabelInProgressOrDone(status) {
-  return ["cart_created", "generated", "shipped", "posted", "delivered"]
+  return ["awaiting_shipping_label", "cart_created", "generated", "shipped", "posted", "delivered"]
     .includes(String(status || "").trim().toLowerCase());
 }
 

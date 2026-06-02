@@ -128,8 +128,16 @@ function normalizePaymentStatus(order) {
 }
 
 function isAlreadyProcessed(order) {
-  return ["cart_created", "generated", "shipped", "posted", "delivered"]
-    .includes(String(order?.shipping_label_status || "").trim().toLowerCase());
+  const status = String(order?.shipping_label_status || "").trim().toLowerCase();
+  const hasShipmentId = String(order?.shipping_shipment_id || "").trim();
+
+  if (hasShipmentId) {
+    return !["error", "blocked_me_cart_403", "invalid_order", "invalid_items", "invalid_address", "missing_service"]
+      .includes(status);
+  }
+
+  return ["generated", "shipped", "posted", "delivered"]
+    .includes(status);
 }
 
 function isInvoiceAuthorized(order) {
@@ -170,12 +178,28 @@ async function markOrderAwaitingShippingLabel(order, invoiceResult = null) {
   return updateOrder(order.id, patch);
 }
 
-async function saveShippingResult(order, shippingResult) {
+function normalizeShippingLabelStatusForOrder(shippingResult) {
   const success = Boolean(shippingResult?.success);
-  const generated = success && String(shippingResult?.labelStatus || "").trim() === "generated";
+  const status = String(shippingResult?.labelStatus || "").trim().toLowerCase();
+  const hasShipmentId = String(shippingResult?.shipmentId || "").trim();
+
+  if (success && (status === "cart_created" || (hasShipmentId && status !== "generated"))) {
+    return "awaiting_shipping_label";
+  }
+
+  if (status) {
+    return status;
+  }
+
+  return success ? "generated" : "error";
+}
+
+async function saveShippingResult(order, shippingResult) {
+  const normalizedLabelStatus = normalizeShippingLabelStatusForOrder(shippingResult);
+  const generated = Boolean(shippingResult?.success) && normalizedLabelStatus === "generated";
 
   return updateOrder(order.id, {
-    shipping_label_status: shippingResult?.labelStatus || (generated ? "generated" : "error"),
+    shipping_label_status: normalizedLabelStatus,
     shipping_label_url: shippingResult?.labelUrl || null,
     shipping_label_pdf_url: shippingResult?.labelPdfUrl || null,
     shipping_tracking_code: shippingResult?.trackingCode || null,
