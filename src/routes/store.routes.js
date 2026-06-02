@@ -2606,17 +2606,54 @@ function buildShippingQuoteRawForOrder(selectedShipping = {}) {
   };
 }
 
-async function saveGeneratedLabel(orderId, labelData) {
+function normalizeShippingLabelStatusForSave(labelData = {}) {
+  const status = String(labelData?.labelStatus || "").trim().toLowerCase();
+
+  if (status) {
+    return status;
+  }
+
+  if (labelData?.success) {
+    return String(labelData?.shipmentId || "").trim() ? "cart_created" : "generated";
+  }
+
+  return "error";
+}
+
+function hasShippingLabelSuccessData(labelData = {}) {
+  return Boolean(
+    labelData?.success &&
+      (
+        String(labelData?.labelUrl || "").trim() ||
+        String(labelData?.labelPdfUrl || "").trim() ||
+        String(labelData?.trackingCode || "").trim() ||
+        String(labelData?.shipmentId || "").trim() ||
+        String(labelData?.labelStatus || "").trim().toLowerCase() === "cart_created"
+      )
+  );
+}
+
+function isShippingLabelInProgressOrDone(status) {
+  return ["cart_created", "generated", "shipped", "posted", "delivered"]
+    .includes(String(status || "").trim().toLowerCase());
+}
+
+async function saveGeneratedLabel(orderId, labelData = {}) {
+  const success = hasShippingLabelSuccessData(labelData);
+  const labelStatus = success ? normalizeShippingLabelStatusForSave(labelData) : (labelData?.labelStatus || "error");
+  const labelError = success ? "" : String(labelData?.error || labelData?.raw?.reason || "Erro ao gerar etiqueta").trim();
+  const trackingCode = String(labelData?.trackingCode || "").trim();
+
   return updateOrderById(orderId, {
-    shipping_label_status: "generated",
-    shipping_label_url: String(labelData.labelUrl || ""),
-    shipping_label_pdf_url: String(labelData.labelPdfUrl || ""),
-    shipping_tracking_code: String(labelData.trackingCode || ""),
-    shipping_shipment_id: String(labelData.shipmentId || ""),
-    shipping_label_generated_at: new Date().toISOString(),
-    shipping_label_error: "",
-    shipping_label_raw: labelData.raw || null,
-    tracking_code: String(labelData.trackingCode || "")
+    shipping_label_status: labelStatus,
+    shipping_label_url: success ? String(labelData?.labelUrl || "") : "",
+    shipping_label_pdf_url: success ? String(labelData?.labelPdfUrl || "") : "",
+    shipping_tracking_code: success ? trackingCode : "",
+    shipping_shipment_id: success ? String(labelData?.shipmentId || "") : "",
+    shipping_label_generated_at: success ? new Date().toISOString() : null,
+    shipping_label_error: labelError,
+    shipping_label_raw: labelData?.raw || null,
+    tracking_code: success ? trackingCode : ""
   });
 }
 
@@ -3542,7 +3579,7 @@ if (!alreadyPaidBeforeWebhook) {
           };
         }
 
-        if (updatedOrder?.shipping_label_status !== "generated") {
+        if (!isShippingLabelInProgressOrDone(updatedOrder?.shipping_label_status)) {
           const generatedLabel = await generateAutomaticShippingLabel(
             updatedOrder,
             orderItems
@@ -3557,26 +3594,42 @@ if (!alreadyPaidBeforeWebhook) {
             throw new Error("Erro ao salvar dados da etiqueta no pedido");
           }
 
-          const refreshedShippingOrder = {
-            ...updatedOrder,
-            shipping_label_status: "generated",
-            shipping_label_url: String(generatedLabel.labelUrl || ""),
-            shipping_label_pdf_url: String(generatedLabel.labelPdfUrl || ""),
-            shipping_tracking_code: String(generatedLabel.trackingCode || ""),
-            shipping_shipment_id: String(generatedLabel.shipmentId || ""),
-            tracking_code: String(generatedLabel.trackingCode || "")
-          };
+          const labelSavedSuccessfully = hasShippingLabelSuccessData(generatedLabel);
+          const labelSavedStatus = labelSavedSuccessfully
+            ? normalizeShippingLabelStatusForSave(generatedLabel)
+            : generatedLabel?.labelStatus || "error";
+          const generatedTrackingCode = String(generatedLabel?.trackingCode || "").trim();
 
-          customerTrackingPushResult = await safeCustomerOrderPush(
-            "tracking_available",
-            refreshedShippingOrder,
-            (currentOrder) => sendCustomerOrderPushForTracking(currentOrder)
-          );
+          if (labelSavedSuccessfully && generatedTrackingCode) {
+            const refreshedShippingOrder = {
+              ...updatedOrder,
+              shipping_label_status: labelSavedStatus,
+              shipping_label_url: String(generatedLabel.labelUrl || ""),
+              shipping_label_pdf_url: String(generatedLabel.labelPdfUrl || ""),
+              shipping_tracking_code: generatedTrackingCode,
+              shipping_shipment_id: String(generatedLabel.shipmentId || ""),
+              tracking_code: generatedTrackingCode
+            };
+
+            customerTrackingPushResult = await safeCustomerOrderPush(
+              "tracking_available",
+              refreshedShippingOrder,
+              (currentOrder) => sendCustomerOrderPushForTracking(currentOrder)
+            );
+          } else {
+            customerTrackingPushResult = {
+              sent: false,
+              skipped: true,
+              reason: labelSavedSuccessfully ? "tracking_not_available_yet" : "shipping_label_error"
+            };
+          }
 
           labelResult = {
-            generated: true,
+            generated: labelSavedSuccessfully,
+            status: labelSavedStatus,
             trackingCode: generatedLabel.trackingCode,
-            shipmentId: generatedLabel.shipmentId
+            shipmentId: generatedLabel.shipmentId,
+            error: generatedLabel.error || ""
           };
         } else {
           labelResult = {
@@ -3756,7 +3809,7 @@ metaPurchaseResult = await sendMetaPurchaseEvent({
   };
 }
 
-          if (updatedOrder.shipping_label_status !== "generated") {
+          if (!isShippingLabelInProgressOrDone(updatedOrder.shipping_label_status)) {
             const generatedLabel = await generateAutomaticShippingLabel(
               updatedOrder,
               orderItems
@@ -3906,7 +3959,7 @@ if (!alreadyPaidBeforeSimulation) {
   };
 }
 
-        if (updatedOrder.shipping_label_status !== "generated") {
+        if (!isShippingLabelInProgressOrDone(updatedOrder.shipping_label_status)) {
           const generatedLabel = await generateAutomaticShippingLabel(
             updatedOrder,
             orderItems

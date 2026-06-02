@@ -128,7 +128,8 @@ function normalizePaymentStatus(order) {
 }
 
 function isAlreadyProcessed(order) {
-  return String(order?.shipping_label_status || "").trim().toLowerCase() === "generated";
+  return ["cart_created", "generated", "shipped", "posted", "delivered"]
+    .includes(String(order?.shipping_label_status || "").trim().toLowerCase());
 }
 
 function isInvoiceAuthorized(order) {

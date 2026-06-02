@@ -174,6 +174,11 @@ function mapLabelStatusLabel(status) {
     pending: "Pendente",
     generated: "Gerada",
     cart_created: "Carrinho criado",
+    blocked_me_cart_403: "Bloqueada pelo Melhor Envio",
+    invalid_order: "Pedido inválido",
+    invalid_items: "Sem itens",
+    invalid_address: "Endereço incompleto",
+    missing_service: "Serviço de frete ausente",
     fallback: "Fallback local",
     error: "Erro",
   };
@@ -828,32 +833,45 @@ router.put("/:id/tracking", requireAuth, async (req, res) => {
       const shippingItems = await getOrderItemsForShipping(existingOrder.id);
       const labelResult = await generateAutomaticShippingLabel(existingOrder, shippingItems);
 
-      updatePayload.shipping_label_status =
-        labelResult.labelStatus || existingOrder.shipping_label_status || "pending";
-      updatePayload.shipping_label_url = pickFirstNonEmptyString(
-        labelResult.labelUrl,
-        existingOrder.shipping_label_url,
-        existingOrder.shipping_label_pdf_url
-      );
-      updatePayload.shipping_label_pdf_url = pickFirstNonEmptyString(
-        labelResult.labelPdfUrl,
-        labelResult.labelUrl,
-        existingOrder.shipping_label_pdf_url,
-        existingOrder.shipping_label_url
-      );
-      updatePayload.shipping_tracking_code = pickFirstNonEmptyString(
-        labelResult.trackingCode,
-        trackingCode,
-        existingOrder.shipping_tracking_code,
-        existingOrder.tracking_code
-      );
-      updatePayload.shipping_shipment_id = pickFirstNonEmptyString(
-        labelResult.shipmentId,
-        existingOrder.shipping_shipment_id
-      );
-      updatePayload.shipping_label_generated_at =
-        existingOrder.shipping_label_generated_at || new Date().toISOString();
-      updatePayload.shipping_label_error = labelResult.error || "";
+      const labelSuccess = Boolean(labelResult?.success);
+      const resolvedLabelStatus = labelSuccess
+        ? labelResult.labelStatus || (labelResult.shipmentId ? "cart_created" : "generated")
+        : labelResult.labelStatus || "error";
+
+      updatePayload.shipping_label_status = resolvedLabelStatus;
+      updatePayload.shipping_label_url = labelSuccess
+        ? pickFirstNonEmptyString(
+            labelResult.labelUrl,
+            existingOrder.shipping_label_url,
+            existingOrder.shipping_label_pdf_url
+          )
+        : "";
+      updatePayload.shipping_label_pdf_url = labelSuccess
+        ? pickFirstNonEmptyString(
+            labelResult.labelPdfUrl,
+            labelResult.labelUrl,
+            existingOrder.shipping_label_pdf_url,
+            existingOrder.shipping_label_url
+          )
+        : "";
+      updatePayload.shipping_tracking_code = labelSuccess
+        ? pickFirstNonEmptyString(
+            labelResult.trackingCode,
+            trackingCode,
+            existingOrder.shipping_tracking_code,
+            existingOrder.tracking_code
+          )
+        : "";
+      updatePayload.shipping_shipment_id = labelSuccess
+        ? pickFirstNonEmptyString(
+            labelResult.shipmentId,
+            existingOrder.shipping_shipment_id
+          )
+        : "";
+      updatePayload.shipping_label_generated_at = labelSuccess
+        ? existingOrder.shipping_label_generated_at || new Date().toISOString()
+        : null;
+      updatePayload.shipping_label_error = labelSuccess ? "" : labelResult.error || "Erro ao gerar etiqueta";
       updatePayload.shipping_label_raw = labelResult.raw || existingOrder.shipping_label_raw || null;
 
       if (!updatePayload.shipping_carrier) {

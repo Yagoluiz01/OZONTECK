@@ -11,6 +11,20 @@ function onlyDigits(value) {
   return String(value || "").replace(/\D/g, "");
 }
 
+function normalizeStateAbbr(value) {
+  const normalized = String(value || "").trim().toUpperCase();
+  return /^[A-Z]{2}$/.test(normalized) ? normalized : "";
+}
+
+function normalizeComparableAddress(value) {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
 function toNumber(value, fallback = 0) {
   const n = Number(value);
   return Number.isFinite(n) ? n : fallback;
@@ -80,12 +94,84 @@ function getStoreEmail(order) {
 
 function getStoreOriginAddress() {
   return {
-    address: String(process.env.STORE_ORIGIN_ADDRESS || "").trim(),
-    complement: String(process.env.STORE_ORIGIN_COMPLEMENT || "").trim(),
-    number: String(process.env.STORE_ORIGIN_NUMBER || "").trim(),
-    district: String(process.env.STORE_ORIGIN_DISTRICT || "").trim(),
-    city: String(process.env.STORE_ORIGIN_CITY || "").trim()
+    address: String(
+      process.env.STORE_ORIGIN_ADDRESS ||
+        process.env.MELHOR_ENVIO_ORIGIN_ADDRESS ||
+        process.env.MELHOR_ENVIO_FROM_ADDRESS ||
+        ""
+    ).trim(),
+    complement: String(
+      process.env.STORE_ORIGIN_COMPLEMENT ||
+        process.env.MELHOR_ENVIO_ORIGIN_COMPLEMENT ||
+        process.env.MELHOR_ENVIO_FROM_COMPLEMENT ||
+        ""
+    ).trim(),
+    number: String(
+      process.env.STORE_ORIGIN_NUMBER ||
+        process.env.MELHOR_ENVIO_ORIGIN_NUMBER ||
+        process.env.MELHOR_ENVIO_FROM_NUMBER ||
+        ""
+    ).trim(),
+    district: String(
+      process.env.STORE_ORIGIN_DISTRICT ||
+        process.env.MELHOR_ENVIO_ORIGIN_DISTRICT ||
+        process.env.MELHOR_ENVIO_FROM_DISTRICT ||
+        ""
+    ).trim(),
+    city: String(
+      process.env.STORE_ORIGIN_CITY ||
+        process.env.MELHOR_ENVIO_ORIGIN_CITY ||
+        process.env.MELHOR_ENVIO_FROM_CITY ||
+        ""
+    ).trim(),
+    state_abbr: normalizeStateAbbr(
+      process.env.STORE_ORIGIN_STATE ||
+        process.env.MELHOR_ENVIO_ORIGIN_STATE ||
+        process.env.MELHOR_ENVIO_FROM_STATE ||
+        process.env.ORIGIN_STATE ||
+        ""
+    )
   };
+}
+
+function validateStoreOriginAddress(originAddress, destination) {
+  const missing = [];
+
+  if (!originAddress.address) missing.push("STORE_ORIGIN_ADDRESS");
+  if (!originAddress.number) missing.push("STORE_ORIGIN_NUMBER");
+  if (!originAddress.district) missing.push("STORE_ORIGIN_DISTRICT");
+  if (!originAddress.city) missing.push("STORE_ORIGIN_CITY");
+  if (!originAddress.state_abbr) missing.push("STORE_ORIGIN_STATE");
+
+  if (missing.length) {
+    throw new Error(
+      `Endereço de origem da loja incompleto para Melhor Envio: ${missing.join(", ")}`
+    );
+  }
+
+  const sameAsDestination =
+    normalizeComparableAddress(originAddress.address) === normalizeComparableAddress(destination.address) &&
+    normalizeComparableAddress(originAddress.number) === normalizeComparableAddress(destination.number) &&
+    normalizeComparableAddress(originAddress.city) === normalizeComparableAddress(destination.city) &&
+    normalizeComparableAddress(originAddress.state_abbr) === normalizeComparableAddress(destination.state_abbr) &&
+    onlyDigits(getStoreOriginZipCode()) === onlyDigits(destination.postal_code);
+
+  if (sameAsDestination) {
+    throw new Error(
+      "Endereço de origem da loja igual ao endereço do cliente. Confira as variáveis STORE_ORIGIN_* no Render."
+    );
+  }
+}
+
+function getMelhorEnvioAgencyId() {
+  const agencyId = onlyDigits(
+    process.env.MELHOR_ENVIO_AGENCY_ID ||
+      process.env.MELHOR_ENVIO_JADLOG_AGENCY_ID ||
+      process.env.JADLOG_AGENCY_ID ||
+      ""
+  );
+
+  return agencyId ? Number(agencyId) : null;
 }
 
 function getItemUnitDeclaredValue(item) {
@@ -294,6 +380,8 @@ function buildCartPayload(order, items = []) {
     throw new Error("Endereço do pedido incompleto para criar carrinho");
   }
 
+  validateStoreOriginAddress(originAddress, destination);
+
   const products = buildMelhorEnvioProducts(items);
   const volumes = buildMelhorEnvioVolumes(order, items);
 
@@ -329,6 +417,7 @@ function buildCartPayload(order, items = []) {
     number: originAddress.number || undefined,
     district: originAddress.district || undefined,
     city: originAddress.city || undefined,
+    state_abbr: originAddress.state_abbr || undefined,
     country_id: "BR",
     postal_code: originZipCode
   };
@@ -349,12 +438,30 @@ function buildCartPayload(order, items = []) {
     note: `Pedido ${String(order?.order_number || order?.id || "").trim()}`
   };
 
+  const agencyId = getMelhorEnvioAgencyId();
+
   console.log("SERVIÇO DE TRANSPORTE NOVO ATIVO V2");
+  console.log(
+    "MELHOR ENVIO ORIGIN CHECK: " +
+      JSON.stringify({
+        orderId: order?.id || null,
+        orderNumber: order?.order_number || null,
+        fromPostalCode: from.postal_code,
+        fromCity: from.city,
+        fromState: from.state_abbr,
+        fromAddress: from.address,
+        toPostalCode: to.postal_code,
+        toCity: to.city,
+        toState: to.state_abbr,
+        toAddress: to.address,
+        agencyId: agencyId || null
+      })
+  );
   console.log("DEBUG REMETENTE DOCUMENT:", from.document);
   console.log("DEBUG DESTINATARIO DOCUMENT:", to.document);
   console.log("DEPURAR PEDIDO CLIENTE CPF:", order?.customer_cpf);
 
-  return {
+  const payload = {
     service: serviceCode,
     from,
     to,
@@ -369,6 +476,12 @@ function buildCartPayload(order, items = []) {
       non_commercial: true
     }
   };
+
+  if (agencyId) {
+    payload.agency = agencyId;
+  }
+
+  return payload;
 }
 
 function headersToObject(headers) {
