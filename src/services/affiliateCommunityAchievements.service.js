@@ -243,7 +243,7 @@ function buildAchievementPayload(summaryResult = {}, options = {}) {
   return {
     affiliate_id: affiliateId,
     affiliate_name: affiliateName,
-    affiliate_avatar_url: getAffiliateAvatar(affiliate) || (await getAffiliateStorefrontPhoto(safeAffiliateId)),
+    affiliate_avatar_url: options.avatarUrl || getAffiliateAvatar(affiliate),
     level_order: levelOrder,
     level_name: levelName,
     sales_count: paidConversions,
@@ -448,7 +448,7 @@ export async function congratulateAchievement(achievementId, affiliateId) {
         achievement_id: safeAchievementId,
         affiliate_id: safeAffiliateId,
         affiliate_name: getAffiliateName(affiliate),
-        affiliate_avatar_url: getAffiliateAvatar(affiliate) || (await getAffiliateStorefrontPhoto(safeAffiliateId)),
+        affiliate_avatar_url: options.avatarUrl || getAffiliateAvatar(affiliate),
       },
     });
 
