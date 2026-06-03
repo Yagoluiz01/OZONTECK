@@ -29,6 +29,8 @@ import adminPricingRoutes from "./routes/adminPricing.routes.js";
 import adminFiscalRoutes from "./routes/adminFiscal.routes.js";
 import adminAffiliatesRoutes from "./routes/adminAffiliates.routes.js";
 import affiliatePortalRoutes from "./routes/affiliatePortal.routes.js";
+import affiliateFeedRoutes from "./routes/affiliateFeed.routes.js";
+import adminAffiliateFeedRoutes from "./routes/adminAffiliateFeed.routes.js";
 import affiliatePasswordRoutes from "./routes/affiliatePassword.routes.js";
 import { updateStorefrontProfilePhoto } from "./controllers/affiliatePortal.controller.js";
 import { requireAffiliateAuth } from "./middlewares/affiliateAuth.middleware.js";
@@ -193,6 +195,7 @@ app.use("/api/integrations/melhor-envio", melhorEnvioWebhookRoutes);
 app.use("/api/admin/store-theme", adminStoreThemeRoutes);
 app.use("/api/admin/marketing-pixels", adminMarketingPixelsRoutes);
 app.use("/api/admin/affiliate-marketing", adminAffiliateMarketingRoutes);
+app.use("/api/admin/affiliate-feed", adminAffiliateFeedRoutes);
 app.use('/api/affiliate/marketing-kit', affiliateMarketingRoutes);
 app.use("/api/admin/financial", adminFinancialRoutes);
 app.use("/api/admin/pricing", adminPricingRoutes);
@@ -209,6 +212,7 @@ app.use("/api/settings", settingsRoutes);
 app.use("/api/shipping", shippingRoutes);
 app.use("/api/tracking", trackingRoutes);
 app.use("/api/store", storeRoutes);
+app.use("/api/affiliate/feed", affiliateFeedRoutes);
 app.use("/api/affiliate", affiliatePortalRoutes);
 
 // Alias direto de segurança para a foto da loja do afiliado.
