@@ -99,6 +99,41 @@ function assertUuid(value, label = "ID") {
   return cleanValue;
 }
 
+function getAffiliateIdFromSummary(summaryResult = {}, fallback = "") {
+  const affiliate = summaryResult.affiliate || summaryResult.profile || summaryResult.user || {};
+  const levelGoal = summaryResult.level_goal || summaryResult.goal || {};
+  const candidates = [
+    affiliate.id,
+    affiliate.affiliate_id,
+    summaryResult.affiliate_id,
+    levelGoal.affiliate_id,
+    fallback,
+  ];
+
+  for (const candidate of candidates) {
+    if (isUuid(candidate)) return String(candidate);
+  }
+
+  return "";
+}
+
+function ensureAffiliateIdOnSummary(summaryResult = {}, affiliateId = "") {
+  const safeAffiliateId = getAffiliateIdFromSummary(summaryResult, affiliateId);
+
+  if (!safeAffiliateId) {
+    const error = new Error("Não foi possível identificar o afiliado logado. Entre novamente no painel.");
+    error.statusCode = 401;
+    throw error;
+  }
+
+  summaryResult.affiliate = {
+    ...(summaryResult.affiliate || {}),
+    id: safeAffiliateId,
+  };
+
+  return safeAffiliateId;
+}
+
 function normalizeLevelName(value = "") {
   return cleanText(value)
     .normalize("NFD")
@@ -208,7 +243,7 @@ function buildAchievementPayload(summaryResult = {}, options = {}) {
   return {
     affiliate_id: affiliateId,
     affiliate_name: affiliateName,
-    affiliate_avatar_url: options.avatarUrl || getAffiliateAvatar(affiliate),
+    affiliate_avatar_url: getAffiliateAvatar(affiliate) || (await getAffiliateStorefrontPhoto(safeAffiliateId)),
     level_order: levelOrder,
     level_name: levelName,
     sales_count: paidConversions,
@@ -275,8 +310,8 @@ async function upsertAchievement(payload = {}) {
 }
 
 export async function syncAffiliateLevelAchievement(affiliateId) {
-  const safeAffiliateId = assertUuid(affiliateId, "Afiliado");
-  const summaryResult = await getAffiliateSummary(safeAffiliateId);
+  const summaryResult = await getAffiliateSummary(affiliateId);
+  const safeAffiliateId = ensureAffiliateIdOnSummary(summaryResult, affiliateId);
   const levelGoal = summaryResult.level_goal || {};
 
   if (!shouldPublishLevelAchievement(levelGoal)) {
@@ -344,7 +379,7 @@ function mapAchievement(row = {}, congrats = [], viewerAffiliateId = null) {
 }
 
 export async function listAffiliateCommunityAchievements(affiliateId, options = {}) {
-  const safeAffiliateId = assertUuid(affiliateId, "Afiliado");
+  let safeAffiliateId = isUuid(affiliateId) ? String(affiliateId) : "";
 
   let ownSync = null;
   try {
@@ -357,6 +392,10 @@ export async function listAffiliateCommunityAchievements(affiliateId, options = 
     });
   }
 
+  if (ownSync?.summary) {
+    safeAffiliateId = getAffiliateIdFromSummary(ownSync.summary, safeAffiliateId);
+  }
+
   const limit = Math.min(Math.max(Number(options.limit || 30), 1), 80);
   const rows = await supabaseRequest(
     `/affiliate_level_achievements?is_public=eq.true&level_order=gte.2&select=*&order=level_order.desc,created_at.desc&limit=${limit}`
@@ -366,24 +405,23 @@ export async function listAffiliateCommunityAchievements(affiliateId, options = 
   const congrats = await getCongratsByAchievementIds(achievements.map((item) => item.id));
 
   return {
-    achievements: achievements.map((item) => mapAchievement(item, congrats, safeAffiliateId)),
-    own_achievement: ownSync?.achievement ? mapAchievement(ownSync.achievement, congrats, safeAffiliateId) : null,
+    affiliate: ownSync?.summary?.affiliate || null,
+    achievements: achievements.map((item) => mapAchievement(item, congrats, safeAffiliateId || null)),
+    own_achievement: ownSync?.achievement ? mapAchievement(ownSync.achievement, congrats, safeAffiliateId || null) : null,
     synced: Boolean(ownSync?.created),
   };
 }
 
 export async function congratulateAchievement(achievementId, affiliateId) {
   const safeAchievementId = assertUuid(achievementId, "Conquista");
-  const safeAffiliateId = assertUuid(affiliateId, "Afiliado");
+  const summaryResult = await getAffiliateSummary(affiliateId);
+  const safeAffiliateId = ensureAffiliateIdOnSummary(summaryResult, affiliateId);
 
-  const [achievementRows, summaryResult] = await Promise.all([
-    supabaseRequest(
-      `/affiliate_level_achievements?id=eq.${encodeURIComponent(
-        safeAchievementId
-      )}&is_public=eq.true&select=*&limit=1`
-    ),
-    getAffiliateSummary(safeAffiliateId),
-  ]);
+  const achievementRows = await supabaseRequest(
+    `/affiliate_level_achievements?id=eq.${encodeURIComponent(
+      safeAchievementId
+    )}&is_public=eq.true&level_order=gte.2&select=*&limit=1`
+  );
 
   const achievement = Array.isArray(achievementRows) ? achievementRows[0] : null;
 
@@ -410,7 +448,7 @@ export async function congratulateAchievement(achievementId, affiliateId) {
         achievement_id: safeAchievementId,
         affiliate_id: safeAffiliateId,
         affiliate_name: getAffiliateName(affiliate),
-        affiliate_avatar_url: options.avatarUrl || getAffiliateAvatar(affiliate),
+        affiliate_avatar_url: getAffiliateAvatar(affiliate) || (await getAffiliateStorefrontPhoto(safeAffiliateId)),
       },
     });
 

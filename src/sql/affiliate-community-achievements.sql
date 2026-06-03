@@ -88,3 +88,9 @@ where achievement_id in (
 delete from public.affiliate_level_achievements
 where coalesce(level_order, 1) < 2
    or lower(coalesce(level_name, '')) in ('iniciante', 'inicial', 'nivel inicial', 'nível inicial');
+
+
+-- Limpa conquistas indevidas de teste do nível inicial/iniciante
+DELETE FROM public.affiliate_level_achievements
+WHERE level_order < 2
+   OR lower(coalesce(level_name, '')) in ('iniciante', 'inicial', 'nivel inicial');
