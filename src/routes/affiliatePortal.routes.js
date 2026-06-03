@@ -24,6 +24,10 @@ import {
   unsubscribeAffiliatePush,
   sendAffiliateTestPush,
 } from "../controllers/affiliatePush.controller.js";
+import {
+  congratulate,
+  listAchievements,
+} from "../controllers/affiliateCommunityAchievements.controller.js";
 
 const router = express.Router();
 
@@ -42,6 +46,9 @@ router.post("/storefront/items", requireAffiliateAuth, addStorefrontItem);
 router.patch("/storefront/profile-photo", requireAffiliateAuth, updateStorefrontProfilePhoto);
 router.delete("/storefront/items/:productId", requireAffiliateAuth, removeStorefrontItem);
 router.put("/profile", requireAffiliateAuth, updateProfile);
+
+router.get("/community/achievements", requireAffiliateAuth, listAchievements);
+router.post("/community/achievements/:achievementId/congratulate", requireAffiliateAuth, congratulate);
 
 router.get("/push/config", requireAffiliateAuth, getPushConfig);
 router.post("/push/subscribe", requireAffiliateAuth, subscribeAffiliatePush);

@@ -13,6 +13,7 @@ import {
   requestAffiliatePasswordReset,
   updateAffiliateProfile,
 } from "../services/affiliatePortal.service.js";
+import { syncAffiliateLevelAchievement } from "../services/affiliateCommunityAchievements.service.js";
 
 function sendError(res, error) {
   const statusCode = error.statusCode || 500;
@@ -88,6 +89,18 @@ export async function summary(req, res) {
 
     const result = await getAffiliateSummary(req.affiliateId);
 
+    let achievement = null;
+    try {
+      const syncResult = await syncAffiliateLevelAchievement(req.affiliateId);
+      achievement = syncResult?.achievement || null;
+    } catch (syncError) {
+      console.error("AFFILIATE_ACHIEVEMENT_SYNC_WARN:", {
+        affiliateId: req.affiliateId,
+        message: syncError?.message,
+        details: syncError?.details,
+      });
+    }
+
     return res.json({
       success: true,
       affiliate: result.affiliate,
@@ -95,6 +108,7 @@ export async function summary(req, res) {
       level_goal: result.level_goal,
       level_bonuses: result.level_bonuses,
       levels: result.levels || [],
+      achievement,
       refreshed_at: new Date().toISOString(),
     });
   } catch (error) {
