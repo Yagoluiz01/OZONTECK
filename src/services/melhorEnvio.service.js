@@ -70,6 +70,12 @@ export function buildMelhorEnvioAuthorizeUrl() {
     scope: scopes.join(" ")
   });
 
+  const oauthState = String(process.env.MELHOR_ENVIO_OAUTH_STATE || "").trim();
+
+  if (oauthState) {
+    params.set("state", oauthState);
+  }
+
   return `${authBase}?${params.toString()}`;
 }
 

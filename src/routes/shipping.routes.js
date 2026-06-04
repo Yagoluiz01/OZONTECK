@@ -5,10 +5,25 @@ import {
   saveMelhorEnvioTokens,
   getMelhorEnvioTokenRecord,
 } from "../services/melhorEnvio.service.js";
+import { requireAdminAuth } from "../middlewares/auth.middleware.js";
 
 const router = express.Router();
 
-router.get("/melhor-envio/connect", async (req, res) => {
+function getConfiguredOauthState() {
+  return String(process.env.MELHOR_ENVIO_OAUTH_STATE || "").trim();
+}
+
+function isOauthStateValid(receivedState) {
+  const expectedState = getConfiguredOauthState();
+
+  if (!expectedState) {
+    return true;
+  }
+
+  return String(receivedState || "").trim() === expectedState;
+}
+
+router.get("/melhor-envio/connect", requireAdminAuth, async (req, res) => {
   try {
     const url = buildMelhorEnvioAuthorizeUrl();
 
@@ -27,6 +42,13 @@ router.get("/melhor-envio/connect", async (req, res) => {
 router.get("/melhor-envio/oauth/callback", async (req, res) => {
   try {
     const code = String(req.query.code || "").trim();
+
+    if (!isOauthStateValid(req.query.state)) {
+      return res.status(401).json({
+        success: false,
+        message: "State OAuth inválido para o Melhor Envio",
+      });
+    }
 
     if (!code) {
       return res.status(400).json({
@@ -52,7 +74,7 @@ router.get("/melhor-envio/oauth/callback", async (req, res) => {
   }
 });
 
-router.get("/melhor-envio/status", async (req, res) => {
+router.get("/melhor-envio/status", requireAdminAuth, async (req, res) => {
   try {
     const record = await getMelhorEnvioTokenRecord();
 
