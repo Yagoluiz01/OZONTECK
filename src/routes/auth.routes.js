@@ -1,7 +1,7 @@
 import express from "express";
 import jwt from "jsonwebtoken";
 
-import { supabaseAuth } from "../config/supabase.js";
+import { supabaseAdmin, supabaseAuth } from "../config/supabase.js";
 import { env } from "../config/env.js";
 
 const router = express.Router();
@@ -35,6 +35,60 @@ async function findAdminByEmail(email) {
   };
 }
 
+
+function normalizeEmail(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function maskEmail(value) {
+  const email = normalizeEmail(value);
+  const [name, domain] = email.split("@");
+
+  if (!name || !domain) {
+    return "e-mail inválido";
+  }
+
+  return `${name.slice(0, 2)}***@${domain}`;
+}
+
+function getAdminPasswordResetRedirectUrl() {
+  const explicitRedirect = String(process.env.ADMIN_PASSWORD_RESET_REDIRECT_URL || "").trim();
+
+  if (explicitRedirect) {
+    return explicitRedirect;
+  }
+
+  const adminUrl = String(
+    process.env.ADMIN_FRONTEND_URL ||
+      process.env.ADMIN_URL ||
+      "https://ozonteck-admin.onrender.com"
+  )
+    .trim()
+    .replace(/\/+$/, "");
+
+  return `${adminUrl}/reset-password`;
+}
+
+function getRecoverySuccessMessage() {
+  return "Se este e-mail estiver liberado como administrador, enviaremos um link de recuperação em alguns minutos.";
+}
+
+async function sendAdminRecoveryEmail(email) {
+  const redirectTo = getAdminPasswordResetRedirectUrl();
+
+  if (typeof supabaseAdmin?.auth?.resetPasswordForEmail === "function") {
+    return supabaseAdmin.auth.resetPasswordForEmail(email, { redirectTo });
+  }
+
+  if (typeof supabaseAuth?.auth?.resetPasswordForEmail === "function") {
+    return supabaseAuth.auth.resetPasswordForEmail(email, { redirectTo });
+  }
+
+  return {
+    data: null,
+    error: new Error("Cliente Supabase não suporta resetPasswordForEmail."),
+  };
+}
 
 function normalizeRecoveryToken(value) {
   return String(value || "").trim();
@@ -88,6 +142,86 @@ async function updateSupabaseUserPassword(accessToken, password) {
   };
 }
 
+
+router.post("/forgot-password", async (req, res) => {
+  try {
+    const email = normalizeEmail(req.body?.email);
+
+    if (!email || !email.includes("@")) {
+      return res.status(400).json({
+        success: false,
+        message: "Informe um e-mail válido.",
+      });
+    }
+
+    const successMessage = getRecoverySuccessMessage();
+    const adminLookup = await findAdminByEmail(email);
+
+    if (!adminLookup.ok) {
+      console.warn("[ADMIN_FORGOT_PASSWORD_LOOKUP_ERROR]", {
+        status: adminLookup.status,
+        email: maskEmail(email),
+      });
+
+      return res.status(500).json({
+        success: false,
+        message: "Não foi possível verificar o acesso administrativo agora.",
+      });
+    }
+
+    const admin = Array.isArray(adminLookup.data) ? adminLookup.data[0] : adminLookup.data;
+
+    // Resposta genérica para não revelar se um e-mail existe ou não no painel.
+    if (!admin || admin.is_active === false) {
+      console.info("[ADMIN_FORGOT_PASSWORD_IGNORED]", {
+        reason: admin ? "inactive_admin" : "admin_not_found",
+        email: maskEmail(email),
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: successMessage,
+      });
+    }
+
+    const { error: recoveryError } = await sendAdminRecoveryEmail(email);
+
+    if (recoveryError) {
+      console.error("[ADMIN_FORGOT_PASSWORD_SEND_ERROR]", {
+        email: maskEmail(email),
+        message: recoveryError.message,
+        status: recoveryError.status,
+        name: recoveryError.name,
+      });
+
+      return res.status(502).json({
+        success: false,
+        message: "Não foi possível enviar o e-mail de recuperação. Verifique o SMTP do Supabase/Brevo.",
+      });
+    }
+
+    console.info("[ADMIN_FORGOT_PASSWORD_SENT]", {
+      email: maskEmail(email),
+      redirectTo: getAdminPasswordResetRedirectUrl(),
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: successMessage,
+    });
+  } catch (error) {
+    console.error("[ADMIN_FORGOT_PASSWORD_ERROR]", {
+      message: error?.message,
+      name: error?.name,
+    });
+
+    return res.status(500).json({
+      success: false,
+      message: "Erro ao solicitar recuperação de senha.",
+    });
+  }
+});
+
 router.post("/reset-password", async (req, res) => {
   try {
     const accessToken = normalizeRecoveryToken(
@@ -120,9 +254,12 @@ router.post("/reset-password", async (req, res) => {
     const updateResult = await updateSupabaseUserPassword(accessToken, password);
 
     if (!updateResult.ok) {
-      console.warn("ADMIN RESET PASSWORD SUPABASE ERROR:", {
+      console.warn("[ADMIN_RESET_PASSWORD_SUPABASE_ERROR]", {
         status: updateResult.status,
-        data: updateResult.data,
+        message:
+          typeof updateResult.data === "object"
+            ? updateResult.data?.message || updateResult.data?.msg || updateResult.data?.error_description
+            : String(updateResult.data || "").slice(0, 180),
       });
 
       const supabaseMessage =
@@ -143,7 +280,10 @@ router.post("/reset-password", async (req, res) => {
       message: "Senha redefinida com sucesso. Faça login novamente.",
     });
   } catch (error) {
-    console.error("ERRO NO RESET PASSWORD ADMIN:", error);
+    console.error("[ADMIN_RESET_PASSWORD_ERROR]", {
+      message: error?.message,
+      name: error?.name,
+    });
 
     return res.status(500).json({
       success: false,
@@ -163,7 +303,7 @@ router.post("/login", async (req, res) => {
       });
     }
 
-    const normalizedEmail = String(email).trim().toLowerCase();
+    const normalizedEmail = normalizeEmail(email);
 
     const { data: authData, error: authError } =
       await supabaseAuth.auth.signInWithPassword({
@@ -172,7 +312,11 @@ router.post("/login", async (req, res) => {
       });
 
     if (authError || !authData?.user) {
-      console.log("AUTH ERROR:", authError);
+      console.warn("[ADMIN_LOGIN_AUTH_ERROR]", {
+        email: maskEmail(normalizedEmail),
+        message: authError?.message,
+        status: authError?.status,
+      });
 
       return res.status(401).json({
         success: false,
@@ -180,15 +324,14 @@ router.post("/login", async (req, res) => {
       });
     }
 
-    console.log("AUTH USER ID:", authData.user.id);
-    console.log("AUTH USER EMAIL:", authData.user.email);
-
     const adminLookup = await findAdminByEmail(normalizedEmail);
 
-    console.log("ADMIN LOOKUP STATUS:", adminLookup.status);
-    console.log("ADMIN LOOKUP DATA:", adminLookup.data);
-
     if (!adminLookup.ok) {
+      console.error("[ADMIN_LOGIN_LOOKUP_ERROR]", {
+        email: maskEmail(normalizedEmail),
+        status: adminLookup.status,
+      });
+
       return res.status(500).json({
         success: false,
         message: "Erro ao consultar admins",
@@ -200,6 +343,10 @@ router.post("/login", async (req, res) => {
       : adminLookup.data;
 
     if (!admin) {
+      console.warn("[ADMIN_LOGIN_NO_PANEL_ACCESS]", {
+        email: maskEmail(normalizedEmail),
+      });
+
       return res.status(403).json({
         success: false,
         message: "Usuário autenticado, mas sem acesso ao painel",
@@ -207,6 +354,11 @@ router.post("/login", async (req, res) => {
     }
 
     if (!admin.is_active) {
+      console.warn("[ADMIN_LOGIN_INACTIVE]", {
+        email: maskEmail(normalizedEmail),
+        admin_id: admin.id,
+      });
+
       return res.status(403).json({
         success: false,
         message: "Usuário inativo no painel administrativo",
@@ -242,7 +394,10 @@ router.post("/login", async (req, res) => {
       },
     });
   } catch (error) {
-    console.error("ERRO NO LOGIN:", error);
+    console.error("[ADMIN_LOGIN_ERROR]", {
+      message: error?.message,
+      name: error?.name,
+    });
 
     return res.status(500).json({
       success: false,
@@ -294,6 +449,11 @@ router.get("/me", async (req, res) => {
     console.log("ME LOOKUP DATA:", adminLookup.data);
 
     if (!adminLookup.ok) {
+      console.error("[ADMIN_LOGIN_LOOKUP_ERROR]", {
+        email: maskEmail(normalizedEmail),
+        status: adminLookup.status,
+      });
+
       return res.status(500).json({
         success: false,
         message: "Erro ao consultar admins",
