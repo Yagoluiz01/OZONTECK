@@ -259,10 +259,7 @@ router.post("/auth/admin-register-request", async (req, res, next) => {
   }
 });
 
-router.use(requireAdminAuth);
-router.use(requireMasterAdmin);
-
-router.get("/admin/access-requests", async (req, res, next) => {
+router.get("/admin/access-requests", requireAdminAuth, requireMasterAdmin, async (req, res, next) => {
   try {
     const status = String(req.query.status || "pending").toLowerCase();
     const limit = Math.min(Math.max(Number(req.query.limit || 50), 1), 100);
@@ -301,7 +298,7 @@ router.get("/admin/access-requests", async (req, res, next) => {
   }
 });
 
-router.post("/admin/access-requests/:id/approve", async (req, res, next) => {
+router.post("/admin/access-requests/:id/approve", requireAdminAuth, requireMasterAdmin, async (req, res, next) => {
   try {
     const requestId = req.params.id;
     const requestedRole = String(req.body?.role || "administrator").toLowerCase();
@@ -408,7 +405,7 @@ router.post("/admin/access-requests/:id/approve", async (req, res, next) => {
   }
 });
 
-router.post("/admin/access-requests/:id/reject", async (req, res, next) => {
+router.post("/admin/access-requests/:id/reject", requireAdminAuth, requireMasterAdmin, async (req, res, next) => {
   try {
     const requestId = req.params.id;
     const reason = String(req.body?.reason || "").trim() || "Solicitação recusada pelo administrador master.";
