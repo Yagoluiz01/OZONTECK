@@ -331,23 +331,60 @@ router.post("/admin/access-requests/:id/approve", requireAdminAuth, requireMaste
     let admin = existingAdmin;
 
     if (!admin) {
+      const adminPayload = {
+        full_name: fullName,
+        email,
+        role,
+        is_active: true,
+      };
+
+      // Em muitos projetos Supabase, a tabela admins usa o mesmo UUID do auth.users.
+      // Sem enviar esse id, a inserção pode falhar com 500 na aprovação.
+      if (request.auth_user_id) {
+        adminPayload.id = request.auth_user_id;
+      }
+
       const { data: insertedAdmin, error: adminInsertError } = await supabaseAdmin
         .from("admins")
-        .insert({
-          full_name: fullName,
-          email,
-          role,
-          is_active: true,
-        })
+        .insert(adminPayload)
         .select("*")
         .single();
 
       if (adminInsertError) {
-        console.error("[ADMIN_ACCESS_ADMIN_INSERT_ERROR]", adminInsertError);
-        throw new Error("Erro ao liberar acesso administrativo.");
-      }
+        console.error("[ADMIN_ACCESS_ADMIN_INSERT_ERROR]", {
+          code: adminInsertError.code,
+          message: adminInsertError.message,
+          details: adminInsertError.details,
+          hint: adminInsertError.hint,
+          email,
+          auth_user_id: request.auth_user_id || null,
+        });
 
-      admin = insertedAdmin;
+        // Se já existir algum registro em admins para este e-mail, reativamos em vez de quebrar.
+        if (adminInsertError.code === "23505" || String(adminInsertError.message || "").toLowerCase().includes("duplicate")) {
+          const { data: recoveredAdmin, error: recoverError } = await supabaseAdmin
+            .from("admins")
+            .update({
+              full_name: fullName,
+              role,
+              is_active: true,
+            })
+            .eq("email", email)
+            .select("*")
+            .maybeSingle();
+
+          if (recoverError || !recoveredAdmin) {
+            console.error("[ADMIN_ACCESS_ADMIN_RECOVER_ERROR]", recoverError);
+            throw new Error("Erro ao liberar acesso administrativo.");
+          }
+
+          admin = recoveredAdmin;
+        } else {
+          throw new Error("Erro ao liberar acesso administrativo.");
+        }
+      } else {
+        admin = insertedAdmin;
+      }
     }
 
     const { data: updatedRequest, error: updateError } = await supabaseAdmin
