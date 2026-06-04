@@ -35,6 +35,123 @@ async function findAdminByEmail(email) {
   };
 }
 
+
+function normalizeRecoveryToken(value) {
+  return String(value || "").trim();
+}
+
+function validateAdminResetPassword(password, confirmPassword) {
+  const value = String(password || "");
+  const confirm = String(confirmPassword || "");
+
+  if (!value) {
+    return "Nova senha é obrigatória.";
+  }
+
+  if (value.length < 8) {
+    return "A nova senha precisa ter pelo menos 8 caracteres.";
+  }
+
+  if (confirm && value !== confirm) {
+    return "As senhas não conferem.";
+  }
+
+  return null;
+}
+
+async function updateSupabaseUserPassword(accessToken, password) {
+  const response = await fetch(`${env.supabaseUrl}/auth/v1/user`, {
+    method: "PUT",
+    headers: {
+      apikey: env.supabaseServiceRoleKey,
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      password,
+    }),
+  });
+
+  const text = await response.text();
+
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = text;
+  }
+
+  return {
+    ok: response.ok,
+    status: response.status,
+    data,
+  };
+}
+
+router.post("/reset-password", async (req, res) => {
+  try {
+    const accessToken = normalizeRecoveryToken(
+      req.body?.access_token ||
+        req.body?.accessToken ||
+        req.body?.token ||
+        req.headers?.authorization?.replace(/^Bearer\s+/i, "")
+    );
+
+    const password = String(req.body?.password || req.body?.new_password || "");
+    const confirmPassword = String(
+      req.body?.confirm_password || req.body?.confirmPassword || req.body?.password_confirm || ""
+    );
+
+    if (!accessToken) {
+      return res.status(400).json({
+        success: false,
+        message: "Token de recuperação não enviado. Solicite um novo link de redefinição de senha.",
+      });
+    }
+
+    const passwordError = validateAdminResetPassword(password, confirmPassword);
+    if (passwordError) {
+      return res.status(400).json({
+        success: false,
+        message: passwordError,
+      });
+    }
+
+    const updateResult = await updateSupabaseUserPassword(accessToken, password);
+
+    if (!updateResult.ok) {
+      console.warn("ADMIN RESET PASSWORD SUPABASE ERROR:", {
+        status: updateResult.status,
+        data: updateResult.data,
+      });
+
+      const supabaseMessage =
+        typeof updateResult.data === "object"
+          ? updateResult.data?.msg || updateResult.data?.message || updateResult.data?.error_description
+          : String(updateResult.data || "");
+
+      return res.status(updateResult.status === 401 || updateResult.status === 403 ? 401 : 400).json({
+        success: false,
+        message:
+          supabaseMessage ||
+          "Link de recuperação inválido ou expirado. Solicite um novo e-mail de recuperação.",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Senha redefinida com sucesso. Faça login novamente.",
+    });
+  } catch (error) {
+    console.error("ERRO NO RESET PASSWORD ADMIN:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Erro ao redefinir senha.",
+    });
+  }
+});
+
 router.post("/login", async (req, res) => {
   try {
     const { email, password } = req.body;
