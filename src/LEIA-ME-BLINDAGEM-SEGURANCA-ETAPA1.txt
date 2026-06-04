@@ -1,0 +1,44 @@
+BLINDAGEM DE SEGURANCA - ETAPA 1
+
+Objetivo:
+Aplicar uma primeira camada de endurecimento sem alterar regras de negócio já validadas.
+
+Arquivos alterados:
+- src/app.js
+- src/middlewares/rate-limit.middleware.js
+- src/routes/auth.routes.js
+- src/middlewares/affiliateAuth.middleware.js
+
+O que foi feito:
+1. Rate limits específicos para:
+   - login admin
+   - recuperação/redefinição de senha admin
+   - solicitação pública de acesso admin
+   - login/recuperação de senha de afiliado
+   - login/cadastro de cliente da loja
+   - cotação de frete da loja
+   - criação de pedido/checkout
+
+2. Cache-Control no-store para rotas /api/auth e /api/admin.
+
+3. Logs sensíveis reduzidos:
+   - /api/auth/me não imprime mais dados completos do admin.
+   - erros globais não despejam o objeto completo do erro em produção.
+   - autenticação de afiliado não imprime o erro inteiro.
+
+4. CORS ganhou modo estrito opcional:
+   - Por padrão, o comportamento atual foi mantido para não quebrar staging/local.
+   - Quando quiser travar produção final, defina STRICT_CORS=true no Render.
+
+Variáveis opcionais de ajuste:
+- ADMIN_AUTH_RATE_LIMIT_MAX
+- ADMIN_PASSWORD_RECOVERY_RATE_LIMIT_MAX
+- ADMIN_ACCESS_REQUEST_RATE_LIMIT_MAX
+- AFFILIATE_AUTH_RATE_LIMIT_MAX
+- STORE_CUSTOMER_AUTH_RATE_LIMIT_MAX
+- STORE_QUOTE_RATE_LIMIT_MAX
+- STORE_CHECKOUT_RATE_LIMIT_MAX
+- STRICT_CORS=true
+
+Importante:
+Nenhum fluxo de pagamento, frete, comissão, pedido, afiliado ou checkout foi refeito.

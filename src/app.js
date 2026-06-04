@@ -8,6 +8,15 @@ import morgan from "morgan";
 import path from "path";
 import { fileURLToPath } from "url";
 import rateLimit from "express-rate-limit";
+import {
+  adminAccessRequestLimiter,
+  adminAuthLimiter,
+  adminPasswordRecoveryLimiter,
+  affiliateAuthLimiter,
+  storeCheckoutLimiter,
+  storeCustomerAuthLimiter,
+  storeQuoteLimiter,
+} from "./middlewares/rate-limit.middleware.js";
 import adminNotificationsRoutes from "./routes/adminNotifications.routes.js";
 import adminAccessRequestsRoutes from "./routes/adminAccessRequests.routes.js";
 import adminPushRoutes from "./routes/adminPush.routes.js";
@@ -86,6 +95,12 @@ const allowedOrigins = [
   .map(normalizeOrigin)
   .filter(Boolean);
 
+function isTruthyEnv(value) {
+  return ["1", "true", "yes", "on"].includes(String(value || "").trim().toLowerCase());
+}
+
+const strictCors = isTruthyEnv(process.env.STRICT_CORS);
+
 function isAllowedCorsOrigin(origin) {
   const normalizedOrigin = normalizeOrigin(origin);
 
@@ -97,11 +112,14 @@ function isAllowedCorsOrigin(origin) {
     return true;
   }
 
-  if (
+  const isLocalDevelopmentOrigin =
     normalizedOrigin.startsWith("http://localhost:") ||
     normalizedOrigin.startsWith("http://127.0.0.1:") ||
-    normalizedOrigin.startsWith("http://192.168.")
-  ) {
+    normalizedOrigin.startsWith("http://192.168.");
+
+  // Mantém o comportamento atual por padrão.
+  // Em produção final, basta definir STRICT_CORS=true no Render para bloquear localhost/LAN.
+  if (isLocalDevelopmentOrigin && !(strictCors && env.nodeEnv === "production")) {
     return true;
   }
 
@@ -159,6 +177,28 @@ const globalLimiter = rateLimit({
 });
 
 app.use(globalLimiter);
+
+// Limites específicos para pontos sensíveis.
+// Ficam antes das rotas e não alteram nenhuma regra de negócio validada.
+app.post("/api/auth/login", adminAuthLimiter);
+app.post("/api/auth/forgot-password", adminPasswordRecoveryLimiter);
+app.post("/api/auth/reset-password", adminPasswordRecoveryLimiter);
+app.post("/api/auth/admin-register-request", adminAccessRequestLimiter);
+app.post("/api/affiliate/auth/login", affiliateAuthLimiter);
+app.post("/api/affiliate/auth/forgot-password", affiliateAuthLimiter);
+app.post("/api/public/affiliates/password/forgot-password", affiliateAuthLimiter);
+app.post("/api/public/affiliates/password/reset-password", affiliateAuthLimiter);
+app.post("/api/store/customer/login", storeCustomerAuthLimiter);
+app.post("/api/store/customer/register", storeCustomerAuthLimiter);
+app.post("/api/store/shipping/quote", storeQuoteLimiter);
+app.post("/api/store/orders", storeCheckoutLimiter);
+
+app.use((req, res, next) => {
+  if (req.path.startsWith("/api/auth") || req.path.startsWith("/api/admin")) {
+    res.setHeader("Cache-Control", "no-store");
+  }
+  return next();
+});
 
 app.use(
   helmet({
@@ -232,14 +272,24 @@ app.use((req, res) => {
 app.use((err, req, res, next) => {
   const statusCode = err.statusCode || err.status || 500;
   const isProduction = env.nodeEnv === "production";
+  const errorId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
-  console.error("[APP_ERROR]", err);
+  console.error("[APP_ERROR]", {
+    errorId,
+    statusCode,
+    method: req.method,
+    path: req.originalUrl,
+    message: err?.message || "Erro interno no servidor.",
+    name: err?.name,
+    stack: isProduction ? undefined : err?.stack,
+  });
 
   return res.status(statusCode).json({
     success: false,
     message: isProduction
       ? "Erro interno no servidor."
       : err.message || "Erro interno no servidor.",
+    errorId,
   });
 });
 

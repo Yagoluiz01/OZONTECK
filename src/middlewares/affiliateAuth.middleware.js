@@ -32,7 +32,10 @@ export async function requireAffiliateAuth(req, res, next) {
 
     return next();
   } catch (error) {
-    console.error("AFFILIATE AUTH ERROR:", error);
+    console.warn("[AFFILIATE_AUTH_ERROR]", {
+      message: error?.message,
+      name: error?.name,
+    });
 
     return res.status(401).json({
       success: false,

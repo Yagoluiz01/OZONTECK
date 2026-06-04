@@ -431,7 +431,10 @@ router.get("/me", async (req, res) => {
       await supabaseAuth.auth.getUser(decoded.supabase_access_token);
 
     if (userError || !userData?.user) {
-      console.log("GET USER ERROR:", userError);
+      console.warn("[ADMIN_ME_SUPABASE_SESSION_ERROR]", {
+        message: userError?.message,
+        status: userError?.status,
+      });
 
       return res.status(401).json({
         success: false,
@@ -445,8 +448,10 @@ router.get("/me", async (req, res) => {
 
     const adminLookup = await findAdminByEmail(normalizedEmail);
 
-    console.log("ME LOOKUP STATUS:", adminLookup.status);
-    console.log("ME LOOKUP DATA:", adminLookup.data);
+    console.info("[ADMIN_ME_LOOKUP]", {
+      status: adminLookup.status,
+      email: maskEmail(normalizedEmail),
+    });
 
     if (!adminLookup.ok) {
       console.error("[ADMIN_LOGIN_LOOKUP_ERROR]", {
@@ -483,7 +488,10 @@ router.get("/me", async (req, res) => {
       user: admin,
     });
   } catch (error) {
-    console.error("ERRO NO /ME:", error);
+    console.warn("[ADMIN_ME_TOKEN_ERROR]", {
+      message: error?.message,
+      name: error?.name,
+    });
 
     return res.status(401).json({
       success: false,
