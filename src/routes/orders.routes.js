@@ -305,6 +305,11 @@ function getOrdersSelectFields() {
     "shipping_service_name",
     "shipping_delivery_time",
     "shipping_quote_raw",
+    "affiliate_id",
+    "affiliate_ref_code",
+    "affiliate_coupon_code",
+    "affiliate_commission_rate",
+    "affiliate_commission_amount",
     "shipping_label_status",
     "shipping_label_url",
     "shipping_label_pdf_url",
@@ -367,6 +372,186 @@ async function fetchOrderRawById(orderId) {
     ok: response.ok,
     status: response.status,
     data: Array.isArray(data) ? data : [],
+  };
+}
+
+
+async function fetchAffiliateSummaryMap(affiliateIds = []) {
+  const cleanIds = Array.from(
+    new Set(
+      affiliateIds
+        .map((id) => String(id || "").trim())
+        .filter(Boolean)
+    )
+  );
+
+  const map = new Map();
+
+  if (!cleanIds.length) {
+    return map;
+  }
+
+  const headers = {
+    apikey: env.supabaseServiceRoleKey,
+    Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
+    "Content-Type": "application/json",
+    Accept: "application/json",
+  };
+
+  const chunkSize = 80;
+
+  for (let index = 0; index < cleanIds.length; index += chunkSize) {
+    const chunk = cleanIds.slice(index, index + chunkSize);
+    const url = new URL(`${env.supabaseUrl}/rest/v1/affiliates`);
+    url.searchParams.set("select", "id,full_name,email,ref_code,coupon_code,status");
+    url.searchParams.set("id", `in.(${chunk.join(",")})`);
+
+    const response = await fetch(url.toString(), {
+      method: "GET",
+      headers,
+    });
+
+    const data = await response.json().catch(() => []);
+
+    if (!response.ok || !Array.isArray(data)) {
+      console.error("ERRO AO BUSCAR AFILIADOS DOS PEDIDOS:", {
+        status: response.status,
+        message: data?.message || data?.error || "consulta_sem_detalhes",
+      });
+      continue;
+    }
+
+    data.forEach((affiliate) => {
+      const id = String(affiliate?.id || "").trim();
+
+      if (id) {
+        map.set(id, affiliate);
+      }
+    });
+  }
+
+  return map;
+}
+
+async function fetchAffiliateConversionMap(orderIds = []) {
+  const cleanIds = Array.from(
+    new Set(
+      orderIds
+        .map((id) => String(id || "").trim())
+        .filter(Boolean)
+    )
+  );
+
+  const map = new Map();
+
+  if (!cleanIds.length) {
+    return map;
+  }
+
+  const headers = {
+    apikey: env.supabaseServiceRoleKey,
+    Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
+    "Content-Type": "application/json",
+    Accept: "application/json",
+  };
+
+  const chunkSize = 80;
+
+  for (let index = 0; index < cleanIds.length; index += chunkSize) {
+    const chunk = cleanIds.slice(index, index + chunkSize);
+    const url = new URL(`${env.supabaseUrl}/rest/v1/affiliate_conversions`);
+    url.searchParams.set(
+      "select",
+      "id,order_id,affiliate_id,ref_code,coupon_code,order_total,commission_rate,commission_amount,conversion_type,status,approved_at,released_at,paid_at"
+    );
+    url.searchParams.set("order_id", `in.(${chunk.join(",")})`);
+    url.searchParams.set("order", "created_at.desc");
+
+    const response = await fetch(url.toString(), {
+      method: "GET",
+      headers,
+    });
+
+    const data = await response.json().catch(() => []);
+
+    if (!response.ok || !Array.isArray(data)) {
+      console.error("ERRO AO BUSCAR CONVERSÕES DE AFILIADOS DOS PEDIDOS:", {
+        status: response.status,
+        message: data?.message || data?.error || "consulta_sem_detalhes",
+      });
+      continue;
+    }
+
+    data.forEach((conversion) => {
+      const orderId = String(conversion?.order_id || "").trim();
+
+      if (!orderId) {
+        return;
+      }
+
+      const current = map.get(orderId) || [];
+      current.push(conversion);
+      map.set(orderId, current);
+    });
+  }
+
+  return map;
+}
+
+function buildAffiliateLinkInfo(order, affiliate = null, conversions = []) {
+  const affiliateId = String(order?.affiliate_id || "").trim();
+  const refCode = pickFirstNonEmptyString(
+    order?.affiliate_ref_code,
+    affiliate?.ref_code,
+    conversions?.[0]?.ref_code
+  );
+  const couponCode = pickFirstNonEmptyString(
+    order?.affiliate_coupon_code,
+    affiliate?.coupon_code,
+    conversions?.[0]?.coupon_code
+  );
+  const commissionAmount = Number(
+    order?.affiliate_commission_amount ?? conversions?.[0]?.commission_amount ?? 0
+  );
+  const commissionRate = Number(
+    order?.affiliate_commission_rate ?? conversions?.[0]?.commission_rate ?? 0
+  );
+  const hasAffiliate = Boolean(affiliateId || refCode || couponCode || commissionAmount > 0 || conversions.length);
+
+  if (!hasAffiliate) {
+    return {
+      hasAffiliate: false,
+    };
+  }
+
+  return {
+    hasAffiliate: true,
+    affiliateId,
+    affiliateName: affiliate?.full_name || "Afiliado não localizado",
+    affiliateEmail: affiliate?.email || "",
+    affiliatePhone: affiliate?.phone || "",
+    affiliateStatus: affiliate?.status || "",
+    refCode,
+    couponCode,
+    commissionRate,
+    commissionAmount,
+    commissionStatus: conversions?.[0]?.status || "pending",
+    commissionType: conversions?.[0]?.conversion_type || "sale_commission",
+    commissionId: conversions?.[0]?.id || "",
+    commissionBase: Number(conversions?.[0]?.order_total || order?.subtotal || 0),
+    approvedAt: conversions?.[0]?.approved_at || "",
+    releasedAt: conversions?.[0]?.released_at || "",
+    paidAt: conversions?.[0]?.paid_at || "",
+    conversions: conversions.map((conversion) => ({
+      id: conversion.id,
+      type: conversion.conversion_type || "",
+      status: conversion.status || "",
+      amount: Number(conversion.commission_amount || 0),
+      rate: Number(conversion.commission_rate || 0),
+      base: Number(conversion.order_total || 0),
+      releasedAt: conversion.released_at || "",
+      paidAt: conversion.paid_at || "",
+    })),
   };
 }
 
@@ -493,10 +678,18 @@ async function addTimelineEvent(orderId, label, description) {
 }
 
 async function buildOrderDetails(order) {
-  const [items, timeline] = await Promise.all([
+  const [items, timeline, affiliateMap, conversionMap] = await Promise.all([
     fetchOrderItemsFromRpc(order.id),
     fetchOrderTimelineFromRpc(order.id),
+    fetchAffiliateSummaryMap([order.affiliate_id]),
+    fetchAffiliateConversionMap([order.id]),
   ]);
+
+  const affiliateLink = buildAffiliateLinkInfo(
+    order,
+    affiliateMap.get(String(order.affiliate_id || "").trim()) || null,
+    conversionMap.get(String(order.id || "").trim()) || []
+  );
 
   return {
     id: order.id,
@@ -506,6 +699,12 @@ async function buildOrderDetails(order) {
     customer_phone: order.customer_phone || "",
     customer_cpf: order.customer_cpf || "",
     created_at: order.created_at,
+    affiliate_id: order.affiliate_id || "",
+    affiliate_ref_code: order.affiliate_ref_code || "",
+    affiliate_coupon_code: order.affiliate_coupon_code || "",
+    affiliate_commission_rate: Number(order.affiliate_commission_rate || 0),
+    affiliate_commission_amount: Number(order.affiliate_commission_amount || 0),
+    affiliateLink,
     payment_status: order.payment_status || "pending",
     payment_raw_status: order.payment_raw_status || "",
     payment_gateway: order.payment_gateway || "",
@@ -548,6 +747,12 @@ async function buildOrderDetails(order) {
     customerPhone: order.customer_phone || "",
     customerCpf: order.customer_cpf || "",
     date: formatDate(order.created_at),
+    affiliateId: order.affiliate_id || "",
+    affiliateRefCode: order.affiliate_ref_code || "",
+    affiliateCouponCode: order.affiliate_coupon_code || "",
+    affiliateCommissionRate: Number(order.affiliate_commission_rate || 0),
+    affiliateCommissionAmount: Number(order.affiliate_commission_amount || 0),
+    affiliateLink,
     paymentStatus: order.payment_status || "pending",
     paymentLabel: mapPaymentStatusLabel(order.payment_status),
     total: formatCurrency(order.total_amount),
@@ -643,17 +848,35 @@ router.get("/", requireAuth, async (req, res) => {
       );
     }
 
-    const orderItemCounts = await fetchOrderItemsCountMap(
-      orders.map((order) => order.id)
-    );
+    const orderIds = orders.map((order) => order.id);
+    const affiliateIds = orders.map((order) => order.affiliate_id).filter(Boolean);
 
-    const normalizedOrders = orders.map((order) => ({
+    const [orderItemCounts, affiliateMap, conversionMap] = await Promise.all([
+      fetchOrderItemsCountMap(orderIds),
+      fetchAffiliateSummaryMap(affiliateIds),
+      fetchAffiliateConversionMap(orderIds),
+    ]);
+
+    const normalizedOrders = orders.map((order) => {
+      const affiliateLink = buildAffiliateLinkInfo(
+        order,
+        affiliateMap.get(String(order.affiliate_id || "").trim()) || null,
+        conversionMap.get(String(order.id || "").trim()) || []
+      );
+
+      return ({
       id: order.id,
       order_number: order.order_number,
       customer_name: order.customer_name,
       customer_email: order.customer_email,
       customer_phone: order.customer_phone || "",
       created_at: order.created_at,
+      affiliate_id: order.affiliate_id || "",
+      affiliate_ref_code: order.affiliate_ref_code || "",
+      affiliate_coupon_code: order.affiliate_coupon_code || "",
+      affiliate_commission_rate: Number(order.affiliate_commission_rate || 0),
+      affiliate_commission_amount: Number(order.affiliate_commission_amount || 0),
+      affiliateLink,
       payment_status: order.payment_status || "pending",
       payment_raw_status: order.payment_raw_status || "",
       total_amount: Number(order.total_amount || 0),
@@ -677,6 +900,12 @@ router.get("/", requireAuth, async (req, res) => {
       customerEmail: order.customer_email,
       customerPhone: order.customer_phone || "",
       date: formatDate(order.created_at),
+      affiliateId: order.affiliate_id || "",
+      affiliateRefCode: order.affiliate_ref_code || "",
+      affiliateCouponCode: order.affiliate_coupon_code || "",
+      affiliateCommissionRate: Number(order.affiliate_commission_rate || 0),
+      affiliateCommissionAmount: Number(order.affiliate_commission_amount || 0),
+      affiliateLink,
       paymentStatus: order.payment_status || "pending",
       paymentLabel: mapPaymentStatusLabel(order.payment_status),
       total: formatCurrency(order.total_amount),
@@ -697,7 +926,8 @@ router.get("/", requireAuth, async (req, res) => {
       shippingLabelError: order.shipping_label_error || "",
       addressLine: buildAddressLine(order),
       itemsCount: orderItemCounts.get(String(order.id || "")) || 0,
-    }));
+    });
+    });
 
     return res.status(200).json({
       success: true,
