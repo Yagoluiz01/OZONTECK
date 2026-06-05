@@ -18,6 +18,7 @@ import {
   storeQuoteLimiter,
 } from "./middlewares/rate-limit.middleware.js";
 import adminNotificationsRoutes from "./routes/adminNotifications.routes.js";
+import adminAuditRoutes from "./routes/adminAudit.routes.js";
 import adminAccessRequestsRoutes from "./routes/adminAccessRequests.routes.js";
 import adminPushRoutes from "./routes/adminPush.routes.js";
 import adminStoreThemeRoutes from "./routes/adminStoreTheme.routes.js";
@@ -243,6 +244,7 @@ app.use("/api/admin/pricing", adminPricingRoutes);
 app.use("/api/admin/fiscal", adminFiscalRoutes);
 app.use("/api/admin/affiliates", adminAffiliatesRoutes);
 app.use("/api/admin/notifications", adminNotificationsRoutes);
+app.use("/api/admin/audit", adminAuditRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api", adminAccessRequestsRoutes);
 app.use("/api/admin/push", adminPushRoutes);
