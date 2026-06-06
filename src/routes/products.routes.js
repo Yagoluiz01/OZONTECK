@@ -2,9 +2,39 @@ import express from "express";
 import jwt from "jsonwebtoken";
 import multer from "multer";
 import { env } from "../config/env.js";
+import { recordAuditLog } from "../services/audit.service.js";
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage() });
+
+function toAuditMoney(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Number(number.toFixed(2)) : 0;
+}
+
+function getAuditActor(req) {
+  const admin = req?.auth?.admin || {};
+
+  return {
+    id: admin.id || null,
+    userId: admin.user_id || admin.userId || admin.auth_user_id || null,
+    email: admin.email || null,
+    full_name: admin.full_name || admin.name || null,
+    role: admin.role || null,
+  };
+}
+
+async function recordProductAuditSafely(payload) {
+  try {
+    await recordAuditLog(payload);
+  } catch (error) {
+    console.error("[PRODUCT_AUDIT_ERROR]", {
+      action: payload?.action,
+      entityId: payload?.entityId,
+      message: error?.message || String(error),
+    });
+  }
+}
 
 async function getUserFromToken(token) {
   const response = await fetch(`${env.supabaseUrl}/auth/v1/user`, {
@@ -772,6 +802,36 @@ router.put(
       }
 
       const updated = Array.isArray(data) ? data[0] : data;
+
+      const previousPrice = toAuditMoney(currentProduct.price);
+      const currentPrice = toAuditMoney(updated?.price);
+      const previousCompareAtPrice = toAuditMoney(currentProduct.compare_at_price);
+      const currentCompareAtPrice = toAuditMoney(updated?.compare_at_price);
+
+      if (previousPrice !== currentPrice) {
+        await recordProductAuditSafely({
+          req,
+          actor: getAuditActor(req),
+          action: "product_price_changed",
+          module: "products",
+          entityType: "product",
+          entityId: id,
+          description: `Preço do produto ${updated?.name || currentProduct.name || id} foi alterado.`,
+          oldValues: {
+            price: previousPrice,
+            compare_at_price: previousCompareAtPrice,
+          },
+          newValues: {
+            price: currentPrice,
+            compare_at_price: currentCompareAtPrice,
+          },
+          metadata: {
+            source: "admin_product_edit",
+            product_name: updated?.name || currentProduct.name || null,
+            product_sku: updated?.sku || currentProduct.sku || null,
+          },
+        });
+      }
 
       return res.status(200).json({
         success: true,

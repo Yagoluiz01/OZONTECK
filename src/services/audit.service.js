@@ -8,28 +8,26 @@ import {
   listAuditLogs,
 } from "../repositories/audit-logs.repository.js";
 
-const SENSITIVE_KEYS = new Set([
-  "password",
-  "confirm_password",
-  "confirmPassword",
-  "token",
-  "access_token",
-  "refresh_token",
-  "authorization",
-  "secret",
-  "api_key",
-  "apikey",
-]);
+const SENSITIVE_KEY_PATTERN =
+  /(password|senha|token|authorization|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|cvv|card[_-]?number|numero[_-]?cartao|cpf|document|signature)/i;
+
+function truncateAuditText(value, maxLength = 500) {
+  const text = String(value ?? "");
+  return text.length <= maxLength ? text : `${text.slice(0, maxLength)}…`;
+}
 
 function redactSensitive(value, depth = 0) {
   if (depth > 5) return "[limite de profundidade]";
-  if (Array.isArray(value)) return value.map((item) => redactSensitive(item, depth + 1));
+  if (Array.isArray(value)) {
+    return value.slice(0, 30).map((item) => redactSensitive(item, depth + 1));
+  }
+  if (typeof value === "string") return truncateAuditText(value);
   if (!value || typeof value !== "object") return value;
 
   return Object.fromEntries(
-    Object.entries(value).map(([key, item]) => [
+    Object.entries(value).slice(0, 80).map(([key, item]) => [
       key,
-      SENSITIVE_KEYS.has(String(key).toLowerCase()) ? "[protegido]" : redactSensitive(item, depth + 1),
+      SENSITIVE_KEY_PATTERN.test(String(key)) ? "[protegido]" : redactSensitive(item, depth + 1),
     ])
   );
 }

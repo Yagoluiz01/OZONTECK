@@ -46,6 +46,7 @@ import affiliatePasswordRoutes from "./routes/affiliatePassword.routes.js";
 import { updateStorefrontProfilePhoto } from "./controllers/affiliatePortal.controller.js";
 import { requireAffiliateAuth } from "./middlewares/affiliateAuth.middleware.js";
 import melhorEnvioWebhookRoutes from "./routes/melhorEnvioWebhook.routes.js";
+import { captureAdminMutationAudit } from "./middlewares/audit.middleware.js";
 
 const app = express();
 
@@ -218,6 +219,10 @@ app.use(
     },
   })
 );
+
+// Registra automaticamente alterações administrativas após a resposta terminar.
+// A falha da auditoria nunca bloqueia a operação principal.
+app.use(captureAdminMutationAudit);
 
 app.use("/labels", express.static(path.join(__dirname, "../public/labels")));
 

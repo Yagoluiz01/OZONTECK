@@ -3,6 +3,7 @@ import jwt from "jsonwebtoken";
 
 import { supabaseAdmin, supabaseAuth } from "../config/supabase.js";
 import { env } from "../config/env.js";
+import { recordAuditLog } from "../services/audit.service.js";
 
 const router = express.Router();
 
@@ -49,6 +50,51 @@ function maskEmail(value) {
   }
 
   return `${name.slice(0, 2)}***@${domain}`;
+}
+
+
+function recordLoginAuditSafely({ req, admin = null, email = null, status = "success", reason = null }) {
+  const normalizedEmail = normalizeEmail(admin?.email || email);
+  const actor = admin
+    ? {
+        id: admin.id || null,
+        userId: admin.user_id || admin.userId || admin.auth_user_id || null,
+        email: admin.email || normalizedEmail || null,
+        full_name: admin.full_name || admin.name || null,
+        role: admin.role || null,
+      }
+    : {
+        id: null,
+        userId: null,
+        email: normalizedEmail || null,
+        full_name: null,
+        role: null,
+      };
+
+  setImmediate(() => {
+    recordAuditLog({
+      req,
+      actor,
+      action: status === "success" ? "admin_login_success" : "admin_login_failure",
+      module: "security",
+      entityType: "admin_session",
+      entityId: admin?.id || null,
+      description:
+        status === "success"
+          ? `${admin?.full_name || admin?.email || "Administrador"} entrou no painel administrativo.`
+          : `Tentativa de login administrativo falhou para ${maskEmail(normalizedEmail)}.`,
+      metadata: {
+        reason: reason || null,
+        attempted_email: maskEmail(normalizedEmail),
+      },
+      status,
+    }).catch((error) => {
+      console.error("[ADMIN_LOGIN_AUDIT_ERROR]", {
+        status,
+        message: error?.message || String(error),
+      });
+    });
+  });
 }
 
 function getAdminPasswordResetRedirectUrl() {
@@ -297,6 +343,7 @@ router.post("/login", async (req, res) => {
     const { email, password } = req.body;
 
     if (!email || !password) {
+      recordLoginAuditSafely({ req, email, status: "failure", reason: "missing_credentials" });
       return res.status(400).json({
         success: false,
         message: "E-mail e senha são obrigatórios",
@@ -312,6 +359,7 @@ router.post("/login", async (req, res) => {
       });
 
     if (authError || !authData?.user) {
+      recordLoginAuditSafely({ req, email: normalizedEmail, status: "failure", reason: "invalid_credentials" });
       console.warn("[ADMIN_LOGIN_AUTH_ERROR]", {
         email: maskEmail(normalizedEmail),
         message: authError?.message,
@@ -327,6 +375,7 @@ router.post("/login", async (req, res) => {
     const adminLookup = await findAdminByEmail(normalizedEmail);
 
     if (!adminLookup.ok) {
+      recordLoginAuditSafely({ req, email: normalizedEmail, status: "failure", reason: "admin_lookup_failed" });
       console.error("[ADMIN_LOGIN_LOOKUP_ERROR]", {
         email: maskEmail(normalizedEmail),
         status: adminLookup.status,
@@ -343,6 +392,7 @@ router.post("/login", async (req, res) => {
       : adminLookup.data;
 
     if (!admin) {
+      recordLoginAuditSafely({ req, email: normalizedEmail, status: "failure", reason: "no_panel_access" });
       console.warn("[ADMIN_LOGIN_NO_PANEL_ACCESS]", {
         email: maskEmail(normalizedEmail),
       });
@@ -354,6 +404,7 @@ router.post("/login", async (req, res) => {
     }
 
     if (!admin.is_active) {
+      recordLoginAuditSafely({ req, admin, email: normalizedEmail, status: "failure", reason: "inactive_admin" });
       console.warn("[ADMIN_LOGIN_INACTIVE]", {
         email: maskEmail(normalizedEmail),
         admin_id: admin.id,
@@ -364,6 +415,8 @@ router.post("/login", async (req, res) => {
         message: "Usuário inativo no painel administrativo",
       });
     }
+
+    recordLoginAuditSafely({ req, admin, email: normalizedEmail, status: "success" });
 
     const token = jwt.sign(
       {
@@ -394,6 +447,13 @@ router.post("/login", async (req, res) => {
       },
     });
   } catch (error) {
+    recordLoginAuditSafely({
+      req,
+      email: req.body?.email,
+      status: "failure",
+      reason: "unexpected_login_error",
+    });
+
     console.error("[ADMIN_LOGIN_ERROR]", {
       message: error?.message,
       name: error?.name,
