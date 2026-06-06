@@ -249,13 +249,28 @@ function getShippingRealCost(order = {}) {
 }
 
 function getGatewayFee(order = {}) {
-  return roundMoney(
+  const explicitFee = roundMoney(
     toNumber(order.gateway_fee) ||
       toNumber(order.payment_gateway_fee) ||
       toNumber(order.mercado_pago_fee) ||
       toNumber(order.transaction_fee) ||
       0
   );
+
+  if (explicitFee > 0) return explicitFee;
+
+  const grossAmount = getOrderAmount(order);
+  const paymentNetAmount = roundMoney(
+    toNumber(order.payment_net_amount) ||
+      toNumber(order.net_received_amount) ||
+      0
+  );
+
+  if (grossAmount > 0 && paymentNetAmount > 0 && paymentNetAmount <= grossAmount) {
+    return roundMoney(grossAmount - paymentNetAmount);
+  }
+
+  return 0;
 }
 
 function getProductCost(order = {}) {
@@ -393,7 +408,6 @@ function buildCommissionMap(conversions = []) {
         toNumber(item.recruitment_bonus_amount) ||
         toNumber(item.network_commission) ||
         toNumber(item.network_commission_amount) ||
-        toNumber(item.level_bonus_amount) ||
         toNumber(item.amount) ||
         toNumber(item.commission_value) ||
         0
@@ -420,12 +434,6 @@ function buildCommissionMap(conversions = []) {
 }
 
 function getAffiliateCommissionForOrder(order, commissionMap = {}) {
-  const direct = getDirectAffiliateCommission(order);
-
-  if (direct > 0) {
-    return direct;
-  }
-
   const keys = [
     order.id,
     order.order_number,
@@ -439,6 +447,12 @@ function getAffiliateCommissionForOrder(order, commissionMap = {}) {
     if (value > 0) {
       return roundMoney(value);
     }
+  }
+
+  const direct = getDirectAffiliateCommission(order);
+
+  if (direct > 0) {
+    return direct;
   }
 
   return 0;

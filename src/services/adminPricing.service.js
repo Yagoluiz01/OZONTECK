@@ -52,14 +52,101 @@ function normalizePercent(value) {
   return percent;
 }
 
-function getAutoPercent(value, fallback) {
-  const number = Number(value);
-
-  if (!Number.isFinite(number) || number <= 0) {
+function getConfiguredNumber(value, fallback = 0) {
+  if (value === undefined || value === null || value === "") {
     return fallback;
   }
 
-  return number;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function resolveShippingCostInPrice(averageShippingCost, shippingPolicy = "customer_paid") {
+  const cost = roundMoney(averageShippingCost);
+  const policy = String(shippingPolicy || "customer_paid").trim().toLowerCase();
+
+  if (cost <= 0) return 0;
+
+  if (["free_shipping", "frete_gratis", "included", "embutido"].includes(policy)) {
+    return cost;
+  }
+
+  if (["partial_subsidy", "subsidio_parcial", "partial", "parcial"].includes(policy)) {
+    return roundMoney(cost / 2);
+  }
+
+  return 0;
+}
+
+function getGoalBonusAnalysis(input = {}) {
+  const levels = Array.isArray(input.affiliate_goal_levels)
+    ? input.affiliate_goal_levels
+    : Array.isArray(input.goal_levels)
+      ? input.goal_levels
+      : [];
+
+  let accumulatedBonus = 0;
+  let worstBonusPerSale = roundMoney(
+    getConfiguredNumber(
+      input.worst_goal_bonus_per_sale ?? input.goal_bonus_per_sale,
+      0
+    )
+  );
+  let worstGoalLevelName = input.worst_goal_level_name || null;
+
+  const normalizedLevels = levels
+    .filter((level) => level?.is_active !== false)
+    .filter((level) => Number(level?.required_conversions || 0) > 0)
+    .map((level) => ({
+      ...level,
+      required_conversions: Math.max(
+        1,
+        Math.trunc(getConfiguredNumber(level.required_conversions, 1))
+      ),
+    }))
+    .sort((a, b) => {
+      const orderDiff = getConfiguredNumber(a.level_order, 0) - getConfiguredNumber(b.level_order, 0);
+      if (orderDiff !== 0) return orderDiff;
+      return a.required_conversions - b.required_conversions;
+    })
+    .map((level) => {
+      const providedAccumulated = getConfiguredNumber(
+        level.accumulated_bonus_amount ?? level.goal_bonus_amount,
+        NaN
+      );
+
+      if (Number.isFinite(providedAccumulated)) {
+        accumulatedBonus = roundMoney(Math.max(providedAccumulated, 0));
+      } else if (String(level.bonus_type || "fixed").toLowerCase() !== "manual") {
+        accumulatedBonus = roundMoney(
+          accumulatedBonus + Math.max(getConfiguredNumber(level.bonus_amount, 0), 0)
+        );
+      }
+
+      const bonusPerSale = roundMoney(
+        getConfiguredNumber(
+          level.bonus_per_sale,
+          accumulatedBonus / level.required_conversions
+        )
+      );
+
+      if (bonusPerSale > worstBonusPerSale) {
+        worstBonusPerSale = bonusPerSale;
+        worstGoalLevelName = level.name || level.level_name || "Meta";
+      }
+
+      return {
+        ...level,
+        accumulated_bonus_amount: accumulatedBonus,
+        bonus_per_sale: bonusPerSale,
+      };
+    });
+
+  return {
+    levels: normalizedLevels,
+    worstGoalBonusPerSale: roundMoney(worstBonusPerSale),
+    worstGoalLevelName,
+  };
 }
 
 function normalizePaymentMethod(value) {
@@ -128,30 +215,36 @@ async function supabaseFetch(path, options = {}) {
 
 function calculatePriceForCommission({
   baseCost,
+  goalBonusPerSale = 0,
   gatewayFeePercent,
   taxPercent,
   commissionPercent,
+  networkCommissionPercent = 0,
   marginPercent,
 }) {
+  const fixedCost = roundMoney(baseCost + goalBonusPerSale);
   const variablePercent =
     normalizePercent(gatewayFeePercent) / 100 +
     normalizePercent(taxPercent) / 100 +
     normalizePercent(commissionPercent) / 100 +
+    normalizePercent(networkCommissionPercent) / 100 +
     normalizePercent(marginPercent) / 100;
 
-  if (variablePercent >= 1) {
+  if (fixedCost <= 0 || variablePercent >= 1) {
     return 0;
   }
 
-  return roundMoney(baseCost / (1 - variablePercent));
+  return roundMoney(fixedCost / (1 - variablePercent));
 }
 
 function calculateProfitForPrice({
   price,
   baseCost,
+  goalBonusPerSale = 0,
   gatewayFeePercent,
   taxPercent,
   commissionPercent,
+  networkCommissionPercent = 0,
 }) {
   const gatewayValue = roundMoney(
     price * (normalizePercent(gatewayFeePercent) / 100)
@@ -163,8 +256,20 @@ function calculateProfitForPrice({
     price * (normalizePercent(commissionPercent) / 100)
   );
 
+  const networkCommissionValue = roundMoney(
+    price * (normalizePercent(networkCommissionPercent) / 100)
+  );
+
+  const goalBonusValue = roundMoney(goalBonusPerSale);
+
   const profit = roundMoney(
-    price - baseCost - gatewayValue - taxValue - commissionValue
+    price -
+      baseCost -
+      goalBonusValue -
+      gatewayValue -
+      taxValue -
+      commissionValue -
+      networkCommissionValue
   );
 
   const marginPercent = price > 0 ? roundMoney((profit / price) * 100) : 0;
@@ -173,6 +278,11 @@ function calculateProfitForPrice({
     gateway_value: gatewayValue,
     tax_value: taxValue,
     commission_value: commissionValue,
+    network_commission_value: networkCommissionValue,
+    goal_bonus_value: goalBonusValue,
+    affiliate_total_cost: roundMoney(
+      commissionValue + networkCommissionValue + goalBonusValue
+    ),
     profit,
     margin_percent: marginPercent,
   };
@@ -238,35 +348,55 @@ function calculatePricing(input) {
   const costPrice = roundMoney(input.cost_price);
   const packagingCost = roundMoney(input.packaging_cost);
   const trafficCost = roundMoney(input.traffic_cost);
+  const operationalCost = roundMoney(input.operational_cost);
   const gatewayFeePercent = normalizePercent(input.gateway_fee_percent);
   const taxPercent = normalizePercent(input.tax_percent);
   const otherCosts = roundMoney(input.other_costs);
   const desiredMarginPercent = normalizePercent(input.desired_margin_percent);
   const averageShippingCost = roundMoney(input.average_shipping_cost);
   const shippingPolicy = input.shipping_policy || "customer_paid";
+  const shippingCostInPrice = resolveShippingCostInPrice(
+    averageShippingCost,
+    shippingPolicy
+  );
+
+  const goalAnalysis = getGoalBonusAnalysis(input);
+  const goalBonusPerSale = goalAnalysis.worstGoalBonusPerSale;
 
   const affiliateCommissionPercent = normalizePercent(
-    getAutoPercent(input.affiliate_commission_percent, 10)
+    getConfiguredNumber(input.affiliate_commission_percent, 10)
   );
 
   const maxAffiliateCommissionPercent = normalizePercent(
-    getAutoPercent(input.max_affiliate_commission_percent, 50)
+    getConfiguredNumber(input.max_affiliate_commission_percent, 50)
   );
 
   const specialAffiliateCommissionPercent = normalizePercent(
-    getAutoPercent(input.special_affiliate_commission_percent, 50)
+    getConfiguredNumber(input.special_affiliate_commission_percent, 50)
   );
 
   const minimumCompanyMarginPercent = normalizePercent(
-    getAutoPercent(input.minimum_company_margin_percent, 15)
+    getConfiguredNumber(input.minimum_company_margin_percent, 15)
   );
 
   const commissionScenarioPercent = normalizePercent(
-    getAutoPercent(input.commission_scenario_percent, 50)
+    getConfiguredNumber(input.commission_scenario_percent, 50)
+  );
+
+  const networkCommissionPercent = normalizePercent(
+    getConfiguredNumber(
+      input.network_commission_percent ?? input.recruitment_commission_rate,
+      0
+    )
   );
 
   const baseCost = roundMoney(
-    costPrice + packagingCost + trafficCost + otherCosts
+    costPrice +
+      packagingCost +
+      trafficCost +
+      operationalCost +
+      otherCosts +
+      shippingCostInPrice
   );
 
   const basicVariablePercent = gatewayFeePercent / 100 + taxPercent / 100;
@@ -278,23 +408,26 @@ function calculatePricing(input) {
 
   const safeMarginPercent = Math.max(
     desiredMarginPercent,
-    minimumCompanyMarginPercent,
-    15
+    minimumCompanyMarginPercent
   );
 
   const safePrice = calculatePriceForCommission({
     baseCost,
+    goalBonusPerSale,
     gatewayFeePercent,
     taxPercent,
     commissionPercent: affiliateCommissionPercent,
+    networkCommissionPercent,
     marginPercent: safeMarginPercent,
   });
 
   const calculatedSuggestedPrice = calculatePriceForCommission({
     baseCost,
+    goalBonusPerSale,
     gatewayFeePercent,
     taxPercent,
     commissionPercent: affiliateCommissionPercent,
+    networkCommissionPercent,
     marginPercent: desiredMarginPercent,
   });
 
@@ -314,50 +447,62 @@ function calculatePricing(input) {
 
   const priceWithMaxCommission = calculatePriceForCommission({
     baseCost,
+    goalBonusPerSale,
     gatewayFeePercent,
     taxPercent,
     commissionPercent: maxAffiliateCommissionPercent,
+    networkCommissionPercent,
     marginPercent: minimumCompanyMarginPercent,
   });
 
   const priceWithSpecialCommission = calculatePriceForCommission({
     baseCost,
+    goalBonusPerSale,
     gatewayFeePercent,
     taxPercent,
     commissionPercent: specialAffiliateCommissionPercent,
+    networkCommissionPercent,
     marginPercent: minimumCompanyMarginPercent,
   });
 
   const defaultProfitData = calculateProfitForPrice({
     price: priceWithDefaultCommission,
     baseCost,
+    goalBonusPerSale,
     gatewayFeePercent,
     taxPercent,
     commissionPercent: affiliateCommissionPercent,
+    networkCommissionPercent,
   });
 
   const maxProfitData = calculateProfitForPrice({
     price: priceWithMaxCommission,
     baseCost,
+    goalBonusPerSale,
     gatewayFeePercent,
     taxPercent,
     commissionPercent: maxAffiliateCommissionPercent,
+    networkCommissionPercent,
   });
 
   const specialProfitData = calculateProfitForPrice({
     price: priceWithSpecialCommission,
     baseCost,
+    goalBonusPerSale,
     gatewayFeePercent,
     taxPercent,
     commissionPercent: specialAffiliateCommissionPercent,
+    networkCommissionPercent,
   });
 
   const suggestedProfitData = calculateProfitForPrice({
     price: suggestedPrice,
     baseCost,
+    goalBonusPerSale,
     gatewayFeePercent,
     taxPercent,
     commissionPercent: affiliateCommissionPercent,
+    networkCommissionPercent,
   });
 
   const risk = buildRiskStatus({
@@ -374,10 +519,12 @@ function calculatePricing(input) {
     cost_price: roundMoney(costPrice),
     packaging_cost: roundMoney(packagingCost),
     traffic_cost: roundMoney(trafficCost),
+    operational_cost: roundMoney(operationalCost),
     gateway_fee_percent: roundMoney(gatewayFeePercent),
     tax_percent: roundMoney(taxPercent),
     other_costs: roundMoney(otherCosts),
     average_shipping_cost: roundMoney(averageShippingCost),
+    shipping_cost_in_price: roundMoney(shippingCostInPrice),
     shipping_policy: shippingPolicy,
     desired_margin_percent: roundMoney(desiredMarginPercent),
 
@@ -388,6 +535,10 @@ function calculatePricing(input) {
     ),
     minimum_company_margin_percent: roundMoney(minimumCompanyMarginPercent),
     commission_scenario_percent: roundMoney(commissionScenarioPercent),
+    network_commission_percent: roundMoney(networkCommissionPercent),
+    goal_bonus_per_sale: roundMoney(goalBonusPerSale),
+    worst_goal_bonus_per_sale: roundMoney(goalBonusPerSale),
+    worst_goal_level_name: goalAnalysis.worstGoalLevelName,
 
     cost_total: roundMoney(baseCost),
     minimum_price: roundMoney(minimumPrice),
@@ -395,6 +546,12 @@ function calculatePricing(input) {
     suggested_price: roundMoney(suggestedPrice),
     unit_profit: roundMoney(suggestedProfitData.profit),
     real_margin_percent: roundMoney(suggestedProfitData.margin_percent),
+    direct_commission_value: roundMoney(suggestedProfitData.commission_value),
+    network_commission_value: roundMoney(
+      suggestedProfitData.network_commission_value
+    ),
+    goal_bonus_value: roundMoney(suggestedProfitData.goal_bonus_value),
+    affiliate_total_cost: roundMoney(suggestedProfitData.affiliate_total_cost),
 
     price_with_default_commission: roundMoney(priceWithDefaultCommission),
     price_with_max_commission: roundMoney(priceWithMaxCommission),
@@ -411,6 +568,12 @@ function calculatePricing(input) {
     margin_with_special_commission_percent: roundMoney(
       specialProfitData.margin_percent
     ),
+
+    goal_analysis: {
+      levels: goalAnalysis.levels,
+      worst_bonus_per_sale: roundMoney(goalBonusPerSale),
+      worst_goal_level_name: goalAnalysis.worstGoalLevelName,
+    },
 
     status: risk.status,
     risk_message: risk.risk_message,
@@ -443,10 +606,12 @@ async function createPricingHistory({
     cost_price: roundMoney(pricingData.cost_price),
     packaging_cost: roundMoney(pricingData.packaging_cost),
     traffic_cost: roundMoney(pricingData.traffic_cost),
+    operational_cost: roundMoney(pricingData.operational_cost),
     gateway_fee_percent: roundMoney(pricingData.gateway_fee_percent),
     tax_percent: roundMoney(pricingData.tax_percent),
     other_costs: roundMoney(pricingData.other_costs),
     average_shipping_cost: roundMoney(pricingData.average_shipping_cost),
+    shipping_cost_in_price: roundMoney(pricingData.shipping_cost_in_price),
     shipping_policy: pricingData.shipping_policy || "customer_paid",
     desired_margin_percent: roundMoney(pricingData.desired_margin_percent),
 
@@ -465,6 +630,14 @@ async function createPricingHistory({
     commission_scenario_percent: roundMoney(
       pricingData.commission_scenario_percent
     ),
+    network_commission_percent: roundMoney(
+      pricingData.network_commission_percent
+    ),
+    goal_bonus_per_sale: roundMoney(pricingData.goal_bonus_per_sale),
+    worst_goal_bonus_per_sale: roundMoney(
+      pricingData.worst_goal_bonus_per_sale
+    ),
+    worst_goal_level_name: pricingData.worst_goal_level_name || null,
 
     cost_total: roundMoney(pricingData.cost_total),
     minimum_price: roundMoney(pricingData.minimum_price),
@@ -472,6 +645,16 @@ async function createPricingHistory({
     suggested_price: roundMoney(pricingData.suggested_price),
     unit_profit: roundMoney(pricingData.unit_profit),
     real_margin_percent: roundMoney(pricingData.real_margin_percent),
+    direct_commission_value: roundMoney(pricingData.direct_commission_value),
+    network_commission_value: roundMoney(
+      pricingData.network_commission_value
+    ),
+    goal_bonus_value: roundMoney(pricingData.goal_bonus_value),
+    affiliate_total_cost: roundMoney(pricingData.affiliate_total_cost),
+    goal_analysis:
+      pricingData.goal_analysis && typeof pricingData.goal_analysis === "object"
+        ? pricingData.goal_analysis
+        : {},
 
     price_with_default_commission: roundMoney(
       pricingData.price_with_default_commission

@@ -182,6 +182,152 @@ function roundMoney(value) {
   return Number(number.toFixed(2));
 }
 
+function normalizeItemQuantity(value) {
+  const quantity = Number(value ?? 1);
+
+  if (!Number.isInteger(quantity) || quantity < 1 || quantity > 999) {
+    const error = new Error(
+      "Quantidade inválida. Use um número inteiro entre 1 e 999."
+    );
+    error.status = 400;
+    throw error;
+  }
+
+  return quantity;
+}
+
+function isMissingDatabaseColumnError(payload) {
+  const text = JSON.stringify(payload || {}).toLowerCase();
+
+  return (
+    text.includes("column") &&
+    (text.includes("does not exist") ||
+      text.includes("could not find") ||
+      text.includes("schema cache"))
+  );
+}
+
+function getMercadoPagoFinancialData(payment = {}) {
+  const transactionAmount = roundMoney(payment?.transaction_amount || 0);
+  const netReceivedAmount = roundMoney(
+    payment?.transaction_details?.net_received_amount || 0
+  );
+  const feeDetails = Array.isArray(payment?.fee_details)
+    ? payment.fee_details
+    : [];
+  const feeDetailsAmount = roundMoney(
+    feeDetails.reduce(
+      (sum, item) => sum + Math.abs(Number(item?.amount || 0) || 0),
+      0
+    )
+  );
+  const calculatedFee =
+    transactionAmount > 0 && netReceivedAmount > 0
+      ? roundMoney(Math.max(transactionAmount - netReceivedAmount, 0))
+      : 0;
+  const gatewayFee = calculatedFee > 0 ? calculatedFee : feeDetailsAmount;
+  const resolvedNetAmount =
+    netReceivedAmount > 0
+      ? netReceivedAmount
+      : roundMoney(Math.max(transactionAmount - gatewayFee, 0));
+
+  return {
+    gatewayFee,
+    netAmount: resolvedNetAmount,
+    paymentMethodId: String(payment?.payment_method_id || "").trim(),
+    paymentTypeId: String(payment?.payment_type_id || "").trim(),
+    installments: Math.max(1, Math.trunc(Number(payment?.installments || 1) || 1)),
+  };
+}
+
+function resolveEmbeddedShippingCost(averageShippingCost, shippingPolicy) {
+  const cost = roundMoney(averageShippingCost);
+  const policy = String(shippingPolicy || "customer_paid").trim().toLowerCase();
+
+  if (cost <= 0) return 0;
+  if (["free_shipping", "frete_gratis", "included", "embutido"].includes(policy)) {
+    return cost;
+  }
+  if (["partial_subsidy", "subsidio_parcial", "partial", "parcial"].includes(policy)) {
+    return roundMoney(cost / 2);
+  }
+
+  return 0;
+}
+
+function buildOrderCostSnapshot(items = [], pricingMap = new Map()) {
+  const enrichedItems = items.map((item) => {
+    const productId = String(item?.product?.id || item?.product_id || "").trim();
+    const pricing = pricingMap.get(productId) || {};
+    const quantity = normalizeItemQuantity(item.quantity);
+    const unitProductCost = roundMoney(pricing.cost_price);
+    const unitPackagingCost = roundMoney(pricing.packaging_cost);
+    const unitTrafficCost = roundMoney(pricing.traffic_cost);
+    const unitOperationalCost = roundMoney(pricing.operational_cost);
+    const unitOtherCost = roundMoney(pricing.other_costs);
+    const unitEmbeddedShippingCost = resolveEmbeddedShippingCost(
+      pricing.average_shipping_cost,
+      pricing.shipping_policy
+    );
+    const unitTotalCost = roundMoney(
+      unitProductCost +
+        unitPackagingCost +
+        unitTrafficCost +
+        unitOperationalCost +
+        unitOtherCost
+    );
+
+    return {
+      ...item,
+      costSnapshot: {
+        unitProductCost,
+        unitPackagingCost,
+        unitTrafficCost,
+        unitOperationalCost,
+        unitOtherCost,
+        unitEmbeddedShippingCost,
+        unitTotalCost,
+        totalCost: roundMoney(unitTotalCost * quantity),
+        pricingId: pricing.id || null,
+        pricingUpdatedAt: pricing.updated_at || null,
+      },
+    };
+  });
+
+  const totals = enrichedItems.reduce(
+    (acc, item) => {
+      const quantity = item.quantity;
+      const snapshot = item.costSnapshot;
+
+      acc.productCost += snapshot.unitProductCost * quantity;
+      acc.packagingCost += snapshot.unitPackagingCost * quantity;
+      acc.trafficCost += snapshot.unitTrafficCost * quantity;
+      acc.operationalCost += snapshot.unitOperationalCost * quantity;
+      acc.otherCost += snapshot.unitOtherCost * quantity;
+      acc.embeddedShippingEstimate += snapshot.unitEmbeddedShippingCost * quantity;
+      acc.totalCost += snapshot.totalCost;
+      if (!snapshot.pricingId) acc.itemsWithoutPricing += 1;
+      return acc;
+    },
+    {
+      productCost: 0,
+      packagingCost: 0,
+      trafficCost: 0,
+      operationalCost: 0,
+      otherCost: 0,
+      embeddedShippingEstimate: 0,
+      totalCost: 0,
+      itemsWithoutPricing: 0,
+    }
+  );
+
+  Object.keys(totals).forEach((key) => {
+    if (key !== "itemsWithoutPricing") totals[key] = roundMoney(totals[key]);
+  });
+
+  return { items: enrichedItems, totals };
+}
+
 function normalizePercentValue(value, fallback = 0) {
   const number = Number(value);
 
@@ -218,10 +364,7 @@ async function fetchProductPricingMap(productIds = []) {
 
   try {
     const url = new URL(`${env.supabaseUrl}/rest/v1/product_pricing`);
-    url.searchParams.set(
-      "select",
-      "product_id,affiliate_commission_percent,network_commission_percent"
-    );
+    url.searchParams.set("select", "*");
     url.searchParams.set("product_id", `in.(${uniqueProductIds.join(",")})`);
 
     const response = await fetch(url.toString(), {
@@ -3010,9 +3153,8 @@ router.post("/shipping/quote", async (req, res) => {
       ).trim();
 
       const normalizedRef = slugify(ref);
-      const quantity = Math.max(
-        1,
-        Number(item.quantity || item.quantidade || 1) || 1
+      const quantity = normalizeItemQuantity(
+        item.quantity ?? item.quantidade ?? 1
       );
 
       const product = productsMap.get(ref) || productsMap.get(normalizedRef);
@@ -3026,14 +3168,13 @@ router.post("/shipping/quote", async (req, res) => {
       return {
         product,
         quantity,
-        unitPrice: Number(product.price || 0),
-        totalPrice: Number(product.price || 0) * quantity
+        unitPrice: roundMoney(product.price || 0),
+        totalPrice: roundMoney(roundMoney(product.price || 0) * quantity)
       };
     });
 
-    const subtotal = normalizedItems.reduce(
-      (acc, item) => acc + item.totalPrice,
-      0
+    const subtotal = roundMoney(
+      normalizedItems.reduce((acc, item) => acc + item.totalPrice, 0)
     );
 
     const provider = getShippingProvider();
@@ -3067,7 +3208,7 @@ router.post("/shipping/quote", async (req, res) => {
   } catch (error) {
     console.error("ERRO AO COTAR FRETE:", error);
 
-    return res.status(500).json({
+    return res.status(Number(error?.status) || 500).json({
       success: false,
       message: error.message || "Erro interno ao cotar frete"
     });
@@ -3104,9 +3245,8 @@ router.post("/orders", async (req, res) => {
         item.id || item.slug || item.sku || item.nome || ""
       ).trim();
       const normalizedRef = slugify(ref);
-      const quantity = Math.max(
-        1,
-        Number(item.quantity || item.quantidade || 1) || 1
+      const quantity = normalizeItemQuantity(
+        item.quantity ?? item.quantidade ?? 1
       );
       const product = productsMap.get(ref) || productsMap.get(normalizedRef);
 
@@ -3119,14 +3259,13 @@ router.post("/orders", async (req, res) => {
       return {
         product,
         quantity,
-        unitPrice: Number(product.price || 0),
-        totalPrice: Number(product.price || 0) * quantity
+        unitPrice: roundMoney(product.price || 0),
+        totalPrice: roundMoney(roundMoney(product.price || 0) * quantity)
       };
     });
 
-    const subtotal = normalizedItems.reduce(
-      (acc, item) => acc + item.totalPrice,
-      0
+    const subtotal = roundMoney(
+      normalizedItems.reduce((acc, item) => acc + item.totalPrice, 0)
     );
 
         const selectedShipping = body.shipping || {};
@@ -3144,16 +3283,20 @@ router.post("/orders", async (req, res) => {
       validatedShippingQuote.serviceCode || ""
     ).trim();
 
-    const shippingAmount = Number(validatedShippingQuote.price || 0) || 0;
+    const shippingAmount = roundMoney(validatedShippingQuote.price || 0);
 
     // SeguranÃ§a: nÃ£o aceitar desconto vindo direto do frontend.
     // Quando houver cupom, validar o cupom no backend antes de aplicar desconto.
     const discountAmount = 0;
 
-    const totalAmount = subtotal + shippingAmount - discountAmount;
+    const totalAmount = roundMoney(subtotal + shippingAmount - discountAmount);
 
     const productPricingMap = await fetchProductPricingMap(
       normalizedItems.map((item) => item.product.id)
+    );
+    const orderCostSnapshot = buildOrderCostSnapshot(
+      normalizedItems,
+      productPricingMap
     );
     const orderCommissionPolicy = calculateCommissionPolicyFromCartItems({
       items: normalizedItems,
@@ -3202,24 +3345,73 @@ router.post("/orders", async (req, res) => {
         ? orderCommissionPolicy.sellerCommissionAmount
         : null,
 
+      product_cost: orderCostSnapshot.totals.productCost,
+      ad_cost: orderCostSnapshot.totals.trafficCost,
+      other_costs: roundMoney(
+        orderCostSnapshot.totals.packagingCost +
+          orderCostSnapshot.totals.operationalCost +
+          orderCostSnapshot.totals.otherCost
+      ),
+      financial_snapshot: {
+        version: 1,
+        captured_at: new Date().toISOString(),
+        product_cost: orderCostSnapshot.totals.productCost,
+        packaging_cost: orderCostSnapshot.totals.packagingCost,
+        traffic_cost: orderCostSnapshot.totals.trafficCost,
+        operational_cost: orderCostSnapshot.totals.operationalCost,
+        other_cost: orderCostSnapshot.totals.otherCost,
+        embedded_shipping_estimate:
+          orderCostSnapshot.totals.embeddedShippingEstimate,
+        base_cost_total: orderCostSnapshot.totals.totalCost,
+        items_without_pricing: orderCostSnapshot.totals.itemsWithoutPricing,
+        seller_commission_amount: affiliate?.id
+          ? orderCommissionPolicy.sellerCommissionAmount
+          : 0,
+        network_commission_estimate: affiliate?.id
+          ? orderCommissionPolicy.recruitmentCommissionAmount
+          : 0,
+      },
+
       payment_status: "pending",
       order_status: "pending",
       tracking_code: "",
       notes
     };
 
-    const orderResponse = await fetch(`${env.supabaseUrl}/rest/v1/orders`, {
-      method: "POST",
-      headers: {
-        apikey: env.supabaseServiceRoleKey,
-        Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
-        "Content-Type": "application/json",
-        Prefer: "return=representation"
-      },
-      body: JSON.stringify(orderPayload)
-    });
+    const createOrder = async (payload) => {
+      const response = await fetch(`${env.supabaseUrl}/rest/v1/orders`, {
+        method: "POST",
+        headers: {
+          apikey: env.supabaseServiceRoleKey,
+          Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
+          "Content-Type": "application/json",
+          Prefer: "return=representation"
+        },
+        body: JSON.stringify(payload)
+      });
 
-    const orderData = await orderResponse.json().catch(() => []);
+      const data = await response.json().catch(() => []);
+      return { response, data };
+    };
+
+    let { response: orderResponse, data: orderData } = await createOrder(orderPayload);
+
+    if (!orderResponse.ok && isMissingDatabaseColumnError(orderData)) {
+      console.warn(
+        "SNAPSHOT FINANCEIRO DO PEDIDO NÃO FOI SALVO: execute sql/financial-integrity-phase1.sql.",
+        orderData
+      );
+
+      const legacyOrderPayload = { ...orderPayload };
+      delete legacyOrderPayload.product_cost;
+      delete legacyOrderPayload.ad_cost;
+      delete legacyOrderPayload.other_costs;
+      delete legacyOrderPayload.financial_snapshot;
+
+      ({ response: orderResponse, data: orderData } = await createOrder(
+        legacyOrderPayload
+      ));
+    }
 
     if (!orderResponse.ok || !Array.isArray(orderData) || !orderData[0]?.id) {
       return res.status(500).json({
@@ -3231,28 +3423,64 @@ router.post("/orders", async (req, res) => {
 
     const createdOrder = orderData[0];
 
-    const orderItemsPayload = normalizedItems.map((item) => ({
+    const orderItemsPayload = orderCostSnapshot.items.map((item) => ({
       order_id: createdOrder.id,
       product_id: item.product.id,
       product_name: item.product.name,
       sku: item.product.sku || "",
       quantity: item.quantity,
       unit_price: item.unitPrice,
-      total_price: item.totalPrice
+      total_price: item.totalPrice,
+      unit_product_cost: item.costSnapshot.unitProductCost,
+      unit_packaging_cost: item.costSnapshot.unitPackagingCost,
+      unit_traffic_cost: item.costSnapshot.unitTrafficCost,
+      unit_operational_cost: item.costSnapshot.unitOperationalCost,
+      unit_other_cost: item.costSnapshot.unitOtherCost,
+      unit_total_cost: item.costSnapshot.unitTotalCost,
+      total_cost: item.costSnapshot.totalCost,
+      pricing_snapshot: item.costSnapshot,
     }));
 
-    const itemsResponse = await fetch(`${env.supabaseUrl}/rest/v1/order_items`, {
-      method: "POST",
-      headers: {
-        apikey: env.supabaseServiceRoleKey,
-        Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
-        "Content-Type": "application/json",
-        Prefer: "return=representation"
-      },
-      body: JSON.stringify(orderItemsPayload)
-    });
+    const createOrderItems = async (payload) => {
+      const response = await fetch(`${env.supabaseUrl}/rest/v1/order_items`, {
+        method: "POST",
+        headers: {
+          apikey: env.supabaseServiceRoleKey,
+          Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
+          "Content-Type": "application/json",
+          Prefer: "return=representation"
+        },
+        body: JSON.stringify(payload)
+      });
 
-    const itemsData = await itemsResponse.json().catch(() => []);
+      const data = await response.json().catch(() => []);
+      return { response, data };
+    };
+
+    let { response: itemsResponse, data: itemsData } = await createOrderItems(
+      orderItemsPayload
+    );
+
+    if (!itemsResponse.ok && isMissingDatabaseColumnError(itemsData)) {
+      console.warn(
+        "SNAPSHOT DE CUSTO DOS ITENS NÃO FOI SALVO: execute sql/financial-integrity-phase1.sql.",
+        itemsData
+      );
+
+      const legacyItemsPayload = orderItemsPayload.map((item) => ({
+        order_id: item.order_id,
+        product_id: item.product_id,
+        product_name: item.product_name,
+        sku: item.sku,
+        quantity: item.quantity,
+        unit_price: item.unit_price,
+        total_price: item.total_price,
+      }));
+
+      ({ response: itemsResponse, data: itemsData } = await createOrderItems(
+        legacyItemsPayload
+      ));
+    }
 
     if (!itemsResponse.ok) {
       return res.status(500).json({
@@ -3469,7 +3697,7 @@ if (requestedPaymentMethod === "boleto_transparent") {
   } catch (error) {
     console.error("ERRO AO CRIAR PEDIDO DA LOJA:", error);
 
-    return res.status(500).json({
+    return res.status(Number(error?.status) || 500).json({
       success: false,
       message: error.message || "Erro interno ao criar pedido"
     });
@@ -3540,6 +3768,7 @@ router.post("/payments/mercado-pago/webhook", async (req, res) => {
     const payment = await getMercadoPagoPayment(dataId);
     const externalReference = String(payment?.external_reference || "").trim();
     const paymentStatus = String(payment?.status || "").trim().toLowerCase();
+    const paymentFinancialData = getMercadoPagoFinancialData(payment);
 
     if (!externalReference) {
       return res.status(200).json({
@@ -3564,7 +3793,12 @@ router.post("/payments/mercado-pago/webhook", async (req, res) => {
     const updatePayload = {
       payment_reference: String(payment.id || ""),
       payment_raw_status: paymentStatus,
-      webhook_last_event: topic
+      webhook_last_event: topic,
+      gateway_fee: paymentFinancialData.gatewayFee,
+      payment_net_amount: paymentFinancialData.netAmount,
+      payment_method_id: paymentFinancialData.paymentMethodId || null,
+      payment_type_id: paymentFinancialData.paymentTypeId || null,
+      payment_installments: paymentFinancialData.installments,
     };
 
     if (paymentStatus === "approved") {
@@ -3586,10 +3820,29 @@ router.post("/payments/mercado-pago/webhook", async (req, res) => {
       updatePayload.shipping_label_status = "pending";
     }
 
-    const updateResponse = await updateOrderByExternalReference(
+    let updateResponse = await updateOrderByExternalReference(
       externalReference,
       updatePayload
     );
+
+    if (!updateResponse.ok && isMissingDatabaseColumnError(updateResponse.raw)) {
+      console.warn(
+        "DADOS FINANCEIROS DO MERCADO PAGO NÃO FORAM SALVOS: execute sql/financial-integrity-phase1.sql.",
+        updateResponse.raw
+      );
+
+      const legacyUpdatePayload = { ...updatePayload };
+      delete legacyUpdatePayload.gateway_fee;
+      delete legacyUpdatePayload.payment_net_amount;
+      delete legacyUpdatePayload.payment_method_id;
+      delete legacyUpdatePayload.payment_type_id;
+      delete legacyUpdatePayload.payment_installments;
+
+      updateResponse = await updateOrderByExternalReference(
+        externalReference,
+        legacyUpdatePayload
+      );
+    }
 
     if (!updateResponse.ok) {
       return res.status(500).json({
