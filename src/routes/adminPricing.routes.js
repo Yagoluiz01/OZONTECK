@@ -2,8 +2,10 @@ import express from "express";
 import { requireAdminAuth } from "../middlewares/auth.middleware.js";
 import { recordAuditLog } from "../services/audit.service.js";
 import {
+  applyProductGoalTargets,
   applySuggestedPriceToProduct,
   calculateProductPricing,
+  getProductGoalTargets,
   getPricingByProductId,
   getPricingHistoryByProductId,
   listPaymentFeeRules,
@@ -135,6 +137,15 @@ router.get("/product/:productId", async (req, res) => {
   }
 });
 
+router.get("/product/:productId/goal-targets", async (req, res) => {
+  try {
+    const targets = await getProductGoalTargets(req.params.productId);
+    return ok(res, { targets }, "Metas específicas do produto carregadas com sucesso.");
+  } catch (error) {
+    return fail(res, error, 400);
+  }
+});
+
 /**
  * Mantém compatibilidade com o frontend atual:
  * /api/admin/pricing/product/:productId/history
@@ -206,6 +217,55 @@ router.post("/save", async (req, res) => {
     }
 
     return ok(res, { record }, "Precificação salva com sucesso.");
+  } catch (error) {
+    return fail(res, error, 400);
+  }
+});
+
+router.post("/product/:productId/goal-targets/apply", async (req, res) => {
+  try {
+    const productId = req.params.productId;
+    const previousTargets = await getProductGoalTargets(productId).catch(() => []);
+    const result = await applyProductGoalTargets(productId, {
+      actorId: req.admin?.id || req.admin?.userId || null,
+    });
+
+    await recordAuditSafely({
+      req,
+      action: "product_goal_targets_applied",
+      module: "pricing",
+      entityType: "product",
+      entityId: productId,
+      description: `Metas seguras específicas do produto ${
+        result?.product?.name || productId
+      } foram aplicadas.`,
+      oldValues: {
+        targets: previousTargets.map((target) => ({
+          level_id: target.affiliate_level_id,
+          required_units: target.required_units,
+          is_active: target.is_active,
+        })),
+      },
+      newValues: {
+        targets: result.targets.map((target) => ({
+          level_id: target.affiliate_level_id,
+          required_units: target.required_units,
+          is_active: target.is_active,
+        })),
+      },
+      metadata: {
+        source: "admin_pricing_product_goal_targets",
+        product_name: result?.product?.name || null,
+        product_sku: result?.product?.sku || null,
+        pricing_id: result?.pricing_id || null,
+      },
+    });
+
+    return ok(
+      res,
+      result,
+      "Meta segura aplicada somente a este produto com sucesso."
+    );
   } catch (error) {
     return fail(res, error, 400);
   }

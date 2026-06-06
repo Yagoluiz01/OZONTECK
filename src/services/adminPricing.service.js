@@ -149,6 +149,142 @@ function getGoalBonusAnalysis(input = {}) {
   };
 }
 
+function calculateProductSpecificGoalPlan({
+  price,
+  baseCost,
+  gatewayFeePercent,
+  taxPercent,
+  affiliateCommissionPercent,
+  networkCommissionPercent,
+  protectedMarginPercent,
+  safetyReservePercent = 15,
+  levels = [],
+}) {
+  const referencePrice = roundMoney(price);
+  const reservePercent = Math.min(
+    Math.max(normalizePercent(safetyReservePercent), 0),
+    50
+  );
+
+  const gatewayValue = roundMoney(
+    referencePrice * (normalizePercent(gatewayFeePercent) / 100)
+  );
+  const taxValue = roundMoney(
+    referencePrice * (normalizePercent(taxPercent) / 100)
+  );
+  const directCommissionValue = roundMoney(
+    referencePrice * (normalizePercent(affiliateCommissionPercent) / 100)
+  );
+  const networkCommissionValue = roundMoney(
+    referencePrice * (normalizePercent(networkCommissionPercent) / 100)
+  );
+  const protectedMarginValue = roundMoney(
+    referencePrice * (normalizePercent(protectedMarginPercent) / 100)
+  );
+
+  const availableBeforeReserve = roundMoney(
+    referencePrice -
+      roundMoney(baseCost) -
+      gatewayValue -
+      taxValue -
+      directCommissionValue -
+      networkCommissionValue -
+      protectedMarginValue
+  );
+
+  const safetyReserveValue =
+    availableBeforeReserve > 0
+      ? roundMoney(availableBeforeReserve * (reservePercent / 100))
+      : 0;
+
+  const safeContributionPerSale =
+    availableBeforeReserve > 0
+      ? roundMoney(availableBeforeReserve - safetyReserveValue)
+      : 0;
+
+  const normalizedLevels = (Array.isArray(levels) ? levels : []).map(
+    (level, index) => {
+      const currentRequiredSales = Math.max(
+        1,
+        Math.trunc(getConfiguredNumber(level?.required_conversions, 1))
+      );
+      const accumulatedBonus = roundMoney(
+        Math.max(
+          getConfiguredNumber(
+            level?.accumulated_bonus_amount ??
+              level?.goal_bonus_amount ??
+              level?.bonus_amount,
+            0
+          ),
+          0
+        )
+      );
+
+      const minimumRequiredSales =
+        accumulatedBonus <= 0
+          ? currentRequiredSales
+          : safeContributionPerSale > 0
+            ? Math.max(1, Math.ceil(accumulatedBonus / safeContributionPerSale))
+            : null;
+
+      const recommendedRequiredSales =
+        minimumRequiredSales === null
+          ? null
+          : Math.max(currentRequiredSales, minimumRequiredSales);
+
+      const additionalSales =
+        recommendedRequiredSales === null
+          ? null
+          : Math.max(recommendedRequiredSales - currentRequiredSales, 0);
+
+      return {
+        id: level?.id || null,
+        name: level?.name || level?.level_name || `Meta ${index + 1}`,
+        level_order: getConfiguredNumber(level?.level_order, index + 1),
+        accumulated_bonus_amount: accumulatedBonus,
+        current_required_sales: currentRequiredSales,
+        minimum_required_sales: minimumRequiredSales,
+        recommended_required_sales: recommendedRequiredSales,
+        additional_sales: additionalSales,
+        safe_bonus_per_sale:
+          recommendedRequiredSales && recommendedRequiredSales > 0
+            ? roundMoney(accumulatedBonus / recommendedRequiredSales)
+            : 0,
+        status:
+          minimumRequiredSales === null
+            ? "unsupported"
+            : currentRequiredSales >= minimumRequiredSales
+              ? "already_safe"
+              : "increase_sales",
+      };
+    }
+  );
+
+  return {
+    mode: "product_specific_sales_target",
+    reference_price: referencePrice,
+    protected_margin_percent: roundMoney(protectedMarginPercent),
+    protected_margin_value: protectedMarginValue,
+    base_cost: roundMoney(baseCost),
+    gateway_value: gatewayValue,
+    tax_value: taxValue,
+    direct_commission_value: directCommissionValue,
+    network_commission_value: networkCommissionValue,
+    available_before_reserve: availableBeforeReserve,
+    safety_reserve_percent: roundMoney(reservePercent),
+    safety_reserve_value: safetyReserveValue,
+    safe_contribution_per_sale: safeContributionPerSale,
+    supported: referencePrice > 0 && safeContributionPerSale > 0,
+    message:
+      referencePrice <= 0
+        ? "Informe o preço atual do produto para calcular a meta segura específica."
+        : safeContributionPerSale <= 0
+          ? "O preço atual não deixa verba segura para financiar bônus sem mexer na margem protegida."
+          : "O preço foi mantido. A recomendação aumenta apenas a quantidade de vendas deste produto.",
+    levels: normalizedLevels,
+  };
+}
+
 function normalizePaymentMethod(value) {
   const method = String(value || "pix").trim();
 
@@ -505,6 +641,28 @@ function calculatePricing(input) {
     networkCommissionPercent,
   });
 
+  const currentProductPrice = roundMoney(
+    getConfiguredNumber(
+      input.current_product_price ?? input.product_price ?? input.currentPrice,
+      0
+    )
+  );
+
+  const productSpecificGoalPlan = calculateProductSpecificGoalPlan({
+    price: currentProductPrice > 0 ? currentProductPrice : suggestedPrice,
+    baseCost,
+    gatewayFeePercent,
+    taxPercent,
+    affiliateCommissionPercent,
+    networkCommissionPercent,
+    protectedMarginPercent: safeMarginPercent,
+    safetyReservePercent: getConfiguredNumber(
+      input.goal_safety_reserve_percent,
+      15
+    ),
+    levels: goalAnalysis.levels,
+  });
+
   const risk = buildRiskStatus({
     suggestedPrice,
     priceWithMaxCommission,
@@ -573,6 +731,7 @@ function calculatePricing(input) {
       levels: goalAnalysis.levels,
       worst_bonus_per_sale: roundMoney(goalBonusPerSale),
       worst_goal_level_name: goalAnalysis.worstGoalLevelName,
+      product_specific_plan: productSpecificGoalPlan,
     },
 
     status: risk.status,
@@ -587,6 +746,57 @@ async function getProductById(productId) {
   );
 
   return rows?.[0] || null;
+}
+
+async function listActiveAffiliateLevelsForProductGoals() {
+  const rows = await supabaseFetch(
+    "affiliate_levels?select=*&is_active=eq.true&order=level_order.asc",
+    { method: "GET" }
+  );
+
+  let accumulatedBonus = 0;
+
+  return (Array.isArray(rows) ? rows : [])
+    .filter((level) => Number(level?.required_conversions || 0) > 0)
+    .map((level, index) => {
+      const bonusType = String(level?.bonus_type || "fixed").toLowerCase();
+
+      if (bonusType !== "manual") {
+        accumulatedBonus = roundMoney(
+          accumulatedBonus + Math.max(toNumber(level?.bonus_amount, 0), 0)
+        );
+      }
+
+      const requiredConversions = Math.max(
+        1,
+        Math.trunc(toNumber(level?.required_conversions, 1))
+      );
+
+      return {
+        ...level,
+        level_order: toNumber(level?.level_order, index + 1),
+        required_conversions: requiredConversions,
+        accumulated_bonus_amount: accumulatedBonus,
+        bonus_per_sale: roundMoney(accumulatedBonus / requiredConversions),
+      };
+    });
+}
+
+function normalizeProductGoalTargetRow(row = {}, level = null) {
+  return {
+    ...row,
+    required_units: Math.max(1, Math.trunc(toNumber(row.required_units, 1))),
+    global_required_conversions_snapshot: Math.max(
+      1,
+      Math.trunc(toNumber(row.global_required_conversions_snapshot, 1))
+    ),
+    accumulated_bonus_amount: roundMoney(row.accumulated_bonus_amount),
+    safe_contribution_per_unit: roundMoney(row.safe_contribution_per_unit),
+    reference_price: roundMoney(row.reference_price),
+    protected_margin_percent: roundMoney(row.protected_margin_percent),
+    safety_reserve_percent: roundMoney(row.safety_reserve_percent),
+    level,
+  };
 }
 
 async function createPricingHistory({
@@ -880,6 +1090,175 @@ export async function saveProductPricing(payload) {
   return saved;
 }
 
+export async function getProductGoalTargets(productId) {
+  const normalizedProductId = String(productId || "").trim();
+
+  if (!normalizedProductId) {
+    throw new Error("productId é obrigatório.");
+  }
+
+  const [rows, levels] = await Promise.all([
+    supabaseFetch(
+      `affiliate_product_goal_targets?select=*&product_id=eq.${encodeURIComponent(
+        normalizedProductId
+      )}&is_active=eq.true`,
+      { method: "GET" }
+    ),
+    supabaseFetch(
+      "affiliate_levels?select=id,name,level_order,required_conversions,bonus_amount,bonus_type,is_active",
+      { method: "GET" }
+    ),
+  ]);
+
+  const levelMap = new Map(
+    (Array.isArray(levels) ? levels : []).map((level) => [String(level.id), level])
+  );
+
+  return (Array.isArray(rows) ? rows : [])
+    .map((row) =>
+      normalizeProductGoalTargetRow(
+        row,
+        levelMap.get(String(row.affiliate_level_id || "")) || null
+      )
+    )
+    .sort((a, b) => {
+      const orderA = toNumber(a?.level?.level_order, 9999);
+      const orderB = toNumber(b?.level?.level_order, 9999);
+      return orderA - orderB;
+    });
+}
+
+export async function applyProductGoalTargets(productId, { actorId = null } = {}) {
+  const normalizedProductId = String(productId || "").trim();
+
+  if (!normalizedProductId) {
+    throw new Error("productId é obrigatório.");
+  }
+
+  const [pricing, product, activeLevels] = await Promise.all([
+    getPricingByProductId(normalizedProductId),
+    getProductById(normalizedProductId),
+    listActiveAffiliateLevelsForProductGoals(),
+  ]);
+
+  if (!product?.id) {
+    throw new Error("Produto não encontrado.");
+  }
+
+  if (!pricing?.id) {
+    throw new Error(
+      "Salve a precificação deste produto antes de aplicar a meta segura específica."
+    );
+  }
+
+  if (!activeLevels.length) {
+    throw new Error("Nenhuma meta ativa foi encontrada para aplicar neste produto.");
+  }
+
+  const calculated = await calculateProductPricing({
+    ...pricing,
+    product_id: normalizedProductId,
+    current_product_price: product.price || pricing.suggested_price || 0,
+    affiliate_goal_levels: activeLevels,
+    goal_levels: activeLevels,
+  });
+
+  const plan = calculated?.goal_analysis?.product_specific_plan || null;
+  const planLevels = Array.isArray(plan?.levels) ? plan.levels : [];
+
+  if (!plan?.supported || Number(plan?.safe_contribution_per_sale || 0) <= 0) {
+    throw new Error(
+      plan?.message ||
+        "O produto não possui contribuição segura suficiente para aplicar uma meta específica."
+    );
+  }
+
+  const now = new Date().toISOString();
+  const rowsToUpsert = planLevels
+    .filter((level) => level?.id && Number(level?.recommended_required_sales || 0) > 0)
+    .map((level) => ({
+      product_id: normalizedProductId,
+      affiliate_level_id: level.id,
+      required_units: Math.max(
+        1,
+        Math.trunc(Number(level.recommended_required_sales || 1))
+      ),
+      global_required_conversions_snapshot: Math.max(
+        1,
+        Math.trunc(Number(level.current_required_sales || 1))
+      ),
+      accumulated_bonus_amount: roundMoney(level.accumulated_bonus_amount),
+      safe_contribution_per_unit: roundMoney(plan.safe_contribution_per_sale),
+      reference_price: roundMoney(plan.reference_price),
+      protected_margin_percent: roundMoney(plan.protected_margin_percent),
+      safety_reserve_percent: roundMoney(plan.safety_reserve_percent),
+      calculation_snapshot: {
+        source: "pricing_product_specific_goal",
+        product_name: product.name || null,
+        product_sku: product.sku || null,
+        level_name: level.name || null,
+        level_order: level.level_order || null,
+        minimum_required_sales: level.minimum_required_sales || null,
+        additional_sales: level.additional_sales || 0,
+        safe_bonus_per_sale: roundMoney(level.safe_bonus_per_sale),
+        plan_status: level.status || null,
+      },
+      is_active: true,
+      created_by: actorId ? String(actorId) : null,
+      applied_at: now,
+      updated_at: now,
+    }));
+
+  if (!rowsToUpsert.length) {
+    throw new Error("Nenhuma meta segura válida foi gerada para este produto.");
+  }
+
+  await supabaseFetch(
+    "affiliate_product_goal_targets?on_conflict=product_id,affiliate_level_id",
+    {
+      method: "POST",
+      headers: {
+        Prefer: "resolution=merge-duplicates,return=representation",
+      },
+      body: JSON.stringify(rowsToUpsert),
+    }
+  );
+
+  const activeLevelIds = new Set(rowsToUpsert.map((row) => row.affiliate_level_id));
+  const existingRows = await supabaseFetch(
+    `affiliate_product_goal_targets?select=id,affiliate_level_id,is_active&product_id=eq.${encodeURIComponent(
+      normalizedProductId
+    )}`,
+    { method: "GET" }
+  );
+
+  const staleRows = (Array.isArray(existingRows) ? existingRows : []).filter(
+    (row) => row?.is_active !== false && !activeLevelIds.has(row?.affiliate_level_id)
+  );
+
+  for (const row of staleRows) {
+    await supabaseFetch(`affiliate_product_goal_targets?id=eq.${row.id}`, {
+      method: "PATCH",
+      headers: {
+        Prefer: "return=minimal",
+      },
+      body: JSON.stringify({
+        is_active: false,
+        updated_at: now,
+      }),
+    });
+  }
+
+  const targets = await getProductGoalTargets(normalizedProductId);
+
+  return {
+    product,
+    pricing_id: pricing.id,
+    plan,
+    targets,
+  };
+}
+
 export async function applySuggestedPriceToProduct(productId) {
   if (!productId) {
     throw new Error("productId é obrigatório.");
@@ -959,6 +1338,8 @@ export default {
   getPricingHistoryByProductId,
   calculateProductPricing,
   saveProductPricing,
+  getProductGoalTargets,
+  applyProductGoalTargets,
   applySuggestedPriceToProduct,
   listProductsForPricing,
 };
