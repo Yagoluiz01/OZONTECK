@@ -32,6 +32,16 @@ import {
 
 const router = express.Router();
 
+const HOME_PRODUCTS_SERVER_CACHE_TTL_MS = 60 * 1000;
+const HOME_PRODUCTS_SERVER_CACHE_STALE_MS = 15 * 60 * 1000;
+const HOME_PRODUCTS_SERVER_CACHE_LIMIT = 24;
+
+let homeProductsServerCache = {
+  createdAt: 0,
+  products: [],
+};
+let homeProductsLoadPromise = null;
+
 function getMarketingPixelSupabaseHeaders() {
   return {
     apikey: env.supabaseServiceRoleKey,
@@ -1859,6 +1869,89 @@ async function fetchProductsTable() {
   };
 }
 
+function buildHomeProductsSnapshot(rows = []) {
+  return rankHomeProducts(
+    filterKitChildrenForStorefront(
+      rows
+        .map(normalizeProduct)
+        .filter((product) => {
+          const isActive = String(product.status || "").toLowerCase() === "active";
+          const hasStock = Number(product.stockQuantity || 0) > 0;
+          return product.id && product.name && isActive && hasStock;
+        })
+    ).filter((product) => product.showOnHome || product.show_on_home || product.showHome)
+  ).slice(0, HOME_PRODUCTS_SERVER_CACHE_LIMIT);
+}
+
+async function getHomeProductsSnapshot() {
+  const now = Date.now();
+  const cacheAge = now - Number(homeProductsServerCache.createdAt || 0);
+
+  if (
+    homeProductsServerCache.createdAt &&
+    cacheAge <= HOME_PRODUCTS_SERVER_CACHE_TTL_MS
+  ) {
+    return {
+      products: homeProductsServerCache.products,
+      source: "memory",
+    };
+  }
+
+  if (!homeProductsLoadPromise) {
+    homeProductsLoadPromise = (async () => {
+      const response = await fetchProductsTable();
+
+      if (!response.ok) {
+        const error = new Error("Erro ao buscar produtos da página inicial");
+        error.status = response.status;
+        error.details = response.raw;
+        throw error;
+      }
+
+      const products = buildHomeProductsSnapshot(response.data);
+
+      homeProductsServerCache = {
+        createdAt: Date.now(),
+        products,
+      };
+
+      return {
+        products,
+        source: "origin",
+      };
+    })();
+  }
+
+  const activeLoadPromise = homeProductsLoadPromise;
+
+  try {
+    return await activeLoadPromise;
+  } catch (error) {
+    const staleAge = Date.now() - Number(homeProductsServerCache.createdAt || 0);
+
+    if (
+      homeProductsServerCache.createdAt &&
+      staleAge <= HOME_PRODUCTS_SERVER_CACHE_STALE_MS
+    ) {
+      console.warn("PRODUTOS DA HOME: usando cache temporariamente após falha na origem.", {
+        error: error?.message || String(error),
+        staleAge,
+      });
+
+      return {
+        products: homeProductsServerCache.products,
+        source: "stale",
+      };
+    }
+
+    throw error;
+  } finally {
+    if (homeProductsLoadPromise === activeLoadPromise) {
+      homeProductsLoadPromise = null;
+    }
+  }
+}
+
 function buildProductSearchMap(products) {
   const map = new Map();
 
@@ -2790,31 +2883,12 @@ router.get("/affiliate-storefront/:slug", async (req, res) => {
 
 router.get("/products/home", async (req, res) => {
   try {
-    const response = await fetchProductsTable();
-
-    if (!response.ok) {
-      return res.status(500).json({
-        success: false,
-        message: "Erro ao buscar produtos da página inicial",
-        details: response.raw
-      });
-    }
-
     const limit = Math.max(1, Math.min(24, Number(req.query.limit || 8) || 8));
+    const snapshot = await getHomeProductsSnapshot();
+    const products = snapshot.products.slice(0, limit);
 
-    const products = rankHomeProducts(
-      filterKitChildrenForStorefront(
-        response.data
-          .map(normalizeProduct)
-          .filter((product) => {
-            const isActive = String(product.status || "").toLowerCase() === "active";
-            const hasStock = Number(product.stockQuantity || 0) > 0;
-            return product.id && product.name && isActive && hasStock;
-          })
-      ).filter((product) => product.showOnHome || product.show_on_home || product.showHome)
-    ).slice(0, limit);
-
-    res.set("Cache-Control", "no-store");
+    res.set("Cache-Control", "public, max-age=30, stale-while-revalidate=300");
+    res.set("X-Ozonteck-Home-Cache", snapshot.source);
 
     return res.status(200).json({
       success: true,

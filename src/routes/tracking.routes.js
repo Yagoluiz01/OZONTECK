@@ -334,6 +334,19 @@ async function ensureSessionExists({
     .single();
 
   if (error) {
+    // Dois eventos podem chegar juntos na primeira abertura da página.
+    // Nesse caso uma requisição cria a sessão e a outra pode receber conflito.
+    // Reconsultar evita transformar essa condição normal em erro 500.
+    const sessionAfterInsert = await findSession(sessionId);
+
+    if (!sessionAfterInsert.error && sessionAfterInsert.data?.id) {
+      return {
+        ok: true,
+        session: sessionAfterInsert.data,
+        recoveredFromConcurrentInsert: true,
+      };
+    }
+
     console.error("TRACKING ENSURE SESSION INSERT ERROR:", error);
     return {
       ok: false,
