@@ -158,3 +158,24 @@ export async function insertAuditLog(payload) {
   if (error) throw error;
   return data;
 }
+
+export async function findAuditLogById(id) {
+  const { data, error } = await supabaseAdmin
+    .from(TABLE_NAME)
+    .select("id")
+    .eq("id", String(id || "").trim())
+    .maybeSingle();
+
+  if (error) throw error;
+  return data || null;
+}
+
+export async function deleteAuditLogById(id) {
+  const { error } = await supabaseAdmin
+    .from(TABLE_NAME)
+    .delete()
+    .eq("id", String(id || "").trim());
+
+  if (error) throw error;
+  return true;
+}

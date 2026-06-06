@@ -5,7 +5,10 @@ import {
   isMasterAdmin,
   requireMasterAdmin,
 } from "../middlewares/masterAdmin.middleware.js";
-import { getAuditDashboard } from "../services/audit.service.js";
+import {
+  deleteAuditLog,
+  getAuditDashboard,
+} from "../services/audit.service.js";
 
 const router = express.Router();
 
@@ -33,6 +36,20 @@ router.get("/logs", requireAdminAuth, requireMasterAdmin, async (req, res, next)
     return res.status(200).json({
       success: true,
       ...data,
+    });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+router.delete("/logs/:id", requireAdminAuth, requireMasterAdmin, async (req, res, next) => {
+  try {
+    const deleted = await deleteAuditLog({ id: req.params.id });
+
+    return res.status(200).json({
+      success: true,
+      message: "Registro excluído com sucesso.",
+      deleted,
     });
   } catch (error) {
     return next(error);

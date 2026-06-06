@@ -47,7 +47,7 @@ alter table public.admin_audit_logs enable row level security;
 revoke all on table public.admin_audit_logs from anon;
 revoke all on table public.admin_audit_logs from authenticated;
 
-grant select, insert on table public.admin_audit_logs to service_role;
+grant select, insert, delete on table public.admin_audit_logs to service_role;
 
 comment on table public.admin_audit_logs is
-  'Registro imutável das ações administrativas críticas da OZONTECK.';
+  'Registro das ações administrativas críticas da OZONTECK, com exclusão controlada pelo administrador master.';

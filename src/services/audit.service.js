@@ -1,6 +1,8 @@
 import { isIP } from "node:net";
 
 import {
+  deleteAuditLogById,
+  findAuditLogById,
   getAuditFilterOptions,
   getAuditSummary,
   insertAuditLog,
@@ -71,6 +73,37 @@ export async function getAuditDashboard(filters = {}) {
   } catch (error) {
     if (isAuditTableMissing(error)) {
       return buildEmptyResult(filters);
+    }
+
+    throw error;
+  }
+}
+
+export async function deleteAuditLog({ id } = {}) {
+  const normalizedId = String(id || "").trim();
+
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(normalizedId)) {
+    const error = new Error("Registro de auditoria inválido.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  try {
+    const existing = await findAuditLogById(normalizedId);
+
+    if (!existing) {
+      const error = new Error("Registro de auditoria não encontrado.");
+      error.statusCode = 404;
+      throw error;
+    }
+
+    await deleteAuditLogById(normalizedId);
+    return { id: normalizedId };
+  } catch (error) {
+    if (isAuditTableMissing(error)) {
+      const setupError = new Error("A tabela de auditoria ainda não foi instalada.");
+      setupError.statusCode = 409;
+      throw setupError;
     }
 
     throw error;
