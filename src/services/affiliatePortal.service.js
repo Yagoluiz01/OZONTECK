@@ -1090,7 +1090,135 @@ function isProductPublic(product = {}) {
   return ["active", "ativo", "published", "publicado", "available", "disponivel"].includes(status);
 }
 
-function normalizeAffiliateProduct(row = {}, affiliate = {}) {
+async function getOrderItemsByOrderIds(orderIds = []) {
+  const ids = Array.from(
+    new Set(
+      (orderIds || [])
+        .map((id) => String(id || "").trim())
+        .filter(Boolean)
+    )
+  );
+
+  if (!ids.length) {
+    return [];
+  }
+
+  const chunkSize = 80;
+  const items = [];
+
+  for (let index = 0; index < ids.length; index += chunkSize) {
+    const chunk = ids.slice(index, index + chunkSize);
+    const rows = await supabaseRequest(
+      `/order_items?order_id=in.(${chunk.join(",")})&select=order_id,product_id,quantity`
+    );
+
+    if (Array.isArray(rows)) {
+      items.push(...rows);
+    }
+  }
+
+  return items;
+}
+
+function getOrderGoalDate(order = {}) {
+  return order.created_at || order.delivered_at || null;
+}
+
+function getConfirmedProductUnits({ target, productId, orderItems = [], orderMap = new Map() }) {
+  if (!target || !productId) return 0;
+
+  const appliedAt = target.applied_at ? new Date(target.applied_at).getTime() : 0;
+
+  return orderItems.reduce((total, item) => {
+    if (String(item?.product_id || "") !== String(productId)) {
+      return total;
+    }
+
+    const order = orderMap.get(String(item?.order_id || ""));
+
+    if (!order || !isOrderDelivered(order) || isOrderCancelled(order)) {
+      return total;
+    }
+
+    const goalDate = getOrderGoalDate(order);
+    const goalTimestamp = goalDate ? new Date(goalDate).getTime() : 0;
+
+    if (appliedAt && (!goalTimestamp || goalTimestamp < appliedAt)) {
+      return total;
+    }
+
+    const quantity = Math.max(0, Math.trunc(Number(item?.quantity || 0)));
+    return total + quantity;
+  }, 0);
+}
+
+async function getAffiliateProductGoalContext(affiliateId) {
+  const [goalRows, activeLevels, conversions, directOrders] = await Promise.all([
+    supabaseRequest(
+      `/affiliate_goal_overview?affiliate_id=eq.${encodeURIComponent(affiliateId)}&select=*&limit=1`
+    ),
+    supabaseRequest(
+      `/affiliate_levels?is_active=eq.true&select=id,level_order,name,required_conversions,bonus_amount,bonus_type&order=level_order.asc`
+    ),
+    supabaseRequest(
+      `/affiliate_conversions?affiliate_id=eq.${encodeURIComponent(affiliateId)}&conversion_type=eq.sale_commission&select=order_id,status&order=created_at.desc&limit=500`
+    ),
+    getAffiliateOrdersTableRows(affiliateId, { limit: 500 }),
+  ]);
+
+  const goal = Array.isArray(goalRows) ? goalRows[0] || null : null;
+  const levels = Array.isArray(activeLevels) ? activeLevels : [];
+  const currentLevelOrder = Math.max(1, Number(goal?.current_level_order || 1));
+  const currentLevel =
+    levels.find((level) => Number(level?.level_order || 0) === currentLevelOrder) ||
+    levels.find(
+      (level) =>
+        normalizeStatus(level?.name) === normalizeStatus(goal?.current_level_name)
+    ) ||
+    levels[0] ||
+    null;
+
+  if (!currentLevel?.id) {
+    return {
+      currentLevel: null,
+      targetsByProduct: new Map(),
+      orderItems: [],
+      orderMap: new Map(),
+    };
+  }
+
+  const targets = await supabaseRequest(
+    `/affiliate_product_goal_targets?affiliate_level_id=eq.${encodeURIComponent(
+      currentLevel.id
+    )}&is_active=eq.true&select=id,product_id,affiliate_level_id,required_units,global_required_conversions_snapshot,accumulated_bonus_amount,safe_contribution_per_unit,reference_price,protected_margin_percent,safety_reserve_percent,applied_at,updated_at`
+  );
+
+  const conversionOrderIds = (Array.isArray(conversions) ? conversions : [])
+    .filter((conversion) => !isCancelledLikeStatus(conversion?.status))
+    .map((conversion) => conversion?.order_id);
+
+  const directOrderRows = Array.isArray(directOrders) ? directOrders : [];
+  const extraOrders = await getOrdersByIds(conversionOrderIds);
+  const orderMap = buildOrderMap([...directOrderRows, ...extraOrders]);
+  const deliveredOrderIds = Array.from(orderMap.values())
+    .filter((order) => isOrderDelivered(order) && !isOrderCancelled(order))
+    .map((order) => order.id);
+  const orderItems = await getOrderItemsByOrderIds(deliveredOrderIds);
+
+  return {
+    currentLevel,
+    targetsByProduct: new Map(
+      (Array.isArray(targets) ? targets : []).map((target) => [
+        String(target?.product_id || ""),
+        target,
+      ])
+    ),
+    orderItems,
+    orderMap,
+  };
+}
+
+function normalizeAffiliateProduct(row = {}, affiliate = {}, goalContext = {}) {
   const product = row.products || {};
   const productId = String(row.product_id || product.id || "").trim();
   const price = getProductPrice(product);
@@ -1101,6 +1229,22 @@ function normalizeAffiliateProduct(row = {}, affiliate = {}) {
   const estimatedCommission = roundMoney(price * (commissionPercent / 100));
   const safeStatus = normalizeStatus(row.status || "pending");
   const isSafePricing = ["healthy", "saudavel"].includes(safeStatus);
+  const target = goalContext?.targetsByProduct?.get(String(productId)) || null;
+  const confirmedUnits = target
+    ? getConfirmedProductUnits({
+        target,
+        productId,
+        orderItems: goalContext.orderItems || [],
+        orderMap: goalContext.orderMap || new Map(),
+      })
+    : 0;
+  const requiredUnits = target
+    ? Math.max(1, Math.trunc(Number(target.required_units || 1)))
+    : 0;
+  const remainingUnits = target ? Math.max(requiredUnits - confirmedUnits, 0) : 0;
+  const progressPercent = target
+    ? Math.min(Math.max((confirmedUnits / requiredUnits) * 100, 0), 100)
+    : 0;
 
   return {
     id: productId,
@@ -1123,11 +1267,32 @@ function normalizeAffiliateProduct(row = {}, affiliate = {}) {
     risk_message: row.risk_message || null,
     can_promote: isSafePricing && price > 0 && commissionPercent > 0,
     affiliate_link: buildProductAffiliateLink(affiliate.ref_code, productId),
+    product_goal: target
+      ? {
+          is_product_specific: true,
+          level_id: goalContext?.currentLevel?.id || target.affiliate_level_id || null,
+          level_order: Number(goalContext?.currentLevel?.level_order || 0),
+          level_name: goalContext?.currentLevel?.name || "Nível atual",
+          required_units: requiredUnits,
+          confirmed_units: confirmedUnits,
+          remaining_units: remainingUnits,
+          progress_percent: Number(progressPercent.toFixed(2)),
+          bonus_amount: roundMoney(target.accumulated_bonus_amount),
+          safe_contribution_per_unit: roundMoney(target.safe_contribution_per_unit),
+          reference_price: roundMoney(target.reference_price),
+          protected_margin_percent: roundMoney(target.protected_margin_percent),
+          safety_reserve_percent: roundMoney(target.safety_reserve_percent),
+          applied_at: target.applied_at || null,
+          updated_at: target.updated_at || null,
+          counts_only_delivered_units: true,
+        }
+      : null,
   };
 }
 
 export async function getAffiliatePromotionalProducts(affiliateId) {
   const affiliate = await getAffiliateById(affiliateId);
+  const goalContext = await getAffiliateProductGoalContext(affiliateId);
 
   const rows = await supabaseRequest(
     `/product_pricing?select=id,product_id,affiliate_commission_percent,special_affiliate_commission_percent,status,risk_message,updated_at,products(id,name,sku,price,category,status,image_url,image_url_2,short_description)&order=updated_at.desc&limit=200`
@@ -1137,7 +1302,7 @@ export async function getAffiliatePromotionalProducts(affiliateId) {
 
   const products = safeRows
     .filter((row) => row?.products && isProductPublic(row.products))
-    .map((row) => normalizeAffiliateProduct(row, affiliate))
+    .map((row) => normalizeAffiliateProduct(row, affiliate, goalContext))
     .filter((product) => product.product_id && product.price > 0)
     .sort((a, b) => {
       if (a.can_promote !== b.can_promote) {
