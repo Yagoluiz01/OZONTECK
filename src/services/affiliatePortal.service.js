@@ -357,6 +357,10 @@ function isRecruitmentCommission(conversion = {}) {
   ].includes(type);
 }
 
+function isProductGoalBonusConversion(conversion = {}) {
+  return normalizeStatus(conversion?.conversion_type) === "product_goal_bonus";
+}
+
 function getConversionCommissionAmount(conversion = {}) {
   return normalizeMoney(
     conversion.commission_amount ??
@@ -773,6 +777,22 @@ export async function getAffiliateSummary(affiliateId) {
         return acc;
       }
 
+      if (isProductGoalBonusConversion(conversion)) {
+        if (isCancelledLikeStatus(conversion.status)) {
+          return acc;
+        }
+
+        if (isReleasedLikeStatus(conversion.status)) {
+          acc.released_commission += commission;
+        } else if (isPaidConversionStatus(conversion.status)) {
+          acc.paid_commission_by_conversion += commission;
+        } else {
+          acc.approved_commission += commission;
+        }
+
+        return acc;
+      }
+
       if (!isSaleCommission(conversion)) {
         return acc;
       }
@@ -1182,6 +1202,7 @@ async function getAffiliateProductGoalContext(affiliateId) {
     return {
       currentLevel: null,
       targetsByProduct: new Map(),
+      completionsByTarget: new Map(),
       orderItems: [],
       orderMap: new Map(),
     };
@@ -1192,6 +1213,25 @@ async function getAffiliateProductGoalContext(affiliateId) {
       currentLevel.id
     )}&is_active=eq.true&select=id,product_id,affiliate_level_id,required_units,global_required_conversions_snapshot,accumulated_bonus_amount,safe_contribution_per_unit,reference_price,protected_margin_percent,safety_reserve_percent,applied_at,updated_at`
   );
+
+  const safeTargets = Array.isArray(targets) ? targets : [];
+  const targetIds = safeTargets
+    .map((target) => String(target?.id || "").trim())
+    .filter(Boolean);
+
+  const completions = targetIds.length
+    ? await supabaseRequest(
+        `/affiliate_product_goal_completions?affiliate_id=eq.${encodeURIComponent(
+          affiliateId
+        )}&target_id=in.(${targetIds.join(",")})&select=id,target_id,product_id,affiliate_level_id,required_units,confirmed_units,bonus_amount,completion_order_id,conversion_id,status,completed_at,released_at,cancelled_at,review_required_at,updated_at`
+      ).catch((error) => {
+        console.warn("AFFILIATE PRODUCT GOAL COMPLETIONS LOAD ERROR:", {
+          affiliateId,
+          message: error?.message || String(error),
+        });
+        return [];
+      })
+    : [];
 
   const conversionOrderIds = (Array.isArray(conversions) ? conversions : [])
     .filter((conversion) => !isCancelledLikeStatus(conversion?.status))
@@ -1208,9 +1248,15 @@ async function getAffiliateProductGoalContext(affiliateId) {
   return {
     currentLevel,
     targetsByProduct: new Map(
-      (Array.isArray(targets) ? targets : []).map((target) => [
+      safeTargets.map((target) => [
         String(target?.product_id || ""),
         target,
+      ])
+    ),
+    completionsByTarget: new Map(
+      (Array.isArray(completions) ? completions : []).map((completion) => [
+        String(completion?.target_id || ""),
+        completion,
       ])
     ),
     orderItems,
@@ -1230,6 +1276,9 @@ function normalizeAffiliateProduct(row = {}, affiliate = {}, goalContext = {}) {
   const safeStatus = normalizeStatus(row.status || "pending");
   const isSafePricing = ["healthy", "saudavel"].includes(safeStatus);
   const target = goalContext?.targetsByProduct?.get(String(productId)) || null;
+  const completion = target
+    ? goalContext?.completionsByTarget?.get(String(target.id || "")) || null
+    : null;
   const confirmedUnits = target
     ? getConfirmedProductUnits({
         target,
@@ -1277,7 +1326,19 @@ function normalizeAffiliateProduct(row = {}, affiliate = {}, goalContext = {}) {
           confirmed_units: confirmedUnits,
           remaining_units: remainingUnits,
           progress_percent: Number(progressPercent.toFixed(2)),
-          bonus_amount: roundMoney(target.accumulated_bonus_amount),
+          bonus_amount: roundMoney(
+            goalContext?.currentLevel?.bonus_amount ?? target.accumulated_bonus_amount
+          ),
+          accumulated_bonus_amount: roundMoney(target.accumulated_bonus_amount),
+          completion_id: completion?.id || null,
+          completion_status: completion?.status || "in_progress",
+          bonus_released: ["released", "paid"].includes(
+            normalizeStatus(completion?.status)
+          ),
+          bonus_conversion_id: completion?.conversion_id || null,
+          completed_at: completion?.completed_at || null,
+          released_at: completion?.released_at || null,
+          review_required: normalizeStatus(completion?.status) === "review_required",
           safe_contribution_per_unit: roundMoney(target.safe_contribution_per_unit),
           reference_price: roundMoney(target.reference_price),
           protected_margin_percent: roundMoney(target.protected_margin_percent),

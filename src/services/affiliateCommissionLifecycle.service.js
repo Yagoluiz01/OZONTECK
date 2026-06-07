@@ -1,5 +1,6 @@
 import { env } from "../config/env.js";
 import { createAdminNotification } from "./adminNotifications.service.js";
+import { syncAffiliateProductGoalLifecycleForOrder } from "./affiliateProductGoalLifecycle.service.js";
 
 function getHeaders() {
   return {
@@ -413,6 +414,28 @@ export async function syncAffiliateCommissionLifecycleForOrder(order, source = "
     };
   }
 
+  let productGoalLifecycle = null;
+
+  try {
+    productGoalLifecycle = await syncAffiliateProductGoalLifecycleForOrder(order, source);
+  } catch (error) {
+    console.error("AFFILIATE PRODUCT GOAL LIFECYCLE ERROR:", {
+      orderId: order.id,
+      orderNumber: order.order_number || null,
+      affiliateId: order.affiliate_id || null,
+      source,
+      message: error?.message || String(error),
+      details: error?.details || null,
+    });
+
+    productGoalLifecycle = {
+      success: false,
+      skipped: false,
+      reason: "product_goal_lifecycle_error",
+      error: error?.message || String(error),
+    };
+  }
+
   const conversions = await fetchAffiliateConversionsByOrderId(order.id);
 
   if (!conversions.length) {
@@ -422,6 +445,7 @@ export async function syncAffiliateCommissionLifecycleForOrder(order, source = "
       reason: "no_affiliate_conversions_for_order",
       orderId: order.id,
       action: shouldCancel ? "cancel" : "release_after_delivery",
+      productGoalLifecycle,
     };
   }
 
@@ -458,5 +482,6 @@ export async function syncAffiliateCommissionLifecycleForOrder(order, source = "
     checked: conversions.length,
     updated,
     results,
+    productGoalLifecycle,
   };
 }

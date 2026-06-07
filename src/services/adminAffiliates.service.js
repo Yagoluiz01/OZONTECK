@@ -279,6 +279,10 @@ function isRecruitmentAffiliateConversion(conversion = {}) {
   ].includes(type);
 }
 
+function isProductGoalBonusAffiliateConversion(conversion = {}) {
+  return normalizeCommissionLifecycleStatus(conversion?.conversion_type) === "product_goal_bonus";
+}
+
 function getAffiliateConversionCommissionAmount(conversion = {}) {
   return toMoneyNumber(
     conversion.commission_amount ??
@@ -473,6 +477,20 @@ async function buildSafeAffiliateSummaries(affiliateIds = []) {
       summary.approved_commission += commission;
 
       if (lifecycle === "delivered") {
+        summary.released_commission += commission;
+      }
+
+      return;
+    }
+
+    if (isProductGoalBonusAffiliateConversion(conversion)) {
+      if (isCommissionCancelledLikeStatus(conversion.status)) return;
+
+      summary.approved_commission += commission;
+
+      if (isCommissionPaidLikeStatus(conversion.status)) {
+        summary.paid_commission_by_conversion += commission;
+      } else if (isCommissionReleasedLikeStatus(conversion.status)) {
         summary.released_commission += commission;
       }
 
