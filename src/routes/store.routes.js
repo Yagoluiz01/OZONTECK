@@ -3023,7 +3023,8 @@ async function saveGeneratedLabel(orderId, labelData = {}) {
     shipping_label_status: labelStatus,
     shipping_label_error: labelError,
     shipping_label_raw: labelData?.raw || null,
-    shipping_label_processing_started_at: null
+    shipping_label_processing_started_at: null,
+    processed_at: new Date().toISOString()
   };
 
   if (labelUrl) patch.shipping_label_url = labelUrl;
@@ -4084,7 +4085,8 @@ try {
         if (labelClaim?.claimed) {
           const generatedLabel = await generateAutomaticShippingLabel(
             updatedOrder,
-            orderItems
+            orderItems,
+            { claimAlreadyAcquired: true }
           );
 
           const savedLabel = await saveGeneratedLabel(

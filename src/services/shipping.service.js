@@ -1488,8 +1488,9 @@ function buildShippingAlreadyInProgressResult(order = {}) {
   };
 }
 
-export async function generateAutomaticShippingLabel(order, items = []) {
+export async function generateAutomaticShippingLabel(order, items = [], options = {}) {
   try {
+    const claimAlreadyAcquired = Boolean(options?.claimAlreadyAcquired);
     if (!order?.id) {
       return buildFailureResult(order, "Pedido inválido para criar carrinho", {
         labelStatus: "invalid_order"
@@ -1529,34 +1530,47 @@ export async function generateAutomaticShippingLabel(order, items = []) {
       );
     }
 
-    const claimedOrder = await claimMelhorEnvioCartCreation(order);
-    if (!claimedOrder?.id) {
-      const latestAfterClaim = await fetchOrderShippingSnapshot(order.id);
-      const shipmentIdAfterClaim = extractSavedShipmentId(latestAfterClaim);
+    let claimedOrder = order;
 
-      if (shipmentIdAfterClaim) {
-        return buildExistingCartResult(
-          {
-            ...order,
-            ...latestAfterClaim
-          },
-          "existing_database_record_after_claim"
+    if (!claimAlreadyAcquired) {
+      claimedOrder = await claimMelhorEnvioCartCreation(order);
+
+      if (!claimedOrder?.id) {
+        const latestAfterClaim = await fetchOrderShippingSnapshot(order.id);
+        const shipmentIdAfterClaim = extractSavedShipmentId(latestAfterClaim);
+
+        if (shipmentIdAfterClaim) {
+          return buildExistingCartResult(
+            {
+              ...order,
+              ...latestAfterClaim
+            },
+            "existing_database_record_after_claim"
+          );
+        }
+
+        console.warn(
+          "MELHOR ENVIO CART SKIP IN PROGRESS: " +
+            JSON.stringify({
+              orderId: order.id,
+              orderNumber: order.order_number || null,
+              status: latestAfterClaim?.shipping_label_status || null
+            })
         );
-      }
 
-      console.warn(
-        "MELHOR ENVIO CART SKIP IN PROGRESS: " +
+        return buildShippingAlreadyInProgressResult({
+          ...order,
+          ...latestAfterClaim
+        });
+      }
+    } else {
+      console.log(
+        "MELHOR ENVIO IDEMPOTENCY LOCK REUSED: " +
           JSON.stringify({
             orderId: order.id,
-            orderNumber: order.order_number || null,
-            status: latestAfterClaim?.shipping_label_status || null
+            orderNumber: order.order_number || null
           })
       );
-
-      return buildShippingAlreadyInProgressResult({
-        ...order,
-        ...latestAfterClaim
-      });
     }
 
     order = {

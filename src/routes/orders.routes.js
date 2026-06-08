@@ -1101,7 +1101,11 @@ router.put("/:id/tracking", requireAuth, async (req, res) => {
 
     if (shouldGenerateLabel) {
       const shippingItems = await getOrderItemsForShipping(existingOrder.id);
-      const labelResult = await generateAutomaticShippingLabel(existingOrder, shippingItems);
+      const labelResult = await generateAutomaticShippingLabel(
+        existingOrder,
+        shippingItems,
+        { claimAlreadyAcquired: true }
+      );
 
       const labelSuccess = Boolean(labelResult?.success);
       const resolvedLabelStatus = labelSuccess
@@ -1146,6 +1150,7 @@ router.put("/:id/tracking", requireAuth, async (req, res) => {
       updatePayload.shipping_label_error = labelSuccess ? "" : labelResult.error || "Erro ao gerar etiqueta";
       updatePayload.shipping_label_raw = labelResult.raw || existingOrder.shipping_label_raw || null;
       updatePayload.shipping_label_processing_started_at = null;
+      updatePayload.processed_at = new Date().toISOString();
 
       if (!updatePayload.shipping_carrier) {
         updatePayload.shipping_carrier = pickFirstNonEmptyString(
