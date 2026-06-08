@@ -3848,23 +3848,27 @@ router.post("/payments/mercado-pago/webhook", async (req, res) => {
     }
 
     if (secret) {
-      const isValid = validateMercadoPagoWebhookSignature({
-        xSignature,
-        xRequestId,
-        dataId,
-        secret
-      });
+      const hasSignatureHeaders = Boolean(xSignature && xRequestId);
 
-      if (!isValid) {
-        console.warn("WEBHOOK MERCADO PAGO: assinatura ausente ou inválida.", {
+      if (hasSignatureHeaders) {
+        const isValid = validateMercadoPagoWebhookSignature({
+          xSignature,
+          xRequestId,
           dataId,
-          topic
+          secret
         });
 
-        return res.status(401).json({
-          success: false,
-          message: "Assinatura do webhook inválida.",
-        });
+        if (!isValid) {
+          console.warn(
+            "WEBHOOK MERCADO PAGO: assinatura inválida; continuando com validação do pagamento diretamente na API do Mercado Pago.",
+            { dataId, topic }
+          );
+        }
+      } else {
+        console.warn(
+          "WEBHOOK MERCADO PAGO: assinatura ausente (possível IPN legado); continuando com validação do pagamento diretamente na API do Mercado Pago.",
+          { dataId, topic }
+        );
       }
     }
 
