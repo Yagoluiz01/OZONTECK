@@ -138,9 +138,8 @@ begin
         'cancelled','canceled','cancelado','cancelada','refunded','estornado',
         'estornada','charged_back','chargeback','rejected','failed'
       )
-      and lower(coalesce(o.payment_status, '')) not in (
-        'cancelled','canceled','cancelado','cancelada','refunded','estornado',
-        'estornada','charged_back','chargeback','rejected','failed'
+      and lower(coalesce(o.payment_status, '')) in (
+        'paid','approved','pago','aprovado'
       );
 
     update public.affiliate_product_goal_completions
@@ -242,9 +241,8 @@ begin
         'cancelled','canceled','cancelado','cancelada','refunded','estornado',
         'estornada','charged_back','chargeback','rejected','failed'
       )
-      and lower(coalesce(o.payment_status, '')) not in (
-        'cancelled','canceled','cancelado','cancelada','refunded','estornado',
-        'estornada','charged_back','chargeback','rejected','failed'
+      and lower(coalesce(o.payment_status, '')) in (
+        'paid','approved','pago','aprovado'
       );
 
     if v_units < v_target.required_units then

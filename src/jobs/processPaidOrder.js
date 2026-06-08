@@ -5,6 +5,7 @@ import {
   updateOrderInvoiceFields
 } from "../services/invoice.service.js";
 import { generateAutomaticShippingLabel } from "../services/shipping.service.js";
+import { ensureOrderStockReserved } from "../services/orderStock.service.js";
 
 function getRequiredEnv(name, value) {
   const normalized = String(value || "").trim();
@@ -279,12 +280,22 @@ export async function processPaidOrder(input) {
   const paymentStatus = normalizePaymentStatus(order);
 
   if (paymentStatus !== "paid" && paymentStatus !== "approved") {
-    order = await markOrderAsPaid(order);
+    const error = new Error(
+      "O pedido ainda não possui pagamento confirmado. O processamento foi bloqueado."
+    );
+    error.statusCode = 409;
+    throw error;
+  }
 
-    await appendOrderProcessingEvent(order.id, "payment_marked_paid", {
-      status: "paid",
-      message: "Pedido marcado como pago para seguir processamento"
-    });
+  const stockReservation = await ensureOrderStockReserved(order.id);
+
+  if (!stockReservation?.reserved) {
+    const error = new Error(
+      "O pagamento está confirmado, mas o estoque do pedido não pôde ser reservado. Revise o pedido manualmente."
+    );
+    error.statusCode = 409;
+    error.details = stockReservation;
+    throw error;
   }
 
   if (isAlreadyProcessed(order)) {

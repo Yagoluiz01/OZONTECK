@@ -1,0 +1,20 @@
+# Segurança obrigatória para produção
+NODE_ENV=production
+ENABLE_PAYMENT_SIMULATION=false
+STRICT_CORS=true
+ALLOW_LOCAL_CORS_IN_PRODUCTION=false
+
+# Informe o e-mail real do administrador proprietário/master.
+MASTER_ADMIN_EMAIL=admin@seudominio.com
+
+# Use somente as origens oficiais, separadas por vírgula.
+CORS_ORIGINS=https://sua-loja.example,https://seu-admin.example
+
+# Obrigatórios para validar webhooks. Nunca coloque valores reais neste arquivo.
+MERCADO_PAGO_WEBHOOK_SECRET=configure-no-render
+MELHOR_ENVIO_WEBHOOK_SECRET=configure-no-render
+
+# Reserva de estoque
+ORDER_STOCK_CLEANUP_ENABLED=true
+ORDER_STOCK_CLEANUP_INTERVAL_MINUTES=15
+ORDER_STOCK_CLEANUP_BATCH_LIMIT=100

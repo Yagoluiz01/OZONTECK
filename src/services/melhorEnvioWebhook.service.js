@@ -2,6 +2,7 @@ import crypto from "crypto";
 import { supabaseAdmin } from "../config/supabase.js";
 import { createAdminNotification } from "./adminNotifications.service.js";
 import { syncAffiliateCommissionLifecycleForOrder } from "./affiliateCommissionLifecycle.service.js";
+import { releaseOrderStock } from "./orderStock.service.js";
 
 function normalizeString(value) {
   return String(value || "").trim();
@@ -14,15 +15,7 @@ function normalizeStatus(value) {
     .replace(/[\u0300-\u036f]/g, "");
 }
 
-const MELHOR_ENVIO_WEBHOOK_MATCHER_VERSION = "2026-05-22-v2-shipment-ilike";
-
-function normalizeIdentifierForCompare(value) {
-  return normalizeStatus(value).replace(/\s+/g, "");
-}
-
-function escapeIlikeValue(value) {
-  return normalizeString(value).replace(/[%_]/g, "\\$&");
-}
+const MELHOR_ENVIO_WEBHOOK_MATCHER_VERSION = "2026-06-07-v3-exact-only";
 
 function safeObject(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
@@ -137,9 +130,12 @@ function collectWebhookIdentifiers(payload = {}) {
       add("order_number", orderMatch[1], label);
     }
 
-    const ozonteckOrderMatch = text.match(/\bOZT[-_][0-9]{4}[-_][0-9]+\b/i);
-    if (ozonteckOrderMatch?.[0]) {
-      add("order_number", ozonteckOrderMatch[0].replace(/_/g, "-"), label);
+    const secureOrderMatch = text.match(/\bOZT[-_][0-9]{8}[-_](?:[A-F0-9]{12}|[A-F0-9]{24})\b/i);
+    const legacyOrderMatch = text.match(/\bOZT[-_][0-9]{4}[-_][0-9]+\b/i);
+    const orderNumberMatch = secureOrderMatch || legacyOrderMatch;
+
+    if (orderNumberMatch?.[0]) {
+      add("order_number", orderNumberMatch[0].replace(/_/g, "-"), label);
     }
   };
 
@@ -157,83 +153,12 @@ function collectWebhookIdentifiers(payload = {}) {
   return identifiers;
 }
 
-async function fetchOrderByColumn(field, value) {
-  const cleanValue = normalizeString(value);
-  if (!cleanValue) return null;
-
-  const runQuery = async (mode) => {
-    let query = supabaseAdmin
-      .from("orders")
-      .select("*")
-      .order("created_at", { ascending: false })
-      .limit(1);
-
-    if (mode === "eq") {
-      query = query.eq(field, cleanValue);
-    } else if (mode === "ilike") {
-      query = query.ilike(field, escapeIlikeValue(cleanValue));
-    } else {
-      query = query.ilike(field, `%${escapeIlikeValue(cleanValue)}%`);
-    }
-
-    const { data, error } = await query;
-
-    if (error) {
-      console.warn("[MELHOR_ENVIO_WEBHOOK_FIND_ORDER_COLUMN_ERROR]", {
-        field,
-        value: cleanValue,
-        mode,
-        message: error.message,
-      });
-      return null;
-    }
-
-    return Array.isArray(data) ? data[0] || null : null;
-  };
-
-  return (await runQuery("eq")) || (await runQuery("ilike")) || (await runQuery("contains"));
-}
-
-async function fetchOrderByRawContains(patch = {}, label = "shipping_label_raw") {
-  const { data, error } = await supabaseAdmin
-    .from("orders")
-    .select("*")
-    .contains("shipping_label_raw", patch)
-    .order("created_at", { ascending: false })
-    .limit(1);
+async function fetchSingleExactOrder(query, matchContext = {}) {
+  const { data, error } = await query.limit(2);
 
   if (error) {
-    console.warn("[MELHOR_ENVIO_WEBHOOK_FIND_ORDER_RAW_ERROR]", {
-      label,
-      patch,
-      message: error.message,
-    });
-    return null;
-  }
-
-  return Array.isArray(data) ? data[0] || null : null;
-}
-
-async function fetchOrderByFlexibleIdentifiers(identifiers = []) {
-  const validIdentifiers = identifiers
-    .map((identifier) => ({
-      ...identifier,
-      normalizedValue: normalizeIdentifierForCompare(identifier.value),
-    }))
-    .filter((identifier) => identifier.normalizedValue);
-
-  if (!validIdentifiers.length) {
-    return null;
-  }
-
-  const { data, error } = await supabaseAdmin
-    .from("orders")
-    .select("*")
-    .order("created_at", { ascending: false })
-    .limit(1000);
-
-  if (error) {
-    console.warn("[MELHOR_ENVIO_WEBHOOK_FIND_ORDER_FLEX_ERROR]", {
+    console.warn("[MELHOR_ENVIO_WEBHOOK_FIND_ORDER_ERROR]", {
+      ...matchContext,
       message: error.message,
     });
     return null;
@@ -241,39 +166,42 @@ async function fetchOrderByFlexibleIdentifiers(identifiers = []) {
 
   const orders = Array.isArray(data) ? data : [];
 
-  for (const order of orders) {
-    const rawText = JSON.stringify(safeObject(order.shipping_label_raw));
-    const fields = [
-      { field: "order_number", value: order.order_number },
-      { field: "shipping_shipment_id", value: order.shipping_shipment_id },
-      { field: "shipping_tracking_code", value: order.shipping_tracking_code },
-      { field: "tracking_code", value: order.tracking_code },
-      { field: "shipping_label_raw", value: rawText },
-    ];
-
-    for (const identifier of validIdentifiers) {
-      for (const candidate of fields) {
-        const normalizedCandidate = normalizeIdentifierForCompare(candidate.value);
-        if (!normalizedCandidate) continue;
-
-        const exactMatch = normalizedCandidate === identifier.normalizedValue;
-        const rawContainsMatch =
-          candidate.field === "shipping_label_raw" &&
-          normalizedCandidate.includes(identifier.normalizedValue);
-
-        if (exactMatch || rawContainsMatch) {
-          return {
-            order,
-            matchedBy: `flex.${identifier.label}`,
-            matchedField: candidate.field,
-            matchedValue: identifier.value,
-          };
-        }
-      }
-    }
+  if (orders.length > 1) {
+    const ambiguityError = new Error(
+      "Webhook Melhor Envio encontrou mais de um pedido para o mesmo identificador."
+    );
+    ambiguityError.statusCode = 409;
+    ambiguityError.code = "AMBIGUOUS_SHIPPING_ORDER_MATCH";
+    ambiguityError.details = matchContext;
+    throw ambiguityError;
   }
 
-  return null;
+  return orders[0] || null;
+}
+
+async function fetchOrderByColumn(field, value) {
+  const cleanValue = normalizeString(value);
+  if (!cleanValue) return null;
+
+  return fetchSingleExactOrder(
+    supabaseAdmin
+      .from("orders")
+      .select("*")
+      .eq(field, cleanValue)
+      .order("created_at", { ascending: false }),
+    { field, value: cleanValue, mode: "eq" }
+  );
+}
+
+async function fetchOrderByRawContains(patch = {}, label = "shipping_label_raw") {
+  return fetchSingleExactOrder(
+    supabaseAdmin
+      .from("orders")
+      .select("*")
+      .contains("shipping_label_raw", patch)
+      .order("created_at", { ascending: false }),
+    { field: "shipping_label_raw", label, patch, mode: "json_contains" }
+  );
 }
 
 async function findOrderForMelhorEnvioWebhook(payload = {}) {
@@ -319,10 +247,6 @@ async function findOrderForMelhorEnvioWebhook(payload = {}) {
     }
   }
 
-  const flexibleMatch = await fetchOrderByFlexibleIdentifiers(identifiers);
-  if (flexibleMatch?.order?.id) {
-    return flexibleMatch;
-  }
 
   return {
     order: null,
@@ -514,6 +438,26 @@ export async function handleMelhorEnvioWebhook({ payload, rawBody, signature }) 
     delivered ? "melhor_envio_webhook_order_delivered" : "melhor_envio_webhook_order_cancelled"
   );
 
+  let stockReleaseResult = null;
+
+  if (cancelled) {
+    const wasAlreadyShipped = Boolean(
+      match.order.shipped_at ||
+        match.order.shipping_tracking_code ||
+        match.order.tracking_code ||
+        ["shipped", "sent", "in_transit", "delivered"].includes(
+          normalizeStatus(match.order.order_status)
+        )
+    );
+
+    if (!wasAlreadyShipped) {
+      stockReleaseResult = await releaseOrderStock(
+        updatedOrder.id,
+        "melhor_envio_webhook_cancelled_before_shipping"
+      );
+    }
+  }
+
   return {
     success: true,
     received: true,
@@ -526,6 +470,7 @@ export async function handleMelhorEnvioWebhook({ payload, rawBody, signature }) 
     matchedField: match.matchedField,
     matchedValue: match.matchedValue,
     lifecycleResult,
+    stockReleaseResult,
     matcherVersion: MELHOR_ENVIO_WEBHOOK_MATCHER_VERSION,
   };
 }

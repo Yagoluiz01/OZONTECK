@@ -46,7 +46,7 @@ export function getMelhorEnvioUserAgent() {
   ).trim();
 }
 
-export function buildMelhorEnvioAuthorizeUrl() {
+export function buildMelhorEnvioAuthorizeUrl(oauthState) {
   const { clientId, redirectUri, baseUrl } = getMelhorEnvioConfig();
 
   const authBase = baseUrl.includes("sandbox")
@@ -70,11 +70,13 @@ export function buildMelhorEnvioAuthorizeUrl() {
     scope: scopes.join(" ")
   });
 
-  const oauthState = String(process.env.MELHOR_ENVIO_OAUTH_STATE || "").trim();
+  const normalizedState = String(oauthState || "").trim();
 
-  if (oauthState) {
-    params.set("state", oauthState);
+  if (!normalizedState) {
+    throw new Error("State OAuth seguro não foi gerado.");
   }
+
+  params.set("state", normalizedState);
 
   return `${authBase}?${params.toString()}`;
 }

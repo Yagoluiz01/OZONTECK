@@ -17,7 +17,23 @@ for (const key of requiredEnv) {
   }
 }
 
+
+function isTruthyEnv(value) {
+  return ["1", "true", "yes", "on"].includes(
+    String(value || "").trim().toLowerCase()
+  );
+}
+
+const nodeEnv = process.env.NODE_ENV || "development";
+
+if (nodeEnv === "production" && isTruthyEnv(process.env.ENABLE_PAYMENT_SIMULATION)) {
+  throw new Error(
+    "ENABLE_PAYMENT_SIMULATION não pode permanecer ativo em produção. Defina false antes de iniciar a API."
+  );
+}
+
 export const env = {
+  nodeEnv,
   port: Number(process.env.PORT) || 5000,
   supabaseUrl: process.env.SUPABASE_URL,
   supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY,

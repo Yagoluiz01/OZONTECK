@@ -19,6 +19,12 @@ function normalizeStatus(value) {
     .replace(/[\u0300-\u036f]/g, "");
 }
 
+function isPaidOrder(order = {}) {
+  return ["paid", "approved", "pago", "aprovado"].includes(
+    normalizeStatus(order.payment_status)
+  );
+}
+
 function isDeliveredOrder(order = {}) {
   const raw = order?.shipping_label_raw && typeof order.shipping_label_raw === "object"
     ? order.shipping_label_raw
@@ -191,11 +197,17 @@ export async function syncAffiliateProductGoalLifecycleForOrder(
     };
   }
 
-  if (!isDeliveredOrder(order) && !isCancelledOrder(order)) {
+  const cancelled = isCancelledOrder(order);
+  const delivered = isDeliveredOrder(order);
+  const paid = isPaidOrder(order);
+
+  if (!cancelled && (!delivered || !paid)) {
     return {
       success: true,
       skipped: true,
-      reason: "order_without_product_goal_action",
+      reason: delivered && !paid
+        ? "delivery_without_confirmed_payment"
+        : "order_without_product_goal_action",
       orderId: order.id,
     };
   }

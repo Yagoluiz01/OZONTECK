@@ -14,6 +14,7 @@ import { rankHomeProducts, rankStorefrontProducts } from "../services/productRan
 import express from "express";
 import bcrypt from "bcryptjs";
 import { requireAdminAuth } from "../middlewares/auth.middleware.js";
+import { requireMasterAdmin } from "../middlewares/masterAdmin.middleware.js";
 import crypto from "crypto";
 import { env } from "../config/env.js";
 import {
@@ -22,6 +23,15 @@ import {
 } from "../services/melhorEnvio.service.js";
 import { generateAutomaticShippingLabel } from "../services/shipping.service.js";
 import { processPaidOrder } from "../jobs/processPaidOrder.js";
+import {
+  applyMercadoPagoPaymentTransition,
+  claimOrderShippingLabelGeneration,
+  createStoreOrderAtomic,
+  ensureOrderStockReserved,
+  releaseOrderStock,
+} from "../services/orderStock.service.js";
+import { syncAffiliateCommissionLifecycleForOrder } from "../services/affiliateCommissionLifecycle.service.js";
+import { createIntegrationOAuthState } from "../services/oauthState.service.js";
 import { createActivationOfferForPaidOrder } from "../services/customerActivation.service.js";
 import {
   getCustomerOrderPushPublicKey,
@@ -1788,6 +1798,10 @@ function getStoreBackUrls() {
 }
 
 function isPaymentSimulationEnabled() {
+  if (env.nodeEnv === "production") {
+    return false;
+  }
+
   const value =
     env.enablePaymentSimulation ||
     process.env.ENABLE_PAYMENT_SIMULATION ||
@@ -2146,17 +2160,63 @@ async function fetchProductsMap() {
 function generateOrderNumber() {
   const now = new Date();
   const year = now.getFullYear();
-  const stamp = Date.now().toString().slice(-6);
-  return `OZT-${year}-${stamp}`;
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  const randomPart = crypto.randomBytes(12).toString("hex").toUpperCase();
+  return `OZT-${year}${month}${day}-${randomPart}`;
 }
 
-async function findOrCreateCustomer(customer) {
-  const email = String(customer.email || "").trim().toLowerCase();
+function createOrderAccessToken() {
+  return crypto.randomBytes(32).toString("hex");
+}
 
-  if (!email) {
-    throw new Error("E-mail do cliente Ã© obrigatÃ³rio");
+function hashOrderAccessToken(value) {
+  return crypto.createHash("sha256").update(String(value || "")).digest("hex");
+}
+
+function isValidOrderAccessToken(req, order = {}) {
+  const provided = String(
+    req.headers["x-order-access-token"] ||
+      req.query?.access_token ||
+      req.body?.access_token ||
+      req.body?.accessToken ||
+      ""
+  ).trim();
+  const expectedHash = String(order.public_access_token_hash || "").trim();
+
+  if (!provided || !expectedHash) return false;
+
+  const providedHash = hashOrderAccessToken(provided);
+  const providedBuffer = Buffer.from(providedHash, "hex");
+  const expectedBuffer = Buffer.from(expectedHash, "hex");
+
+  return (
+    providedBuffer.length === expectedBuffer.length &&
+    crypto.timingSafeEqual(providedBuffer, expectedBuffer)
+  );
+}
+
+async function hasVerifiedOrderAccess(req, order = {}) {
+  if (isValidOrderAccessToken(req, order)) {
+    return true;
   }
 
+  const paymentId = String(req.body?.payment_id || req.body?.paymentId || "").trim();
+  if (!paymentId) return false;
+
+  if (String(order.payment_reference || "").trim() === paymentId) {
+    return true;
+  }
+
+  try {
+    const payment = await getMercadoPagoPayment(paymentId);
+    return String(payment?.external_reference || "").trim() === String(order.order_number || "").trim();
+  } catch {
+    return false;
+  }
+}
+
+async function findCustomerIdByEmail(email) {
   const searchUrl = new URL(`${env.supabaseUrl}/rest/v1/customers`);
   searchUrl.searchParams.set("select", "id,email");
   searchUrl.searchParams.set("email", `eq.${email}`);
@@ -2168,15 +2228,35 @@ async function findOrCreateCustomer(customer) {
       apikey: env.supabaseServiceRoleKey,
       Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
       "Content-Type": "application/json",
-      Accept: "application/json"
-    }
+      Accept: "application/json",
+    },
   });
 
   const searchData = await searchResponse.json().catch(() => []);
 
-  if (searchResponse.ok && Array.isArray(searchData) && searchData[0]?.id) {
-    return searchData[0].id;
+  if (!searchResponse.ok) {
+    const error = new Error("Erro ao consultar cliente pelo e-mail.");
+    error.statusCode = 502;
+    error.details = searchData;
+    throw error;
   }
+
+  return Array.isArray(searchData) && searchData[0]?.id
+    ? searchData[0].id
+    : null;
+}
+
+async function findOrCreateCustomer(customer) {
+  const email = String(customer.email || "").trim().toLowerCase();
+
+  if (!email) {
+    const error = new Error("E-mail do cliente é obrigatório.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const existingCustomerId = await findCustomerIdByEmail(email);
+  if (existingCustomerId) return existingCustomerId;
 
   const createPayload = {
     full_name: String(customer.nome || "").trim(),
@@ -2186,7 +2266,7 @@ async function findOrCreateCustomer(customer) {
     state: String(customer.estado || "").trim(),
     origin: "Site",
     status: "lead",
-    notes: ""
+    notes: "",
   };
 
   const createResponse = await fetch(`${env.supabaseUrl}/rest/v1/customers`, {
@@ -2195,22 +2275,29 @@ async function findOrCreateCustomer(customer) {
       apikey: env.supabaseServiceRoleKey,
       Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
       "Content-Type": "application/json",
-      Prefer: "return=representation"
+      Prefer: "return=representation",
     },
-    body: JSON.stringify(createPayload)
+    body: JSON.stringify(createPayload),
   });
 
   const createData = await createResponse.json().catch(() => []);
 
-  if (
-    !createResponse.ok ||
-    !Array.isArray(createData) ||
-    !createData[0]?.id
-  ) {
-    throw new Error("Erro ao criar cliente");
+  if (createResponse.ok && Array.isArray(createData) && createData[0]?.id) {
+    return createData[0].id;
   }
 
-  return createData[0].id;
+  // Duas compras simultâneas podem tentar criar o mesmo e-mail.
+  // Após conflito de unicidade, reutiliza o registro criado pela outra requisição.
+  const conflictCode = String(createData?.code || "");
+  if (createResponse.status === 409 || conflictCode === "23505") {
+    const concurrentCustomerId = await findCustomerIdByEmail(email);
+    if (concurrentCustomerId) return concurrentCustomerId;
+  }
+
+  const error = new Error("Erro ao criar cliente.");
+  error.statusCode = createResponse.status >= 400 ? createResponse.status : 500;
+  error.details = createData;
+  throw error;
 }
 
 function parseMercadoPagoSignature(signatureHeader = "") {
@@ -2257,7 +2344,14 @@ function validateMercadoPagoWebhookSignature({
     .update(manifest)
     .digest("hex");
 
-  return generated === v1;
+  const generatedBuffer = Buffer.from(generated, "hex");
+  const receivedBuffer = Buffer.from(String(v1 || ""), "hex");
+
+  return (
+    generatedBuffer.length === receivedBuffer.length &&
+    generatedBuffer.length > 0 &&
+    crypto.timingSafeEqual(generatedBuffer, receivedBuffer)
+  );
 }
 
 async function createMercadoPagoPreference({ req, order, items, customer }) {
@@ -2579,11 +2673,11 @@ async function updateOrderByExternalReference(externalReference, payload) {
   };
 }
 
-async function findOrderByExternalReference(externalReference) {
+async function queryOrderByExactField(field, value) {
   const url = new URL(`${env.supabaseUrl}/rest/v1/orders`);
-  url.searchParams.set("payment_external_reference", `eq.${externalReference}`);
+  url.searchParams.set(field, `eq.${value}`);
   url.searchParams.set("select", "*");
-  url.searchParams.set("limit", "1");
+  url.searchParams.set("limit", "2");
 
   const response = await fetch(url.toString(), {
     method: "GET",
@@ -2591,17 +2685,52 @@ async function findOrderByExternalReference(externalReference) {
       apikey: env.supabaseServiceRoleKey,
       Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
       "Content-Type": "application/json",
-      Accept: "application/json"
-    }
+      Accept: "application/json",
+    },
   });
 
   const data = await response.json().catch(() => []);
 
-  if (!response.ok || !Array.isArray(data) || !data[0]) {
-    throw new Error("Pedido nÃ£o encontrado pelo external_reference");
+  if (!response.ok) {
+    const error = new Error(`Erro ao consultar pedido por ${field}.`);
+    error.statusCode = 502;
+    error.details = data;
+    throw error;
   }
 
-  return data[0];
+  const orders = Array.isArray(data) ? data : [];
+  if (orders.length > 1) {
+    const error = new Error(`Mais de um pedido encontrado para ${field}.`);
+    error.statusCode = 409;
+    error.code = "AMBIGUOUS_ORDER_REFERENCE";
+    throw error;
+  }
+
+  return orders[0] || null;
+}
+
+async function findOrderByExternalReference(externalReference) {
+  const cleanReference = String(externalReference || "").trim();
+
+  if (!cleanReference) {
+    const error = new Error("Referência externa do pedido ausente.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const byGatewayReference = await queryOrderByExactField(
+    "payment_external_reference",
+    cleanReference
+  );
+  if (byGatewayReference) return byGatewayReference;
+
+  // O webhook pode chegar antes de a preferência/pagamento ser persistido no pedido.
+  const byOrderNumber = await queryOrderByExactField("order_number", cleanReference);
+  if (byOrderNumber) return byOrderNumber;
+
+  const error = new Error("Pedido não encontrado pela referência externa.");
+  error.statusCode = 404;
+  throw error;
 }
 
 async function findOrderItems(orderId) {
@@ -2893,7 +3022,8 @@ async function saveGeneratedLabel(orderId, labelData = {}) {
   const patch = {
     shipping_label_status: labelStatus,
     shipping_label_error: labelError,
-    shipping_label_raw: labelData?.raw || null
+    shipping_label_raw: labelData?.raw || null,
+    shipping_label_processing_started_at: null
   };
 
   if (labelUrl) patch.shipping_label_url = labelUrl;
@@ -2914,7 +3044,8 @@ async function saveLabelError(orderId, errorMessage) {
   return updateOrderById(orderId, {
     shipping_label_status: "error",
     shipping_label_error: String(errorMessage || "Erro ao gerar etiqueta"),
-    shipping_label_generated_at: null
+    shipping_label_generated_at: null,
+    shipping_label_processing_started_at: null
   });
 }
 
@@ -2973,6 +3104,15 @@ router.post("/orders/:orderNumber/notifications/subscribe", async (req, res) => 
       });
     }
 
+    const verifiedAccess = await hasVerifiedOrderAccess(req, order);
+
+    if (!verifiedAccess) {
+      return res.status(403).json({
+        success: false,
+        message: "Não foi possível confirmar que este pedido pertence a você.",
+      });
+    }
+
     const saved = await saveCustomerOrderPushSubscription({
       orderNumber,
       paymentId: req.body?.payment_id || req.body?.paymentId || "",
@@ -2980,11 +3120,16 @@ router.post("/orders/:orderNumber/notifications/subscribe", async (req, res) => 
       userAgent: req.body?.user_agent || req.headers["user-agent"] || ""
     });
 
-    const testPush = await safeCustomerOrderPush(
-      "customer_order_push_subscribed",
-      order,
-      (currentOrder) => sendCustomerOrderPushForPaymentApproved(currentOrder)
+    const orderIsPaid = ["paid", "approved", "pago", "aprovado"].includes(
+      String(order.payment_status || "").trim().toLowerCase()
     );
+    const testPush = orderIsPaid
+      ? await safeCustomerOrderPush(
+          "customer_order_push_subscribed",
+          order,
+          (currentOrder) => sendCustomerOrderPushForPaymentApproved(currentOrder)
+        )
+      : { sent: false, skipped: true, reason: "payment_not_approved_yet" };
 
     return res.status(200).json({
       success: true,
@@ -3310,6 +3455,7 @@ router.post("/orders", async (req, res) => {
 
     await findOrCreateCustomer(customer);
     const orderNumber = generateOrderNumber();
+    const orderAccessToken = createOrderAccessToken();
 
     const orderPayload = {
       order_number: orderNumber,
@@ -3375,56 +3521,11 @@ router.post("/orders", async (req, res) => {
       payment_status: "pending",
       order_status: "pending",
       tracking_code: "",
-      notes
+      notes,
+      public_access_token_hash: hashOrderAccessToken(orderAccessToken)
     };
-
-    const createOrder = async (payload) => {
-      const response = await fetch(`${env.supabaseUrl}/rest/v1/orders`, {
-        method: "POST",
-        headers: {
-          apikey: env.supabaseServiceRoleKey,
-          Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
-          "Content-Type": "application/json",
-          Prefer: "return=representation"
-        },
-        body: JSON.stringify(payload)
-      });
-
-      const data = await response.json().catch(() => []);
-      return { response, data };
-    };
-
-    let { response: orderResponse, data: orderData } = await createOrder(orderPayload);
-
-    if (!orderResponse.ok && isMissingDatabaseColumnError(orderData)) {
-      console.warn(
-        "SNAPSHOT FINANCEIRO DO PEDIDO NÃO FOI SALVO: execute sql/financial-integrity-phase1.sql.",
-        orderData
-      );
-
-      const legacyOrderPayload = { ...orderPayload };
-      delete legacyOrderPayload.product_cost;
-      delete legacyOrderPayload.ad_cost;
-      delete legacyOrderPayload.other_costs;
-      delete legacyOrderPayload.financial_snapshot;
-
-      ({ response: orderResponse, data: orderData } = await createOrder(
-        legacyOrderPayload
-      ));
-    }
-
-    if (!orderResponse.ok || !Array.isArray(orderData) || !orderData[0]?.id) {
-      return res.status(500).json({
-        success: false,
-        message: "Erro ao criar pedido",
-        details: orderData
-      });
-    }
-
-    const createdOrder = orderData[0];
 
     const orderItemsPayload = orderCostSnapshot.items.map((item) => ({
-      order_id: createdOrder.id,
       product_id: item.product.id,
       product_name: item.product.name,
       sku: item.product.sku || "",
@@ -3441,52 +3542,48 @@ router.post("/orders", async (req, res) => {
       pricing_snapshot: item.costSnapshot,
     }));
 
-    const createOrderItems = async (payload) => {
-      const response = await fetch(`${env.supabaseUrl}/rest/v1/order_items`, {
-        method: "POST",
-        headers: {
-          apikey: env.supabaseServiceRoleKey,
-          Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
-          "Content-Type": "application/json",
-          Prefer: "return=representation"
-        },
-        body: JSON.stringify(payload)
+    let atomicOrderResult;
+
+    try {
+      atomicOrderResult = await createStoreOrderAtomic(orderPayload, orderItemsPayload);
+    } catch (atomicError) {
+      const detailsText = JSON.stringify(atomicError?.details || {});
+      const messageText = `${atomicError?.message || ""} ${detailsText}`;
+
+      if (messageText.includes("INSUFFICIENT_STOCK")) {
+        return res.status(409).json({
+          success: false,
+          message: "Um dos produtos ficou sem estoque durante a compra. Atualize o carrinho e tente novamente.",
+          code: "INSUFFICIENT_STOCK",
+        });
+      }
+
+      if (messageText.includes("PRODUCT_INACTIVE") || messageText.includes("PRODUCT_NOT_FOUND")) {
+        return res.status(409).json({
+          success: false,
+          message: "Um dos produtos não está mais disponível. Atualize o carrinho.",
+          code: "PRODUCT_UNAVAILABLE",
+        });
+      }
+
+      console.error("ATOMIC ORDER CREATION ERROR:", atomicError?.details || atomicError);
+      return res.status(503).json({
+        success: false,
+        message: "Não foi possível reservar os produtos. Confirme se sql/security-integrity-hardening.sql foi aplicado no Supabase.",
+        code: "ATOMIC_ORDER_UNAVAILABLE",
       });
-
-      const data = await response.json().catch(() => []);
-      return { response, data };
-    };
-
-    let { response: itemsResponse, data: itemsData } = await createOrderItems(
-      orderItemsPayload
-    );
-
-    if (!itemsResponse.ok && isMissingDatabaseColumnError(itemsData)) {
-      console.warn(
-        "SNAPSHOT DE CUSTO DOS ITENS NÃO FOI SALVO: execute sql/financial-integrity-phase1.sql.",
-        itemsData
-      );
-
-      const legacyItemsPayload = orderItemsPayload.map((item) => ({
-        order_id: item.order_id,
-        product_id: item.product_id,
-        product_name: item.product_name,
-        sku: item.sku,
-        quantity: item.quantity,
-        unit_price: item.unit_price,
-        total_price: item.total_price,
-      }));
-
-      ({ response: itemsResponse, data: itemsData } = await createOrderItems(
-        legacyItemsPayload
-      ));
     }
 
-    if (!itemsResponse.ok) {
+    const createdOrder = atomicOrderResult?.order;
+    const itemsData = Array.isArray(atomicOrderResult?.items)
+      ? atomicOrderResult.items
+      : [];
+
+    if (!createdOrder?.id || !itemsData.length) {
       return res.status(500).json({
         success: false,
-        message: "Pedido criado, mas houve erro ao salvar os itens",
-        details: itemsData
+        message: "O pedido não foi concluído com segurança.",
+        code: "ATOMIC_ORDER_INVALID_RESULT",
       });
     }
 
@@ -3520,7 +3617,8 @@ router.post("/orders", async (req, res) => {
       number: createdOrder.order_number,
       total: totalAmount,
       status: createdOrder.order_status,
-      paymentStatus: createdOrder.payment_status
+      paymentStatus: createdOrder.payment_status,
+      accessToken: orderAccessToken
     },
     payment: {
       gateway: "simulation_page",
@@ -3535,10 +3633,16 @@ router.post("/orders", async (req, res) => {
 const accessToken = getMercadoPagoAccessToken();
 
 if (!accessToken) {
+  try {
+    await releaseOrderStock(createdOrder.id, "payment_gateway_not_configured");
+  } catch (stockReleaseError) {
+    console.error("ERRO AO DEVOLVER ESTOQUE SEM GATEWAY CONFIGURADO:", stockReleaseError);
+  }
+
   return res.status(500).json({
     success: false,
     message:
-      "MERCADO_PAGO_ACCESS_TOKEN não configurado. Ative ENABLE_PAYMENT_SIMULATION=true para testar sem Mercado Pago."
+      "MERCADO_PAGO_ACCESS_TOKEN não configurado. Ative ENABLE_PAYMENT_SIMULATION=true apenas fora de produção."
   });
 }
 
@@ -3562,10 +3666,7 @@ if (requestedPaymentMethod === "pix_transparent") {
     payment_reference: String(pixPayment.id || ""),
     payment_external_reference: String(createdOrder.order_number || ""),
     payment_raw_status: String(pixPayment.status || "pending"),
-    payment_status:
-      String(pixPayment.status || "").toLowerCase() === "approved"
-        ? "paid"
-        : "pending"
+    payment_status: "pending"
   });
 
   if (!paymentUpdate.ok) {
@@ -3584,7 +3685,8 @@ if (requestedPaymentMethod === "pix_transparent") {
       number: createdOrder.order_number,
       total: totalAmount,
       status: createdOrder.order_status,
-      paymentStatus: "pending"
+      paymentStatus: "pending",
+      accessToken: orderAccessToken
     },
     payment: {
       gateway: "mercado_pago_pix",
@@ -3634,7 +3736,8 @@ if (requestedPaymentMethod === "boleto_transparent") {
       number: createdOrder.order_number,
       total: totalAmount,
       status: createdOrder.order_status,
-      paymentStatus: "pending"
+      paymentStatus: "pending",
+      accessToken: orderAccessToken
     },
     payment: {
       gateway: "mercado_pago_boleto",
@@ -3684,7 +3787,8 @@ if (requestedPaymentMethod === "boleto_transparent") {
         number: createdOrder.order_number,
         total: totalAmount,
         status: createdOrder.order_status,
-        paymentStatus: createdOrder.payment_status
+        paymentStatus: createdOrder.payment_status,
+        accessToken: orderAccessToken
       },
       payment: {
         gateway: "mercado_pago",
@@ -3735,7 +3839,15 @@ router.post("/payments/mercado-pago/webhook", async (req, res) => {
     const xSignature = String(req.headers["x-signature"] || "").trim();
     const xRequestId = String(req.headers["x-request-id"] || "").trim();
 
-    if (secret && xSignature && xRequestId) {
+    if (env.nodeEnv === "production" && !secret) {
+      console.error("WEBHOOK MERCADO PAGO: MERCADO_PAGO_WEBHOOK_SECRET ausente em produção.");
+      return res.status(503).json({
+        success: false,
+        message: "Webhook de pagamento temporariamente indisponível.",
+      });
+    }
+
+    if (secret) {
       const isValid = validateMercadoPagoWebhookSignature({
         xSignature,
         xRequestId,
@@ -3744,16 +3856,16 @@ router.post("/payments/mercado-pago/webhook", async (req, res) => {
       });
 
       if (!isValid) {
-        console.warn("WEBHOOK MERCADO PAGO: assinatura inválida, continuando com validação pelo paymentId na API do Mercado Pago", {
+        console.warn("WEBHOOK MERCADO PAGO: assinatura ausente ou inválida.", {
           dataId,
           topic
         });
+
+        return res.status(401).json({
+          success: false,
+          message: "Assinatura do webhook inválida.",
+        });
       }
-    } else if (secret) {
-      console.warn("WEBHOOK MERCADO PAGO: assinatura ausente, continuando com validação pelo paymentId na API do Mercado Pago", {
-        dataId,
-        topic
-      });
     }
 
     if (topic !== "payment") {
@@ -3790,67 +3902,115 @@ router.post("/payments/mercado-pago/webhook", async (req, res) => {
       );
     }
 
-    const updatePayload = {
-      payment_reference: String(payment.id || ""),
-      payment_raw_status: paymentStatus,
-      webhook_last_event: topic,
-      gateway_fee: paymentFinancialData.gatewayFee,
-      payment_net_amount: paymentFinancialData.netAmount,
-      payment_method_id: paymentFinancialData.paymentMethodId || null,
-      payment_type_id: paymentFinancialData.paymentTypeId || null,
-      payment_installments: paymentFinancialData.installments,
-    };
-
-    if (paymentStatus === "approved") {
-      updatePayload.payment_status = "paid";
-      updatePayload.paid_at = new Date().toISOString();
-      updatePayload.order_status = "paid";
-    } else if (
-      paymentStatus === "pending" ||
-      paymentStatus === "in_process"
-    ) {
-      updatePayload.payment_status = "pending";
-    } else if (
-      paymentStatus === "rejected" ||
-      paymentStatus === "cancelled" ||
-      paymentStatus === "refunded" ||
-      paymentStatus === "charged_back"
-    ) {
-      updatePayload.payment_status = "failed";
-      updatePayload.shipping_label_status = "pending";
-    }
-
-    let updateResponse = await updateOrderByExternalReference(
-      externalReference,
-      updatePayload
-    );
-
-    if (!updateResponse.ok && isMissingDatabaseColumnError(updateResponse.raw)) {
-      console.warn(
-        "DADOS FINANCEIROS DO MERCADO PAGO NÃO FORAM SALVOS: execute sql/financial-integrity-phase1.sql.",
-        updateResponse.raw
-      );
-
-      const legacyUpdatePayload = { ...updatePayload };
-      delete legacyUpdatePayload.gateway_fee;
-      delete legacyUpdatePayload.payment_net_amount;
-      delete legacyUpdatePayload.payment_method_id;
-      delete legacyUpdatePayload.payment_type_id;
-      delete legacyUpdatePayload.payment_installments;
-
-      updateResponse = await updateOrderByExternalReference(
-        externalReference,
-        legacyUpdatePayload
-      );
-    }
-
-    if (!updateResponse.ok) {
-      return res.status(500).json({
-        success: false,
-        message: "Erro ao atualizar pedido pelo webhook",
-        details: updateResponse.raw
+    if (!previousOrder?.id) {
+      return res.status(200).json({
+        success: true,
+        received: true,
+        ignored: true,
+        reason: "order_not_found",
       });
     }
+
+    const expectedAmount = Number(previousOrder.total_amount || 0);
+    const receivedAmount = Number(payment?.transaction_amount || 0);
+    const currencyId = String(payment?.currency_id || "BRL").trim().toUpperCase();
+    const metadataOrderId = String(payment?.metadata?.order_id || "").trim();
+    const amountMatches =
+      Number.isFinite(expectedAmount) &&
+      Number.isFinite(receivedAmount) &&
+      Math.abs(expectedAmount - receivedAmount) <= 0.01;
+    const identityMatches = !metadataOrderId || metadataOrderId === String(previousOrder.id);
+
+    if (!amountMatches || currencyId !== "BRL" || !identityMatches) {
+      console.error("WEBHOOK MERCADO PAGO: divergência financeira ou de identidade.", {
+        orderId: previousOrder.id,
+        externalReference,
+        expectedAmount,
+        receivedAmount,
+        currencyId,
+        metadataOrderId,
+      });
+
+      await updateOrderById(previousOrder.id, {
+        payment_raw_status: "review_required",
+        payment_status: "review_required",
+        webhook_last_event: "payment_validation_failed",
+        notes: `${String(previousOrder.notes || "")}
+Pagamento ${String(payment.id || "")} exige revisão: valor, moeda ou vínculo divergente.`.trim(),
+      });
+
+      return res.status(200).json({
+        success: true,
+        received: true,
+        reviewRequired: true,
+        reason: "payment_validation_failed",
+      });
+    }
+
+    if (paymentStatus === "approved") {
+      const stockReservation = await ensureOrderStockReserved(previousOrder.id);
+
+      if (!stockReservation?.reserved) {
+        await updateOrderById(previousOrder.id, {
+          payment_raw_status: "approved_stock_review",
+          payment_status: "review_required",
+          order_status: "stock_review",
+          webhook_last_event: "payment_stock_unavailable",
+        });
+
+        console.error("PAGAMENTO APROVADO SEM ESTOQUE DISPONÍVEL:", {
+          orderId: previousOrder.id,
+          orderNumber: previousOrder.order_number,
+          paymentId: payment.id,
+          stockReservation,
+        });
+
+        return res.status(200).json({
+          success: true,
+          received: true,
+          reviewRequired: true,
+          reason: "approved_payment_without_stock",
+        });
+      }
+    }
+
+    const transition = await applyMercadoPagoPaymentTransition({
+      externalReference,
+      paymentId: payment.id,
+      rawStatus: paymentStatus,
+      gatewayFee: paymentFinancialData.gatewayFee,
+      netAmount: paymentFinancialData.netAmount,
+      paymentMethodId: paymentFinancialData.paymentMethodId || null,
+      paymentTypeId: paymentFinancialData.paymentTypeId || null,
+      installments: paymentFinancialData.installments,
+    });
+
+    if (!transition?.success) {
+      return res.status(200).json({
+        success: true,
+        received: true,
+        ignored: true,
+        reason: transition?.reason || "payment_transition_not_applied",
+      });
+    }
+
+    const isFirstPaymentTransition = Boolean(transition.claimed);
+
+    if (!isFirstPaymentTransition && paymentStatus !== "approved") {
+      return res.status(200).json({
+        success: true,
+        received: true,
+        duplicate: true,
+        reason: transition.reason || "already_processed",
+      });
+    }
+
+    const updateResponse = {
+      ok: true,
+      status: 200,
+      data: transition.order ? [transition.order] : [],
+      raw: transition,
+    };
 
     let labelResult = null;
     let metaPurchaseResult = null;
@@ -3874,30 +4034,22 @@ router.post("/payments/mercado-pago/webhook", async (req, res) => {
   "mercado_pago_webhook"
 );
 
-const alreadyPaidBeforeWebhook =
-  String(previousOrder?.payment_status || "").trim().toLowerCase() === "paid";
+try {
+          // A criação possui consulta prévia e constraint única no banco.
+          // Em reentrega do webhook, isto também reconcilia uma comissão que tenha faltado
+          // após uma falha entre a transição do pagamento e os efeitos posteriores.
+          affiliateConversionResult = await createAffiliateConversionForPaidOrder(updatedOrder);
+        } catch (affiliateError) {
+          console.error("ERRO AO CRIAR/RECONCILIAR COMISSÃO DO AFILIADO:", affiliateError);
 
-if (!alreadyPaidBeforeWebhook) {
-  try {
-    affiliateConversionResult = await createAffiliateConversionForPaidOrder(updatedOrder);
-  } catch (affiliateError) {
-    console.error("ERRO AO CRIAR COMISSÃO DO AFILIADO:", affiliateError);
+          affiliateConversionResult = {
+            created: false,
+            skipped: false,
+            error: affiliateError.message || "Erro ao criar comissão do afiliado",
+          };
+        }
 
-    affiliateConversionResult = {
-      created: false,
-      skipped: false,
-      error: affiliateError.message || "Erro ao criar comissão do afiliado",
-    };
-  }
-} else {
-        affiliateConversionResult = {
-          created: false,
-          skipped: true,
-          reason: "already_paid_before_webhook"
-        };
-      }
-
-                if (!alreadyPaidBeforeWebhook) {
+        if (isFirstPaymentTransition) {
           metaPurchaseResult = await sendMetaPurchaseEvent({
             order: updatedOrder,
             items: orderItems,
@@ -3919,11 +4071,13 @@ if (!alreadyPaidBeforeWebhook) {
           metaPurchaseResult = {
             sent: false,
             skipped: true,
-            reason: "already_paid_before_webhook"
+            reason: "payment_transition_already_processed"
           };
         }
 
-        if (!isShippingLabelInProgressOrDone(updatedOrder?.shipping_label_status)) {
+        const labelClaim = await claimOrderShippingLabelGeneration(updatedOrder.id);
+
+        if (labelClaim?.claimed) {
           const generatedLabel = await generateAutomaticShippingLabel(
             updatedOrder,
             orderItems
@@ -3978,7 +4132,7 @@ if (!alreadyPaidBeforeWebhook) {
         } else {
           labelResult = {
             generated: false,
-            reason: "label_already_exists"
+            reason: labelClaim?.reason || "label_already_in_progress_or_done"
           };
         }
       } catch (labelError) {
@@ -4000,6 +4154,39 @@ if (!alreadyPaidBeforeWebhook) {
           generated: false,
           error: labelError.message || "Erro ao gerar etiqueta"
         };
+      }
+    }
+
+    if (["rejected", "cancelled", "refunded", "charged_back"].includes(paymentStatus)) {
+      const failedOrder = transition.order || previousOrder;
+
+      try {
+        await syncAffiliateCommissionLifecycleForOrder(
+          failedOrder,
+          `mercado_pago_${paymentStatus}`
+        );
+      } catch (lifecycleError) {
+        console.error("ERRO AO REVERTER CICLO DE COMISSÃO APÓS FALHA/ESTORNO:", lifecycleError);
+      }
+
+      const previousShippingStatus = String(previousOrder.order_status || "").trim().toLowerCase();
+      const canReturnReservedStock =
+        ["rejected", "cancelled", "refunded", "charged_back"].includes(paymentStatus) &&
+        !["shipped", "enviado", "delivered", "entregue"].includes(previousShippingStatus) &&
+        !String(previousOrder.tracking_code || previousOrder.shipping_tracking_code || "").trim();
+
+      if (canReturnReservedStock) {
+        try {
+          await releaseOrderStock(previousOrder.id, `mercado_pago_${paymentStatus}`);
+        } catch (stockReleaseError) {
+          console.error("ERRO AO DEVOLVER ESTOQUE DO PEDIDO CANCELADO/ESTORNADO:", stockReleaseError);
+        }
+      }
+
+      try {
+        await notifyOrderPaymentFailed(failedOrder);
+      } catch (notificationError) {
+        console.error("ERRO AO NOTIFICAR FALHA/ESTORNO DO PAGAMENTO:", notificationError);
       }
     }
 
@@ -4026,7 +4213,7 @@ if (!alreadyPaidBeforeWebhook) {
   }
 });
 
-router.post("/payments/simulate/:orderNumber", async (req, res) => {
+router.post("/payments/simulate/:orderNumber", requireAdminAuth, requireMasterAdmin, async (req, res) => {
   try {
     if (!isPaymentSimulationEnabled()) {
       return res.status(403).json({
@@ -4360,7 +4547,7 @@ router.get("/orders/:orderNumber/status", async (req, res) => {
     url.searchParams.set("order_number", `eq.${orderNumber}`);
     url.searchParams.set(
       "select",
-      "id,order_number,payment_status,payment_raw_status,order_status,tracking_code,paid_at,payment_gateway,payment_external_reference,shipping_label_status,shipping_label_url,shipping_label_pdf_url,shipping_tracking_code,shipping_shipment_id,shipping_label_generated_at,shipping_label_error,shipping_service_code,shipping_service_name,shipping_quote_raw"
+      "order_number,payment_status,order_status,tracking_code,shipping_tracking_code,paid_at,shipping_label_status,shipping_label_generated_at,shipping_service_name"
     );
     url.searchParams.set("limit", "1");
 
@@ -4379,8 +4566,7 @@ router.get("/orders/:orderNumber/status", async (req, res) => {
     if (!response.ok) {
       return res.status(500).json({
         success: false,
-        message: "Erro ao consultar status do pedido",
-        details: data
+        message: "Erro ao consultar status do pedido"
       });
     }
 
@@ -4405,7 +4591,7 @@ router.get("/orders/:orderNumber/status", async (req, res) => {
   }
 });
 
-router.post("/orders/:id/process-paid", requireAdminAuth, async (req, res) => {
+router.post("/orders/:id/process-paid", requireAdminAuth, requireMasterAdmin, async (req, res) => {
   try {
     const result = await processPaidOrder({ orderId: req.params.id });
 
@@ -4416,18 +4602,24 @@ router.post("/orders/:id/process-paid", requireAdminAuth, async (req, res) => {
   } catch (error) {
     console.error("PROCESS PAID ORDER ERROR:", error);
 
-    return res.status(500).json({
+    return res.status(Number(error?.statusCode || 500)).json({
       success: false,
-      message: error.message || "Erro ao processar pedido pago"
+      message: error.message || "Erro ao processar pedido pago",
+      details: error?.details || null,
     });
   }
 });
 
-router.get("/melhor-envio/authorize-url", async (req, res) => {
+router.get("/melhor-envio/authorize-url", requireAdminAuth, requireMasterAdmin, async (req, res) => {
   try {
     return res.status(200).json({
       success: true,
-      url: buildMelhorEnvioAuthorizeUrl()
+      url: buildMelhorEnvioAuthorizeUrl(
+        await createIntegrationOAuthState({
+          provider: "melhor_envio",
+          adminId: req.admin?.id,
+        })
+      )
     });
   } catch (error) {
     console.error("ERRO AO GERAR URL DE AUTORIZAÃ‡ÃƒO DO MELHOR ENVIO:", error);

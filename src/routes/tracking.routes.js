@@ -1,15 +1,30 @@
 import express from "express";
+import rateLimit from "express-rate-limit";
 import supabase from "../config/supabase.js";
 
+import { requireAdminAuth } from "../middlewares/auth.middleware.js";
+import { requireMasterAdmin } from "../middlewares/masterAdmin.middleware.js";
+
 const router = express.Router();
+
+const publicTrackingLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 240,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    message: "Muitos eventos de navegação. Tente novamente em alguns minutos.",
+  },
+});
 
 function toPositiveInt(value, fallback) {
   const num = Number(value);
   return Number.isFinite(num) && num > 0 ? Math.floor(num) : fallback;
 }
 
-function normalizeText(value) {
-  const text = String(value || "").trim();
+function normalizeText(value, maxLength = 500) {
+  const text = String(value || "").trim().slice(0, Math.max(1, maxLength));
   return text || null;
 }
 
@@ -362,7 +377,7 @@ async function ensureSessionExists({
 }
 
 
-router.post("/checkout-contact", async (req, res) => {
+router.post("/checkout-contact", publicTrackingLimiter, async (req, res) => {
   try {
     const { session_id, visitor_id = null } = req.body || {};
     const sessionId = normalizeText(session_id);
@@ -397,7 +412,6 @@ router.post("/checkout-contact", async (req, res) => {
       return res.status(500).json({
         success: false,
         message: "Erro ao garantir sessão de checkout",
-        details: ensuredSession.details || ensuredSession.message,
       });
     }
 
@@ -420,8 +434,7 @@ router.post("/checkout-contact", async (req, res) => {
       console.error("TRACKING CHECKOUT CONTACT ERROR:", error);
       return res.status(500).json({
         success: false,
-        message: error.message,
-        details: error,
+        message: "Erro ao registrar evento de checkout.",
       });
     }
 
@@ -439,7 +452,7 @@ router.post("/checkout-contact", async (req, res) => {
   }
 });
 
-router.post("/event", async (req, res) => {
+router.post("/event", publicTrackingLimiter, async (req, res) => {
   try {
     const {
       session_id,
@@ -474,7 +487,6 @@ router.post("/event", async (req, res) => {
       return res.status(500).json({
         success: false,
         message: "Erro ao garantir sessão de tracking",
-        details: ensuredSession.details || ensuredSession.message,
       });
     }
 
@@ -484,7 +496,7 @@ router.post("/event", async (req, res) => {
       event_type: eventType,
       page: normalizedPage,
       section: normalizedSection,
-      duration_ms: Number(duration_ms) || 0,
+      duration_ms: Math.max(0, Math.min(Number(duration_ms) || 0, 24 * 60 * 60 * 1000)),
     };
 
     const { error } = await supabase.from("lead_events").insert([payload]);
@@ -493,8 +505,7 @@ router.post("/event", async (req, res) => {
       console.error("TRACKING EVENT ERROR:", error);
       return res.status(500).json({
         success: false,
-        message: error.message,
-        details: error,
+        message: "Erro ao registrar evento de navegação.",
       });
     }
 
@@ -511,7 +522,7 @@ router.post("/event", async (req, res) => {
   }
 });
 
-router.post("/session/end", async (req, res) => {
+router.post("/session/end", publicTrackingLimiter, async (req, res) => {
   try {
     const {
       session_id,
@@ -525,7 +536,7 @@ router.post("/session/end", async (req, res) => {
     const visitorId = normalizeText(visitor_id);
     const lastPage = normalizeText(last_page);
     const lastSection = normalizeText(last_section);
-    const durationSeconds = Number(duration_seconds) || 0;
+    const durationSeconds = Math.max(0, Math.min(Number(duration_seconds) || 0, 24 * 60 * 60));
 
     if (!sessionId) {
       return res.status(400).json({
@@ -601,14 +612,14 @@ router.post("/session/end", async (req, res) => {
   }
 });
 
-router.get("/sessions", async (req, res) => {
+router.get("/sessions", requireAdminAuth, requireMasterAdmin, async (req, res) => {
   try {
     const page = normalizeText(req.query.page);
     const section = normalizeText(req.query.section);
     const dateFrom = normalizeText(req.query.date_from);
     const dateTo = normalizeText(req.query.date_to);
     const minDuration = toPositiveInt(req.query.min_duration, 0);
-    const limit = toPositiveInt(req.query.limit, 200);
+    const limit = Math.min(toPositiveInt(req.query.limit, 200), 500);
 
     let query = supabase
       .from("lead_sessions")
@@ -646,7 +657,7 @@ router.get("/sessions", async (req, res) => {
   }
 });
 
-router.get("/events", async (req, res) => {
+router.get("/events", requireAdminAuth, requireMasterAdmin, async (req, res) => {
   try {
     const page = normalizeText(req.query.page);
     const section = normalizeText(req.query.section);
@@ -654,7 +665,7 @@ router.get("/events", async (req, res) => {
     const sessionId = normalizeText(req.query.session_id);
     const dateFrom = normalizeText(req.query.date_from);
     const dateTo = normalizeText(req.query.date_to);
-    const limit = toPositiveInt(req.query.limit, 500);
+    const limit = Math.min(toPositiveInt(req.query.limit, 500), 1000);
 
     let query = supabase
       .from("lead_events")
@@ -694,11 +705,11 @@ router.get("/events", async (req, res) => {
 });
 
 
-router.get("/checkout-leads", async (req, res) => {
+router.get("/checkout-leads", requireAdminAuth, requireMasterAdmin, async (req, res) => {
   try {
     const dateFrom = normalizeText(req.query.date_from);
     const dateTo = normalizeText(req.query.date_to);
-    const limit = toPositiveInt(req.query.limit, 200);
+    const limit = Math.min(toPositiveInt(req.query.limit, 200), 500);
     const checkoutDelayMinutes = clampMinutes(
       req.query.recovery_delay_minutes,
       CHECKOUT_RECOVERY_DELAY_MINUTES

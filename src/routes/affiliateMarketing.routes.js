@@ -1,5 +1,6 @@
 import express from 'express';
 import { env } from '../config/env.js';
+import { requireAffiliateAuth } from '../middlewares/affiliateAuth.middleware.js';
 
 const router = express.Router();
 
@@ -159,10 +160,9 @@ router.get('/product/:productId', async (req, res) => {
  * - training_start
  * - training_complete
  */
-router.post('/action', async (req, res) => {
+router.post('/action', requireAffiliateAuth, async (req, res) => {
   try {
     const {
-      affiliate_id,
       product_id,
       asset_id,
       message_template_id,
@@ -196,7 +196,7 @@ router.post('/action', async (req, res) => {
     }
 
     const payload = {
-      affiliate_id: affiliate_id || null,
+      affiliate_id: req.affiliateId,
       product_id: product_id || null,
       asset_id: asset_id || null,
       message_template_id: message_template_id || null,
@@ -226,14 +226,15 @@ router.post('/action', async (req, res) => {
  *
  * Marca treinamento como iniciado.
  */
-router.post('/training/start', async (req, res) => {
+router.post('/training/start', requireAffiliateAuth, async (req, res) => {
   try {
-    const { affiliate_id, training_module_id, product_id } = req.body || {};
+    const { training_module_id, product_id } = req.body || {};
+    const affiliate_id = req.affiliateId;
 
-    if (!affiliate_id || !training_module_id) {
+    if (!training_module_id) {
       return res.status(400).json({
         success: false,
-        message: 'affiliate_id e training_module_id são obrigatórios.'
+        message: 'training_module_id é obrigatório.'
       });
     }
 
@@ -283,14 +284,15 @@ router.post('/training/start', async (req, res) => {
  *
  * Marca treinamento como concluído.
  */
-router.post('/training/complete', async (req, res) => {
+router.post('/training/complete', requireAffiliateAuth, async (req, res) => {
   try {
-    const { affiliate_id, training_module_id, product_id } = req.body || {};
+    const { training_module_id, product_id } = req.body || {};
+    const affiliate_id = req.affiliateId;
 
-    if (!affiliate_id || !training_module_id) {
+    if (!training_module_id) {
       return res.status(400).json({
         success: false,
-        message: 'affiliate_id e training_module_id são obrigatórios.'
+        message: 'training_module_id é obrigatório.'
       });
     }
 

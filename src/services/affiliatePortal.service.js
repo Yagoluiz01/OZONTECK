@@ -670,7 +670,55 @@ export async function getAffiliateById(affiliateId) {
     throw error;
   }
 
+  const currentStatus = normalizeStatus(affiliate.status || "active");
+
+  if (!["active", "ativo"].includes(currentStatus)) {
+    const error = new Error("Afiliado não está ativo.");
+    error.statusCode = 403;
+    throw error;
+  }
+
   return buildAffiliatePayload(affiliate);
+}
+
+
+function isActiveRewardClaim(claim = {}) {
+  const status = normalizeStatus(claim?.status);
+  return ["processing", "released", "paid", "review_required"].includes(status);
+}
+
+function pickEffectiveAffiliateLevel(levels = [], legacyOrder = 1, claims = []) {
+  const sortedLevels = [...(Array.isArray(levels) ? levels : [])].sort(
+    (a, b) => Number(a?.level_order || 0) - Number(b?.level_order || 0)
+  );
+  const claimedLevelIds = new Set(
+    (Array.isArray(claims) ? claims : [])
+      .filter(isActiveRewardClaim)
+      .map((claim) => String(claim?.affiliate_level_id || ""))
+      .filter(Boolean)
+  );
+  const minimumOrder = Math.max(1, Number(legacyOrder || 1));
+
+  return (
+    sortedLevels.find(
+      (level) =>
+        Number(level?.level_order || 0) >= minimumOrder &&
+        !claimedLevelIds.has(String(level?.id || ""))
+    ) ||
+    sortedLevels.find((level) => !claimedLevelIds.has(String(level?.id || ""))) ||
+    sortedLevels[sortedLevels.length - 1] ||
+    null
+  );
+}
+
+function getLatestRewardClaim(claims = []) {
+  return [...(Array.isArray(claims) ? claims : [])]
+    .filter(isActiveRewardClaim)
+    .sort((a, b) => {
+      const orderDiff = Number(b?.level_order || 0) - Number(a?.level_order || 0);
+      if (orderDiff) return orderDiff;
+      return new Date(b?.won_at || b?.updated_at || 0).getTime() - new Date(a?.won_at || a?.updated_at || 0).getTime();
+    })[0] || null;
 }
 
 export async function getAffiliateSummary(affiliateId) {
@@ -684,7 +732,7 @@ export async function getAffiliateSummary(affiliateId) {
     - Não cria bônus duplicado por causa da trava unique no banco.
   */
   try {
-    await supabaseRequest("/rpc/process_affiliate_level_progress", {
+    await supabaseRequest("/rpc/process_affiliate_level_progress_first_wins", {
       method: "POST",
       body: {
         p_affiliate_id: affiliateId,
@@ -705,6 +753,7 @@ export async function getAffiliateSummary(affiliateId) {
     bonusRows,
     affiliateOrdersTableRows,
     activeLevelRows,
+    rewardClaimRows,
   ] = await Promise.all([
     supabaseRequest(
       `/affiliate_conversions?affiliate_id=eq.${encodeURIComponent(
@@ -730,6 +779,11 @@ export async function getAffiliateSummary(affiliateId) {
     supabaseRequest(
       `/affiliate_levels?is_active=eq.true&select=*&order=level_order.asc`
     ),
+    supabaseRequest(
+      `/affiliate_level_reward_claims?affiliate_id=eq.${encodeURIComponent(
+        affiliateId
+      )}&select=id,affiliate_id,affiliate_level_id,level_order,level_name,winning_path,target_id,product_id,completion_id,product_conversion_id,standard_bonus_id,status,won_at,updated_at&order=level_order.asc`
+    ).catch(() => []),
   ]);
 
   const safeConversions = Array.isArray(conversions) ? conversions : [];
@@ -738,6 +792,7 @@ export async function getAffiliateSummary(affiliateId) {
     ? affiliateOrdersTableRows
     : [];
   const safeActiveLevels = Array.isArray(activeLevelRows) ? activeLevelRows : [];
+  const safeRewardClaims = Array.isArray(rewardClaimRows) ? rewardClaimRows : [];
   const goal = Array.isArray(goalRows) ? goalRows[0] : null;
   const bonuses = Array.isArray(bonusRows) ? bonusRows : [];
 
@@ -857,12 +912,19 @@ export async function getAffiliateSummary(affiliateId) {
   );
 
   const goalLevelOrder = Number(goal?.current_level_order || 1);
-  const currentLevel =
+  const legacyCurrentLevel =
     safeActiveLevels.find((level) => Number(level.level_order || 0) === goalLevelOrder) ||
     safeActiveLevels.find((level) => cleanText(level.name).toLowerCase() === cleanText(goal?.current_level_name).toLowerCase()) ||
     safeActiveLevels[0] ||
     null;
+  const currentLevel =
+    pickEffectiveAffiliateLevel(
+      safeActiveLevels,
+      legacyCurrentLevel?.level_order || goalLevelOrder,
+      safeRewardClaims
+    ) || legacyCurrentLevel;
   const currentLevelOrder = Number(currentLevel?.level_order || goalLevelOrder || 1);
+  const latestRewardClaim = getLatestRewardClaim(safeRewardClaims);
   const nextLevel =
     safeActiveLevels.find((level) => Number(level.level_order || 0) > currentLevelOrder) || null;
   const paidConversions = Number(goal?.paid_conversions || 0);
@@ -894,6 +956,10 @@ export async function getAffiliateSummary(affiliateId) {
           currentLevel?.bonus_amount ?? goal.current_bonus_amount
         ),
         current_bonus_type: currentLevel?.bonus_type || goal.current_bonus_type || "money",
+        path_mode: "first_wins",
+        bonus_is_single_per_level: true,
+        last_completed_path: latestRewardClaim?.winning_path || null,
+        last_completed_level_name: latestRewardClaim?.level_name || null,
         next_level_order: nextLevel?.level_order || goal.next_level_order || null,
         next_level_name: nextLevel?.name || goal.next_level_name || null,
         pending_bonus_amount: normalizeMoney(goal.pending_bonus_amount),
@@ -910,6 +976,10 @@ export async function getAffiliateSummary(affiliateId) {
         remaining_to_goal: currentGoal,
         current_bonus_amount: normalizeMoney(currentLevel?.bonus_amount ?? 20),
         current_bonus_type: currentLevel?.bonus_type || "money",
+        path_mode: "first_wins",
+        bonus_is_single_per_level: true,
+        last_completed_path: latestRewardClaim?.winning_path || null,
+        last_completed_level_name: latestRewardClaim?.level_name || null,
         next_level_order: nextLevel?.level_order || null,
         next_level_name: nextLevel?.name || null,
         pending_bonus_amount: 0,
@@ -917,7 +987,13 @@ export async function getAffiliateSummary(affiliateId) {
         total_bonus_amount: 0,
       };
 
-  const level_bonuses = bonuses.map((bonus) => ({
+  const level_bonuses = bonuses
+    .filter((bonus) => {
+      const amount = normalizeMoney(bonus?.bonus_amount);
+      const notes = String(bonus?.admin_notes || "");
+      return !(amount === 0 && notes.startsWith("[PRODUCT_GOAL_MARKER]"));
+    })
+    .map((bonus) => ({
     id: bonus.id,
     affiliate_id: bonus.affiliate_id,
     level_order: Number(bonus.level_order || 0),
@@ -1173,7 +1249,7 @@ function getConfirmedProductUnits({ target, productId, orderItems = [], orderMap
 }
 
 async function getAffiliateProductGoalContext(affiliateId) {
-  const [goalRows, activeLevels, conversions, directOrders] = await Promise.all([
+  const [goalRows, activeLevels, conversions, directOrders, rewardClaimRows] = await Promise.all([
     supabaseRequest(
       `/affiliate_goal_overview?affiliate_id=eq.${encodeURIComponent(affiliateId)}&select=*&limit=1`
     ),
@@ -1184,19 +1260,31 @@ async function getAffiliateProductGoalContext(affiliateId) {
       `/affiliate_conversions?affiliate_id=eq.${encodeURIComponent(affiliateId)}&conversion_type=eq.sale_commission&select=order_id,status&order=created_at.desc&limit=500`
     ),
     getAffiliateOrdersTableRows(affiliateId, { limit: 500 }),
+    supabaseRequest(
+      `/affiliate_level_reward_claims?affiliate_id=eq.${encodeURIComponent(
+        affiliateId
+      )}&select=id,affiliate_id,affiliate_level_id,level_order,level_name,winning_path,target_id,product_id,completion_id,product_conversion_id,standard_bonus_id,status,won_at,updated_at&order=level_order.asc`
+    ).catch(() => []),
   ]);
 
   const goal = Array.isArray(goalRows) ? goalRows[0] || null : null;
   const levels = Array.isArray(activeLevels) ? activeLevels : [];
-  const currentLevelOrder = Math.max(1, Number(goal?.current_level_order || 1));
-  const currentLevel =
-    levels.find((level) => Number(level?.level_order || 0) === currentLevelOrder) ||
+  const rewardClaims = Array.isArray(rewardClaimRows) ? rewardClaimRows : [];
+  const legacyCurrentLevelOrder = Math.max(1, Number(goal?.current_level_order || 1));
+  const legacyCurrentLevel =
+    levels.find((level) => Number(level?.level_order || 0) === legacyCurrentLevelOrder) ||
     levels.find(
       (level) =>
         normalizeStatus(level?.name) === normalizeStatus(goal?.current_level_name)
     ) ||
     levels[0] ||
     null;
+  const currentLevel =
+    pickEffectiveAffiliateLevel(
+      levels,
+      legacyCurrentLevel?.level_order || legacyCurrentLevelOrder,
+      rewardClaims
+    ) || legacyCurrentLevel;
 
   if (!currentLevel?.id) {
     return {
@@ -1205,6 +1293,9 @@ async function getAffiliateProductGoalContext(affiliateId) {
       completionsByTarget: new Map(),
       orderItems: [],
       orderMap: new Map(),
+      goal,
+      rewardClaims,
+      currentLevelClaim: null,
     };
   }
 
@@ -1261,6 +1352,12 @@ async function getAffiliateProductGoalContext(affiliateId) {
     ),
     orderItems,
     orderMap,
+    goal,
+    rewardClaims,
+    currentLevelClaim:
+      rewardClaims.find(
+        (claim) => String(claim?.affiliate_level_id || "") === String(currentLevel?.id || "")
+      ) || null,
   };
 }
 
@@ -1345,6 +1442,38 @@ function normalizeAffiliateProduct(row = {}, affiliate = {}, goalContext = {}) {
           safety_reserve_percent: roundMoney(target.safety_reserve_percent),
           applied_at: target.applied_at || null,
           updated_at: target.updated_at || null,
+          path_mode: "first_wins",
+          bonus_is_single_per_level: true,
+          winning_path: goalContext?.currentLevelClaim?.winning_path || null,
+          other_path_closed: Boolean(goalContext?.currentLevelClaim?.winning_path),
+          standard_goal: {
+            required_conversions: Math.max(
+              1,
+              Number(goalContext?.currentLevel?.required_conversions || 1)
+            ),
+            confirmed_conversions: Math.max(
+              0,
+              Number(goalContext?.goal?.paid_conversions || 0)
+            ),
+            remaining_conversions: Math.max(
+              Math.max(1, Number(goalContext?.currentLevel?.required_conversions || 1)) -
+                Math.max(0, Number(goalContext?.goal?.paid_conversions || 0)),
+              0
+            ),
+            progress_percent: Math.min(
+              Math.max(
+                (Math.max(0, Number(goalContext?.goal?.paid_conversions || 0)) /
+                  Math.max(1, Number(goalContext?.currentLevel?.required_conversions || 1))) *
+                  100,
+                0
+              ),
+              100
+            ),
+            closed: goalContext?.currentLevelClaim?.winning_path === "product_goal",
+            won: goalContext?.currentLevelClaim?.winning_path === "standard_goal",
+          },
+          product_path_closed: goalContext?.currentLevelClaim?.winning_path === "standard_goal",
+          product_path_won: goalContext?.currentLevelClaim?.winning_path === "product_goal",
           counts_only_delivered_units: true,
         }
       : null,

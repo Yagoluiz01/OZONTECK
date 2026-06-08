@@ -1,6 +1,7 @@
 import express from "express";
 import { env } from "../config/env.js";
 import { requireAdminAuth } from "../middlewares/auth.middleware.js";
+import { requireMasterAdmin } from "../middlewares/masterAdmin.middleware.js";
 
 const router = express.Router();
 
@@ -111,7 +112,7 @@ function normalizePixel(row = {}) {
   };
 }
 
-router.get("/", requireAdminAuth, async (req, res) => {
+router.get("/", requireAdminAuth, requireMasterAdmin, async (req, res) => {
   try {
     const url = new URL(`${env.supabaseUrl}/rest/v1/marketing_pixels`);
 
@@ -149,7 +150,7 @@ router.get("/", requireAdminAuth, async (req, res) => {
   }
 });
 
-router.post("/", requireAdminAuth, async (req, res) => {
+router.post("/", requireAdminAuth, requireMasterAdmin, async (req, res) => {
   try {
     const payload = normalizePixelPayload(req.body);
     const validationError = validatePixelPayload(payload);
@@ -209,7 +210,7 @@ router.post("/", requireAdminAuth, async (req, res) => {
   }
 });
 
-router.put("/:id", requireAdminAuth, async (req, res) => {
+router.put("/:id", requireAdminAuth, requireMasterAdmin, async (req, res) => {
   try {
     const id = safeString(req.params.id);
     const payload = normalizePixelPayload(req.body);
@@ -282,7 +283,7 @@ router.put("/:id", requireAdminAuth, async (req, res) => {
   }
 });
 
-router.delete("/:id", requireAdminAuth, async (req, res) => {
+router.delete("/:id", requireAdminAuth, requireMasterAdmin, async (req, res) => {
   try {
     const id = safeString(req.params.id);
 

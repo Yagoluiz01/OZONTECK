@@ -16,6 +16,12 @@ import {
 } from "../services/shipping.service.js";
 import { createActivationOfferForPaidOrder } from "../services/customerActivation.service.js";
 import { syncAffiliateCommissionLifecycleForOrder } from "../services/affiliateCommissionLifecycle.service.js";
+import { isMasterAdmin } from "../middlewares/masterAdmin.middleware.js";
+import {
+  claimOrderShippingLabelGeneration,
+  ensureOrderStockReserved,
+  releaseOrderStock,
+} from "../services/orderStock.service.js";
 
 const router = express.Router();
 
@@ -1019,6 +1025,39 @@ router.put("/:id/tracking", requireAuth, async (req, res) => {
       });
     }
 
+    if (normalizedStatus === "paid" && !isMasterAdmin(req.auth?.admin || {})) {
+      return res.status(403).json({
+        success: false,
+        message: "Somente o administrador master pode confirmar um pagamento manualmente.",
+      });
+    }
+
+    const currentPaymentStatus = String(existingOrder.payment_status || "")
+      .trim()
+      .toLowerCase();
+    const paymentIsConfirmed = ["paid", "approved", "pago", "aprovado"].includes(
+      currentPaymentStatus
+    );
+
+    if (["shipped", "delivered"].includes(normalizedStatus) && !paymentIsConfirmed) {
+      return res.status(409).json({
+        success: false,
+        message: "Não é permitido enviar ou entregar um pedido antes da confirmação do pagamento.",
+      });
+    }
+
+    if (normalizedStatus === "paid") {
+      const stockReservation = await ensureOrderStockReserved(existingOrder.id);
+
+      if (!stockReservation?.reserved) {
+        return res.status(409).json({
+          success: false,
+          message: "O estoque do pedido não está disponível. O pagamento manual não foi confirmado.",
+          details: stockReservation,
+        });
+      }
+    }
+
     const normalizedTrackingCode = pickFirstNonEmptyString(
       trackingCode,
       existingOrder.shipping_tracking_code,
@@ -1052,18 +1091,13 @@ router.put("/:id/tracking", requireAuth, async (req, res) => {
       updatePayload.delivered_at = new Date().toISOString();
     }
 
-    const currentLabelStatus = String(existingOrder.shipping_label_status || "")
-      .trim()
-      .toLowerCase();
+    let shippingLabelClaim = null;
 
-    const hasExistingShipmentId = String(existingOrder.shipping_shipment_id || "").trim();
-    const labelAlreadyInProgressOrDone =
-      Boolean(hasExistingShipmentId) ||
-      ["generated", "shipped", "posted", "delivered"].includes(currentLabelStatus);
+    if (normalizedStatus === "paid") {
+      shippingLabelClaim = await claimOrderShippingLabelGeneration(existingOrder.id);
+    }
 
-    const shouldGenerateLabel =
-      normalizedStatus === "paid" &&
-      !labelAlreadyInProgressOrDone;
+    const shouldGenerateLabel = Boolean(shippingLabelClaim?.claimed);
 
     if (shouldGenerateLabel) {
       const shippingItems = await getOrderItemsForShipping(existingOrder.id);
@@ -1111,6 +1145,7 @@ router.put("/:id/tracking", requireAuth, async (req, res) => {
         : null;
       updatePayload.shipping_label_error = labelSuccess ? "" : labelResult.error || "Erro ao gerar etiqueta";
       updatePayload.shipping_label_raw = labelResult.raw || existingOrder.shipping_label_raw || null;
+      updatePayload.shipping_label_processing_started_at = null;
 
       if (!updatePayload.shipping_carrier) {
         updatePayload.shipping_carrier = pickFirstNonEmptyString(
@@ -1135,6 +1170,21 @@ router.put("/:id/tracking", requireAuth, async (req, res) => {
     }
 
     const updatedOrder = updateResponse.data[0];
+
+    if (normalizedStatus === "cancelled") {
+      const previousStatus = String(existingOrder.order_status || "").trim().toLowerCase();
+      const hasShippingProgress =
+        ["shipped", "enviado", "delivered", "entregue"].includes(previousStatus) ||
+        Boolean(String(existingOrder.tracking_code || existingOrder.shipping_tracking_code || "").trim());
+
+      if (!hasShippingProgress) {
+        try {
+          await releaseOrderStock(existingOrder.id, "admin_order_cancelled");
+        } catch (stockReleaseError) {
+          console.error("ERRO AO DEVOLVER ESTOQUE DO PEDIDO CANCELADO:", stockReleaseError);
+        }
+      }
+    }
 
     const statusLabel = mapOrderStatusLabel(normalizedStatus);
     const eventLabel =

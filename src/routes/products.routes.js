@@ -1,11 +1,35 @@
 import express from "express";
+import crypto from "crypto";
 import jwt from "jsonwebtoken";
 import multer from "multer";
 import { env } from "../config/env.js";
 import { recordAuditLog } from "../services/audit.service.js";
 
 const router = express.Router();
-const upload = multer({ storage: multer.memoryStorage() });
+const MAX_PRODUCT_IMAGE_BYTES = 8 * 1024 * 1024;
+const ALLOWED_PRODUCT_IMAGE_MIME_TYPES = new Set([
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+  "image/gif",
+]);
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: MAX_PRODUCT_IMAGE_BYTES,
+    files: 2,
+  },
+  fileFilter(req, file, callback) {
+    if (!ALLOWED_PRODUCT_IMAGE_MIME_TYPES.has(String(file.mimetype || "").toLowerCase())) {
+      const error = new Error("Formato de imagem não permitido. Use JPG, PNG, WEBP ou GIF.");
+      error.statusCode = 400;
+      return callback(error);
+    }
+
+    return callback(null, true);
+  },
+});
 
 function toAuditMoney(value) {
   const number = Number(value);
@@ -152,6 +176,33 @@ function sanitizeFileName(name = "arquivo") {
     .toLowerCase();
 }
 
+
+function detectProductImageType(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 12) return null;
+
+  if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+    return { mimeType: "image/jpeg", extension: "jpg" };
+  }
+
+  if (buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+    return { mimeType: "image/png", extension: "png" };
+  }
+
+  if (
+    buffer.subarray(0, 4).toString("ascii") === "RIFF" &&
+    buffer.subarray(8, 12).toString("ascii") === "WEBP"
+  ) {
+    return { mimeType: "image/webp", extension: "webp" };
+  }
+
+  const gifHeader = buffer.subarray(0, 6).toString("ascii");
+  if (gifHeader === "GIF87a" || gifHeader === "GIF89a") {
+    return { mimeType: "image/gif", extension: "gif" };
+  }
+
+  return null;
+}
+
 function parseMoneyInput(value, fallback = 0) {
   if (value === undefined || value === null || value === "") return fallback;
   if (typeof value === "number") return Number.isFinite(value) && value >= 0 ? value : fallback;
@@ -201,7 +252,36 @@ function parseBoolean(value, fallback = false) {
 async function uploadImageToStorage(file) {
   if (!file) return null;
 
-  const fileName = `${Date.now()}-${sanitizeFileName(file.originalname)}`;
+  if (!Buffer.isBuffer(file.buffer) || !file.buffer.length) {
+    const error = new Error("Imagem vazia ou inválida.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (file.buffer.length > MAX_PRODUCT_IMAGE_BYTES) {
+    const error = new Error("Imagem muito grande. O limite é 8 MB por arquivo.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const detectedType = detectProductImageType(file.buffer);
+
+  if (!detectedType) {
+    const error = new Error("O conteúdo do arquivo não corresponde a uma imagem válida.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const declaredMimeType = String(file.mimetype || "").toLowerCase();
+  if (declaredMimeType && declaredMimeType !== detectedType.mimeType) {
+    const error = new Error("O tipo declarado da imagem não corresponde ao conteúdo enviado.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const originalBaseName = sanitizeFileName(file.originalname || "imagem")
+    .replace(/\.[a-z0-9]+$/i, "") || "imagem";
+  const fileName = `${Date.now()}-${crypto.randomBytes(8).toString("hex")}-${originalBaseName}.${detectedType.extension}`;
   const bucketName = "product-images";
   const uploadUrl = `${env.supabaseUrl}/storage/v1/object/${bucketName}/${fileName}`;
 
@@ -210,7 +290,7 @@ async function uploadImageToStorage(file) {
     headers: {
       apikey: env.supabaseServiceRoleKey,
       Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
-      "Content-Type": file.mimetype || "application/octet-stream",
+      "Content-Type": detectedType.mimeType,
       "x-upsert": "false",
     },
     body: file.buffer,
@@ -582,7 +662,7 @@ router.post(
           uploadedImageUrl = (await uploadImageToStorage(image1File)) || "";
         } catch (error) {
           console.error("ERRO NO UPLOAD DA IMAGEM 1:", error.message);
-          uploadedImageUrl = "";
+          throw error;
         }
       }
 
@@ -591,7 +671,7 @@ router.post(
           uploadedImageUrl2 = (await uploadImageToStorage(image2File)) || "";
         } catch (error) {
           console.error("ERRO NO UPLOAD DA IMAGEM 2:", error.message);
-          uploadedImageUrl2 = "";
+          throw error;
         }
       }
 
@@ -655,7 +735,7 @@ router.post(
     } catch (error) {
       console.error("ERRO INTERNO AO CRIAR PRODUTO:", error);
 
-      return res.status(500).json({
+      return res.status(Number(error?.statusCode || 500)).json({
         success: false,
         message: error.message || "Erro interno ao criar produto",
       });
@@ -742,6 +822,7 @@ router.put(
           finalImageUrl = (await uploadImageToStorage(image1File)) || finalImageUrl;
         } catch (error) {
           console.error("ERRO NO UPLOAD DA NOVA IMAGEM 1:", error.message);
+          throw error;
         }
       }
 
@@ -750,6 +831,7 @@ router.put(
           finalImageUrl2 = (await uploadImageToStorage(image2File)) || finalImageUrl2;
         } catch (error) {
           console.error("ERRO NO UPLOAD DA NOVA IMAGEM 2:", error.message);
+          throw error;
         }
       }
 
@@ -843,7 +925,7 @@ router.put(
     } catch (error) {
       console.error("ERRO INTERNO AO ATUALIZAR PRODUTO:", error);
 
-      return res.status(500).json({
+      return res.status(Number(error?.statusCode || 500)).json({
         success: false,
         message: error.message || "Erro interno ao atualizar produto",
       });

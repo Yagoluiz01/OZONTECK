@@ -34,6 +34,16 @@ function isDeliveredLikeStatus(value) {
   ].includes(normalizeStatus(value));
 }
 
+
+function isPaidLikeStatus(value) {
+  return [
+    "paid",
+    "approved",
+    "pago",
+    "aprovado",
+  ].includes(normalizeStatus(value));
+}
+
 function isCancelledLikeStatus(value) {
   return [
     "cancelled",
@@ -395,18 +405,25 @@ export async function syncAffiliateCommissionLifecycleForOrder(order, source = "
     isCancelledLikeStatus(paymentStatus) ||
     isCancelledLikeStatus(paymentRawStatus);
 
-  const shouldRelease =
+  const isPaymentConfirmed = isPaidLikeStatus(paymentStatus);
+  const hasDeliveryConfirmation =
     isDeliveredLikeStatus(orderStatus) ||
     isDeliveredLikeStatus(shippingStatus) ||
     isDeliveredLikeStatus(deliveryStatus) ||
     isDeliveredLikeStatus(trackingStatus) ||
     hasDeliveredAt;
 
+  // Entrega isolada nunca libera dinheiro. O pagamento também precisa estar
+  // confirmado para evitar comissão em pedido pendente, rejeitado ou estornado.
+  const shouldRelease = isPaymentConfirmed && hasDeliveryConfirmation;
+
   if (!shouldRelease && !shouldCancel) {
     return {
       success: true,
       skipped: true,
-      reason: "status_without_lifecycle_action",
+      reason: hasDeliveryConfirmation && !isPaymentConfirmed
+        ? "delivery_without_confirmed_payment"
+        : "status_without_lifecycle_action",
       orderId: order.id,
       orderStatus: order.order_status || null,
       syncTrackingStatus: order.tracking_status || order.shipping_label_raw?.sync_tracking_status || null,

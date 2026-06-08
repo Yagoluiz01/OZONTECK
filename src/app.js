@@ -2,6 +2,7 @@ import adminMarketingPixelsRoutes from "./routes/adminMarketingPixels.routes.js"
 import adminAffiliateMarketingRoutes from "./routes/adminAffiliateMarketing.routes.js";
 import affiliateMarketingRoutes from './routes/affiliateMarketing.routes.js';
 import express from "express";
+import crypto from "crypto";
 import cors from "cors";
 import helmet from "helmet";
 import morgan from "morgan";
@@ -102,15 +103,16 @@ function isTruthyEnv(value) {
 }
 
 const strictCors = isTruthyEnv(process.env.STRICT_CORS);
+const allowLocalCorsInProduction = isTruthyEnv(
+  process.env.ALLOW_LOCAL_CORS_IN_PRODUCTION
+);
 
 function isAllowedCorsOrigin(origin) {
   const normalizedOrigin = normalizeOrigin(origin);
 
+  // Requisições servidor-servidor e webhooks normalmente não enviam Origin.
+  // CORS não é mecanismo de autenticação, então elas devem continuar funcionando.
   if (!normalizedOrigin) {
-    return env.nodeEnv !== "production";
-  }
-
-  if (allowedOrigins.includes(normalizedOrigin)) {
     return true;
   }
 
@@ -119,13 +121,15 @@ function isAllowedCorsOrigin(origin) {
     normalizedOrigin.startsWith("http://127.0.0.1:") ||
     normalizedOrigin.startsWith("http://192.168.");
 
-  // Mantém o comportamento atual por padrão.
-  // Em produção final, basta definir STRICT_CORS=true no Render para bloquear localhost/LAN.
-  if (isLocalDevelopmentOrigin && !(strictCors && env.nodeEnv === "production")) {
+  if (isLocalDevelopmentOrigin) {
+    if (env.nodeEnv === "production") {
+      return allowLocalCorsInProduction && !strictCors;
+    }
+
     return true;
   }
 
-  return false;
+  return allowedOrigins.includes(normalizedOrigin);
 }
 
 const corsMiddleware = cors({
@@ -148,6 +152,7 @@ const corsMiddleware = cors({
     "X-Requested-With",
     "X-Signature",
     "X-Request-Id",
+    "X-Order-Access-Token",
     "X-ME-Attempt",
     "X-ME-Topic",
     "X-ME-Event-ID",
@@ -209,22 +214,34 @@ app.use(
 );
 
 app.use(morgan("dev"));
+
+// O webhook precisa do corpo bruto para validar a assinatura HMAC.
+// O parser fica isolado para não elevar o limite de todas as demais rotas.
 app.use(
+  "/api/integrations/melhor-envio/webhook",
   express.json({
-    limit: "80mb",
+    limit: "2mb",
     verify(req, res, buf) {
-      if (req.originalUrl?.startsWith("/api/integrations/melhor-envio/webhook")) {
-        req.rawBody = Buffer.from(buf);
-      }
+      req.rawBody = Buffer.from(buf);
     },
   })
 );
+
+// O upload legado do kit ainda usa base64 dentro de JSON. O limite maior fica
+// restrito somente a esse módulo; o próprio roteador valida 50 MB reais.
+app.use(
+  "/api/admin/affiliate-marketing",
+  express.json({ limit: "70mb" })
+);
+
+// Demais endpoints não precisam aceitar corpos gigantes em memória.
+app.use(express.json({ limit: "2mb" }));
 
 // Registra automaticamente alterações administrativas após a resposta terminar.
 // A falha da auditoria nunca bloqueia a operação principal.
 app.use(captureAdminMutationAudit);
 
-app.use("/labels", express.static(path.join(__dirname, "../public/labels")));
+app.use("/labels", express.static(path.join(__dirname, "public/labels")));
 
 app.get("/api/health", (req, res) => {
   return res.status(200).json({
@@ -277,9 +294,15 @@ app.use((req, res) => {
 });
 
 app.use((err, req, res, next) => {
-  const statusCode = err.statusCode || err.status || 500;
+  const isMulterError = err?.name === "MulterError";
+  const statusCode = Number(
+    err.statusCode ||
+      err.status ||
+      (isMulterError && err.code === "LIMIT_FILE_SIZE" ? 413 : 0) ||
+      (isMulterError ? 400 : 500)
+  );
   const isProduction = env.nodeEnv === "production";
-  const errorId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const errorId = `${Date.now().toString(36)}-${crypto.randomBytes(4).toString("hex")}`;
 
   console.error("[APP_ERROR]", {
     errorId,
@@ -293,9 +316,12 @@ app.use((err, req, res, next) => {
 
   return res.status(statusCode).json({
     success: false,
-    message: isProduction
-      ? "Erro interno no servidor."
-      : err.message || "Erro interno no servidor.",
+    message:
+      statusCode < 500
+        ? err.message || "Requisição inválida."
+        : isProduction
+          ? "Erro interno no servidor."
+          : err.message || "Erro interno no servidor.",
     errorId,
   });
 });

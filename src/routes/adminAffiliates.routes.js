@@ -1,6 +1,7 @@
 import express from "express";
 import multer from "multer";
 import { requireAdminAuth } from "../middlewares/auth.middleware.js";
+import { requireMasterAdmin } from "../middlewares/masterAdmin.middleware.js";
 import {
   listAffiliates,
   listAffiliateSummary,
@@ -180,7 +181,7 @@ router.get("/", async (req, res) => {
 /**
  * ALTERAR COMISSÃO EM MASSA
  */
-router.patch("/bulk-commission", async (req, res) => {
+router.patch("/bulk-commission", requireMasterAdmin, async (req, res) => {
   try {
     const result = await updateAffiliateCommissionBulk(
       sanitizeAffiliatePayload(req.body || {})
@@ -230,7 +231,7 @@ router.get("/levels", async (req, res) => {
 });
 
 
-router.post("/levels", async (req, res) => {
+router.post("/levels", requireMasterAdmin, async (req, res) => {
   try {
     const level = await createAffiliateLevel(req.body || {});
     return ok(res, { level }, "Meta criada com sucesso.");
@@ -239,7 +240,7 @@ router.post("/levels", async (req, res) => {
   }
 });
 
-router.patch("/levels/:levelId", async (req, res) => {
+router.patch("/levels/:levelId", requireMasterAdmin, async (req, res) => {
   try {
     const level = await updateAffiliateLevel(req.params.levelId, req.body || {});
     return ok(res, { level }, "Meta atualizada com sucesso.");
@@ -248,7 +249,7 @@ router.patch("/levels/:levelId", async (req, res) => {
   }
 });
 
-router.delete("/levels/:levelId", async (req, res) => {
+router.delete("/levels/:levelId", requireMasterAdmin, async (req, res) => {
   try {
     const level = await deleteAffiliateLevel(req.params.levelId);
     return ok(res, { level }, "Meta excluída com sucesso.");
@@ -275,7 +276,7 @@ router.get("/level-bonuses", async (req, res) => {
   }
 });
 
-router.patch("/level-bonuses/:bonusId/status", async (req, res) => {
+router.patch("/level-bonuses/:bonusId/status", requireMasterAdmin, async (req, res) => {
   try {
     const result = await updateAffiliateLevelBonusStatus(
       req.params.bonusId,
@@ -355,7 +356,7 @@ router.patch("/:id", async (req, res) => {
 /**
  * EXCLUIR AFILIADO
  */
-router.delete("/:id", async (req, res) => {
+router.delete("/:id", requireMasterAdmin, async (req, res) => {
   try {
     const affiliate = await deleteAffiliate(req.params.id);
 
@@ -400,7 +401,7 @@ router.get("/:id/payouts", async (req, res) => {
 /**
  * REGISTRAR PAGAMENTO COM COMPROVANTE
  */
-router.post("/:id/payouts", upload.single("receipt"), async (req, res) => {
+router.post("/:id/payouts", requireMasterAdmin, upload.single("receipt"), async (req, res) => {
   try {
     const payout = await createAffiliatePayout({
       ...(req.body || {}),

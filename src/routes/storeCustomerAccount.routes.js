@@ -799,13 +799,37 @@ async function requireCustomerAuth(req, res, next) {
       });
     }
 
-    req.customerAuth = {
-      id: decoded.customer_id,
-      email: normalizeEmail(decoded.email),
-    };
+    // Revalida a conta no banco em cada acesso protegido. Um token antigo
+    // deixa de funcionar imediatamente quando a conta é desativada.
+    const customer = await findCustomerById(decoded.customer_id);
 
-    next();
-  } catch {
+    if (!customer?.id || customer.account_enabled !== true) {
+      return res.status(403).json({
+        success: false,
+        message: "Conta de cliente desativada ou indisponível.",
+      });
+    }
+
+    if (normalizeEmail(customer.email) !== normalizeEmail(decoded.email)) {
+      return res.status(401).json({
+        success: false,
+        message: "Sessão de cliente inválida.",
+      });
+    }
+
+    req.customerAuth = {
+      id: customer.id,
+      email: normalizeEmail(customer.email),
+    };
+    req.customer = customer;
+
+    return next();
+  } catch (error) {
+    console.warn("[CUSTOMER_AUTH_ERROR]", {
+      message: error?.message,
+      name: error?.name,
+    });
+
     return res.status(401).json({
       success: false,
       message: "Sessão expirada. Faça login novamente.",
@@ -999,19 +1023,22 @@ router.post("/register", async (req, res) => {
 
     const existingCustomer = await findCustomerByEmail(data.email);
 
-    if (existingCustomer?.password_hash) {
+    if (existingCustomer?.id) {
       return res.status(409).json({
         success: false,
-        message: "Já existe uma conta com este e-mail. Faça login para continuar.",
+        message: existingCustomer.password_hash
+          ? "Já existe uma conta com este e-mail. Faça login para continuar."
+          : "Este e-mail já foi usado em uma compra. Entre com Google/Facebook ou solicite a ativação segura da conta.",
+        code: existingCustomer.password_hash
+          ? "CUSTOMER_ACCOUNT_EXISTS"
+          : "CUSTOMER_EMAIL_REQUIRES_VERIFICATION",
       });
     }
 
     const passwordHash = await bcrypt.hash(data.password, 12);
-    const customer = existingCustomer?.id
-      ? await updateCustomerAccount(existingCustomer.id, data, passwordHash)
-      : await createCustomerAccount(data, passwordHash);
+    const customer = await createCustomerAccount(data, passwordHash);
 
-    return res.status(existingCustomer?.id ? 200 : 201).json(
+    return res.status(201).json(
       buildAuthResponse(customer, "Conta criada com sucesso.")
     );
   } catch (error) {
@@ -1044,6 +1071,13 @@ router.post("/login", async (req, res) => {
       return res.status(401).json({
         success: false,
         message: "E-mail ou senha inválidos.",
+      });
+    }
+
+    if (customer.account_enabled !== true) {
+      return res.status(403).json({
+        success: false,
+        message: "Esta conta está desativada. Fale com o suporte para reativar o acesso.",
       });
     }
 
@@ -1080,15 +1114,7 @@ router.post("/login", async (req, res) => {
 
 router.get("/me", requireCustomerAuth, async (req, res) => {
   try {
-    const customer = await findCustomerById(req.customerAuth.id);
-
-    if (!customer?.id) {
-      return res.status(404).json({
-        success: false,
-        message: "Cliente não encontrado.",
-      });
-    }
-
+    const customer = req.customer;
     const orders = await fetchCustomerOrders(customer);
 
     return res.status(200).json({

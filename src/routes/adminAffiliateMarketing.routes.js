@@ -1,7 +1,25 @@
 import express from 'express';
+import crypto from 'crypto';
 import { env } from '../config/env.js';
+import { requireAdminAuth } from '../middlewares/auth.middleware.js';
+import { requireMasterAdmin } from '../middlewares/masterAdmin.middleware.js';
+import rateLimit from 'express-rate-limit';
 
 const router = express.Router();
+
+router.use(requireAdminAuth);
+router.use((req, res, next) => {
+  if (["GET", "HEAD", "OPTIONS"].includes(req.method)) return next();
+  return requireMasterAdmin(req, res, next);
+});
+
+const marketingUploadLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: 'Muitos uploads. Aguarde alguns minutos.' }
+});
 
 const SUPABASE_URL =
   env.supabaseUrl ||
@@ -648,6 +666,64 @@ router.delete('/trainings/:id', async (req, res) => {
 
 
 const MARKETING_KIT_BUCKET = 'affiliate-marketing-kit';
+const MAX_MARKETING_UPLOAD_BYTES = 50 * 1024 * 1024;
+const ALLOWED_MARKETING_UPLOAD_TYPES = new Map([
+  ['image/jpeg', 'jpg'],
+  ['image/png', 'png'],
+  ['image/webp', 'webp'],
+  ['image/gif', 'gif'],
+  ['video/mp4', 'mp4'],
+  ['video/webm', 'webm'],
+  ['application/pdf', 'pdf']
+]);
+
+function detectMarketingUploadType(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 4) return null;
+
+  if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+    return { mimeType: 'image/jpeg', extension: 'jpg' };
+  }
+
+  if (
+    buffer.length >= 8 &&
+    buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+  ) {
+    return { mimeType: 'image/png', extension: 'png' };
+  }
+
+  if (
+    buffer.length >= 12 &&
+    buffer.subarray(0, 4).toString('ascii') === 'RIFF' &&
+    buffer.subarray(8, 12).toString('ascii') === 'WEBP'
+  ) {
+    return { mimeType: 'image/webp', extension: 'webp' };
+  }
+
+  const gifHeader = buffer.subarray(0, 6).toString('ascii');
+  if (gifHeader === 'GIF87a' || gifHeader === 'GIF89a') {
+    return { mimeType: 'image/gif', extension: 'gif' };
+  }
+
+  if (buffer.subarray(0, 4).toString('ascii') === '%PDF') {
+    return { mimeType: 'application/pdf', extension: 'pdf' };
+  }
+
+  if (buffer.length >= 12 && buffer.subarray(4, 8).toString('ascii') === 'ftyp') {
+    return { mimeType: 'video/mp4', extension: 'mp4' };
+  }
+
+  if (
+    buffer[0] === 0x1a &&
+    buffer[1] === 0x45 &&
+    buffer[2] === 0xdf &&
+    buffer[3] === 0xa3
+  ) {
+    return { mimeType: 'video/webm', extension: 'webm' };
+  }
+
+  return null;
+}
+
 
 function sanitizeFileName(fileName = 'arquivo') {
   const cleanName = String(fileName)
@@ -679,7 +755,7 @@ function getStoragePublicUrl(objectPath) {
  *
  * Recebe arquivo em base64 vindo do admin e salva no Supabase Storage.
  */
-router.post('/uploads', async (req, res) => {
+router.post('/uploads', marketingUploadLimiter, async (req, res) => {
   try {
     const {
       fileName,
@@ -696,35 +772,64 @@ router.post('/uploads', async (req, res) => {
       });
     }
 
-    const fileSize = Number(size || 0);
-    const maxSize = 50 * 1024 * 1024;
-
-    if (fileSize > maxSize) {
-      return res.status(400).json({
-        success: false,
-        message: 'Arquivo muito grande. Envie arquivos de até 50 MB.'
-      });
-    }
-
     const cleanBase64 = String(base64).includes(',')
       ? String(base64).split(',').pop()
       : String(base64);
+    const normalizedBase64 = cleanBase64.replace(/\s+/g, '');
+    const maxEncodedLength = Math.ceil(MAX_MARKETING_UPLOAD_BYTES * 4 / 3) + 8;
 
-    const buffer = Buffer.from(cleanBase64, 'base64');
-
-    if (!buffer.length) {
+    if (!normalizedBase64 || normalizedBase64.length > maxEncodedLength) {
       return res.status(400).json({
         success: false,
-        message: 'Arquivo inválido.'
+        message: 'Arquivo muito grande ou inválido. Envie arquivos de até 50 MB.'
+      });
+    }
+
+    if (!/^[A-Za-z0-9+/]*={0,2}$/.test(normalizedBase64)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Conteúdo base64 inválido.'
+      });
+    }
+
+    const buffer = Buffer.from(normalizedBase64, 'base64');
+
+    if (!buffer.length || buffer.length > MAX_MARKETING_UPLOAD_BYTES) {
+      return res.status(400).json({
+        success: false,
+        message: 'Arquivo inválido ou maior que 50 MB.'
+      });
+    }
+
+    const detectedType = detectMarketingUploadType(buffer);
+
+    if (!detectedType || !ALLOWED_MARKETING_UPLOAD_TYPES.has(detectedType.mimeType)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Formato não permitido. Use JPG, PNG, WEBP, GIF, MP4, WEBM ou PDF.'
+      });
+    }
+
+    const declaredMimeType = String(mimeType || '').trim().toLowerCase();
+    if (
+      declaredMimeType &&
+      declaredMimeType !== 'application/octet-stream' &&
+      declaredMimeType !== detectedType.mimeType
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: 'O tipo declarado não corresponde ao conteúdo do arquivo.'
       });
     }
 
     const safeFolder = sanitizeFolder(folder);
-    const safeFileName = sanitizeFileName(fileName);
+    const safeBaseName = sanitizeFileName(fileName)
+      .replace(/\.[a-z0-9]+$/i, '') || 'arquivo';
+    const safeFileName = `${safeBaseName}.${detectedType.extension}`;
     const now = new Date();
     const year = now.getFullYear();
     const month = String(now.getMonth() + 1).padStart(2, '0');
-    const uniqueName = `${Date.now()}-${Math.random().toString(16).slice(2)}-${safeFileName}`;
+    const uniqueName = `${Date.now()}-${crypto.randomBytes(8).toString('hex')}-${safeFileName}`;
     const objectPath = `${safeFolder}/${year}/${month}/${uniqueName}`;
 
     const uploadResponse = await fetch(
@@ -734,7 +839,7 @@ router.post('/uploads', async (req, res) => {
         headers: {
           apikey: SUPABASE_SERVICE_ROLE_KEY,
           Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
-          'Content-Type': mimeType || 'application/octet-stream',
+          'Content-Type': detectedType.mimeType,
           'x-upsert': 'false'
         },
         body: buffer
@@ -767,7 +872,7 @@ router.post('/uploads', async (req, res) => {
         bucket: MARKETING_KIT_BUCKET,
         path: objectPath,
         public_url: getStoragePublicUrl(objectPath),
-        mime_type: mimeType || null,
+        mime_type: detectedType.mimeType,
         file_name: safeFileName,
         size_bytes: buffer.length
       }
