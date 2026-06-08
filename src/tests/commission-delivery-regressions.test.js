@@ -11,17 +11,51 @@ function read(relativePath) {
   return fs.readFileSync(path.join(root, relativePath), "utf8");
 }
 
-test("admin não pode confirmar entrega manualmente", () => {
+test("entrega manual exige master, motivo e confirmação explícita", () => {
   const source = read("routes/orders.routes.js");
-  assert.match(source, /normalizedStatus === "delivered" && !orderWasAlreadyDelivered[\s\S]{0,280}DELIVERY_REQUIRES_CARRIER_CONFIRMATION/);
-  assert.doesNotMatch(source, /normalizedStatus === "delivered"[\s\S]{0,100}updatePayload\.delivered_at/);
+
+  assert.match(source, /processManualDeliveryConfirmation/);
+  assert.match(source, /Somente o administrador master pode confirmar uma entrega manualmente/);
+  assert.match(source, /MANUAL_DELIVERY_CONFIRMATION_REQUIRED/);
+  assert.match(source, /MANUAL_DELIVERY_REASON_REQUIRED/);
+  assert.match(source, /confirm_order_manual_delivery/);
 });
 
-test("liberação exige fonte oficial do Melhor Envio", () => {
+test("falha no ciclo de comissão reverte a entrega manual por compensação", () => {
+  const source = read("routes/orders.routes.js");
+
+  assert.match(source, /admin_manual_delivery/);
+  assert.match(source, /revert_order_manual_delivery/);
+  assert.match(source, /MANUAL_DELIVERY_COMMISSION_FAILED_REVERTED/);
+  assert.match(source, /MANUAL_DELIVERY_COMPENSATION_FAILED/);
+});
+
+test("entrega oficial não pode ser revertida pelo painel", () => {
+  const source = read("routes/orders.routes.js");
+
+  assert.match(source, /OFFICIAL_DELIVERY_CANNOT_BE_REVERTED/);
+  assert.match(source, /Uma entrega confirmada pela transportadora não pode ser revertida/);
+});
+
+test("RPCs auditam a entrega manual e bloqueiam reversão insegura", () => {
+  const source = read("sql/manual-order-delivery-override.sql");
+
+  assert.match(source, /create or replace function public\.confirm_order_manual_delivery/);
+  assert.match(source, /confirmed_by_admin_id/);
+  assert.match(source, /previous_order_status/);
+  assert.match(source, /create or replace function public\.revert_order_manual_delivery/);
+  assert.match(source, /A transportadora já confirmou a entrega/);
+  assert.match(source, /and paid_at is not null/);
+  assert.match(source, /manual_delivery_reverted/);
+});
+
+test("liberação aceita Melhor Envio ou entrega manual auditada", () => {
   const source = read("services/affiliateCommissionLifecycle.service.js");
+
   assert.match(source, /TRUSTED_DELIVERY_RELEASE_SOURCES/);
   assert.match(source, /melhor_envio_webhook_order_delivered/);
   assert.match(source, /melhor_envio_label_sync/);
+  assert.match(source, /admin_manual_delivery/);
   assert.match(source, /const shouldRelease =[\s\S]{0,180}trustedDeliverySource/);
   assert.match(source, /delivery_source_not_trusted/);
 });

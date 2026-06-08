@@ -219,6 +219,105 @@ function pickFirstNonEmptyString(...values) {
   return "";
 }
 
+function normalizeComparableStatus(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, "_");
+}
+
+function isExplicitTrue(value) {
+  if (value === true) return true;
+
+  return ["1", "true", "yes", "sim", "on"].includes(
+    String(value || "").trim().toLowerCase()
+  );
+}
+
+function safeObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value
+    : {};
+}
+
+function getManualDeliveryAudit(order = {}) {
+  const raw = safeObject(order.shipping_label_raw);
+  const manual = safeObject(raw.manual_delivery);
+  const source = normalizeComparableStatus(manual.source);
+  const active = Boolean(
+    source === "admin_manual" &&
+      manual.active !== false &&
+      !String(manual.reverted_at || "").trim()
+  );
+
+  const officialStatuses = [
+    order.shipping_label_status,
+    raw.sync_tracking_status,
+    raw.tracking_status,
+    raw.delivery_status,
+    raw.melhor_envio_status,
+    raw.melhor_envio_webhook_event,
+    safeObject(raw.melhor_envio_webhook_data).status,
+    safeObject(raw.melhor_envio_webhook_data).event,
+  ].map(normalizeComparableStatus);
+
+  const officialDeliveredStatuses = new Set([
+    "delivered",
+    "entregue",
+    "received",
+    "recebido",
+    "delivery_completed",
+    "completed_delivery",
+    "order.delivered",
+    "shipment.delivered",
+    "delivered_to_recipient",
+    "entrega_realizada",
+    "objeto_entregue",
+  ]);
+
+  const officiallyConfirmed = officialStatuses.some((status) =>
+    officialDeliveredStatuses.has(status)
+  );
+
+  return {
+    active,
+    officiallyConfirmed,
+    source: active ? "admin_manual" : officiallyConfirmed ? "melhor_envio" : "",
+    reason: String(manual.reason || "").trim(),
+    confirmedAt: manual.confirmed_at || "",
+    confirmedByAdminId: manual.confirmed_by_admin_id || "",
+    confirmedByAdminEmail: manual.confirmed_by_admin_email || "",
+    confirmedByAdminName: manual.confirmed_by_admin_name || "",
+    revertedAt: manual.reverted_at || "",
+    revertReason: String(manual.revert_reason || "").trim(),
+    raw: manual,
+  };
+}
+
+function getRpcErrorMessage(data, fallback) {
+  if (typeof data === "string" && data.trim()) return data.trim();
+
+  return (
+    data?.message ||
+    data?.details ||
+    data?.hint ||
+    data?.error ||
+    fallback
+  );
+}
+
+function getAdminIdentity(req) {
+  const admin = req.auth?.admin || {};
+
+  return {
+    id: admin.id || null,
+    email: String(admin.email || "").trim().toLowerCase(),
+    name: pickFirstNonEmptyString(admin.full_name, admin.name, admin.email),
+  };
+}
+
 function buildFullAddress(order) {
   return {
     cep: order.shipping_cep || "",
@@ -684,6 +783,7 @@ async function addTimelineEvent(orderId, label, description) {
 }
 
 async function buildOrderDetails(order) {
+  const manualDelivery = getManualDeliveryAudit(order);
   const [items, timeline, affiliateMap, conversionMap] = await Promise.all([
     fetchOrderItemsFromRpc(order.id),
     fetchOrderTimelineFromRpc(order.id),
@@ -737,6 +837,16 @@ async function buildOrderDetails(order) {
     paid_at: order.paid_at || "",
     shipped_at: order.shipped_at || "",
     delivered_at: order.delivered_at || "",
+    delivery_source: manualDelivery.source,
+    manual_delivery_active: manualDelivery.active,
+    manual_delivery_reason: manualDelivery.reason,
+    manual_delivery_at: manualDelivery.confirmedAt,
+    manual_delivery_by_admin_id: manualDelivery.confirmedByAdminId,
+    manual_delivery_by_admin_email: manualDelivery.confirmedByAdminEmail,
+    manual_delivery_by_admin_name: manualDelivery.confirmedByAdminName,
+    manual_delivery_reverted_at: manualDelivery.revertedAt,
+    manual_delivery_revert_reason: manualDelivery.revertReason,
+    delivery_officially_confirmed: manualDelivery.officiallyConfirmed,
     notes: order.notes || "",
     admin_notes: order.admin_notes || "",
     shipping_cep: order.shipping_cep || "",
@@ -782,6 +892,20 @@ async function buildOrderDetails(order) {
     shippingLabelError: order.shipping_label_error || "",
     shippedAt: order.shipped_at ? formatDate(order.shipped_at) : "",
     deliveredAt: order.delivered_at ? formatDate(order.delivered_at) : "",
+    deliverySource: manualDelivery.source,
+    manualDeliveryActive: manualDelivery.active,
+    manualDeliveryReason: manualDelivery.reason,
+    manualDeliveryAt: manualDelivery.confirmedAt
+      ? formatDate(manualDelivery.confirmedAt)
+      : "",
+    manualDeliveryByAdminId: manualDelivery.confirmedByAdminId,
+    manualDeliveryByAdminEmail: manualDelivery.confirmedByAdminEmail,
+    manualDeliveryByAdminName: manualDelivery.confirmedByAdminName,
+    manualDeliveryRevertedAt: manualDelivery.revertedAt
+      ? formatDate(manualDelivery.revertedAt)
+      : "",
+    manualDeliveryRevertReason: manualDelivery.revertReason,
+    deliveryOfficiallyConfirmed: manualDelivery.officiallyConfirmed,
     paidAt: order.paid_at ? formatDate(order.paid_at) : "",
     notesFormatted: order.notes || "",
     adminNotes: order.admin_notes || "",
@@ -809,6 +933,301 @@ async function buildOrderDetails(order) {
       date: formatDate(event.created_at),
     })),
   };
+}
+
+
+async function processManualDeliveryConfirmation({
+  req,
+  res,
+  existingOrder,
+  trackingCode,
+  shippingCarrier,
+  note,
+  adminNotes,
+  manualDeliveryReason,
+  manualDeliveryConfirmed,
+}) {
+  if (!isMasterAdmin(req.auth?.admin || {})) {
+    return res.status(403).json({
+      success: false,
+      message: "Somente o administrador master pode confirmar uma entrega manualmente.",
+      code: "MANUAL_DELIVERY_MASTER_REQUIRED",
+    });
+  }
+
+  const reason = String(manualDeliveryReason || "").trim();
+
+  if (!isExplicitTrue(manualDeliveryConfirmed)) {
+    return res.status(400).json({
+      success: false,
+      message: "Confirme que verificou o recebimento do pedido pelo cliente.",
+      code: "MANUAL_DELIVERY_CONFIRMATION_REQUIRED",
+    });
+  }
+
+  if (reason.length < 10) {
+    return res.status(400).json({
+      success: false,
+      message: "Informe um motivo para a entrega manual com pelo menos 10 caracteres.",
+      code: "MANUAL_DELIVERY_REASON_REQUIRED",
+    });
+  }
+
+  const admin = getAdminIdentity(req);
+  const rpcResponse = await callRpc("confirm_order_manual_delivery", {
+    p_order_id: existingOrder.id,
+    p_admin_id: admin.id,
+    p_admin_email: admin.email,
+    p_admin_name: admin.name,
+    p_reason: reason,
+    p_tracking_code: String(trackingCode || "").trim() || null,
+    p_shipping_carrier: String(shippingCarrier || "").trim() || null,
+    p_admin_notes: String(adminNotes || "").trim() || null,
+  });
+
+  if (!rpcResponse.ok) {
+    return res.status(rpcResponse.status === 404 ? 404 : 409).json({
+      success: false,
+      message: getRpcErrorMessage(
+        rpcResponse.data,
+        "Não foi possível confirmar a entrega manual."
+      ),
+      code: "MANUAL_DELIVERY_RPC_FAILED",
+      details: rpcResponse.data,
+    });
+  }
+
+  const rpcResult = Array.isArray(rpcResponse.data)
+    ? rpcResponse.data[0] || {}
+    : rpcResponse.data || {};
+
+  const refreshedResponse = await fetchOrderRawById(existingOrder.id);
+  const refreshedOrder = refreshedResponse.data[0] || null;
+
+  if (!refreshedResponse.ok || !refreshedOrder) {
+    return res.status(500).json({
+      success: false,
+      message: "A entrega foi registrada, mas o pedido não pôde ser recarregado.",
+    });
+  }
+
+  let affiliateLifecycleResult = null;
+
+  try {
+    affiliateLifecycleResult = await syncAffiliateCommissionLifecycleForOrder(
+      refreshedOrder,
+      "admin_manual_delivery"
+    );
+  } catch (lifecycleError) {
+    const previousStatus = ["paid", "shipped"].includes(
+      normalizeComparableStatus(existingOrder.order_status)
+    )
+      ? normalizeComparableStatus(existingOrder.order_status)
+      : "paid";
+
+    const compensationResponse = await callRpc("revert_order_manual_delivery", {
+      p_order_id: existingOrder.id,
+      p_admin_id: admin.id,
+      p_admin_email: admin.email,
+      p_admin_name: admin.name,
+      p_reason:
+        "Compensação automática: falha ao concluir a liberação segura das comissões.",
+      p_target_status: previousStatus,
+    });
+
+    console.error("MANUAL DELIVERY COMMISSION COMPENSATION:", {
+      orderId: existingOrder.id,
+      orderNumber: existingOrder.order_number || null,
+      lifecycleError: lifecycleError?.message || String(lifecycleError),
+      lifecycleDetails: lifecycleError?.details || null,
+      compensationOk: compensationResponse.ok,
+      compensationStatus: compensationResponse.status,
+      compensationData: compensationResponse.data,
+    });
+
+    return res.status(503).json({
+      success: false,
+      message: compensationResponse.ok
+        ? "A entrega manual não foi concluída porque houve falha ao liberar as comissões. O pedido foi restaurado com segurança."
+        : "Falha crítica ao liberar as comissões e restaurar o pedido. Não tente novamente antes de verificar os logs.",
+      code: compensationResponse.ok
+        ? "MANUAL_DELIVERY_COMMISSION_FAILED_REVERTED"
+        : "MANUAL_DELIVERY_COMPENSATION_FAILED",
+      details: {
+        lifecycle: lifecycleError?.details || lifecycleError?.message || null,
+        compensation: compensationResponse.data,
+      },
+    });
+  }
+
+  if (!rpcResult.idempotent) {
+    const descriptionParts = [
+      "Entrega confirmada manualmente pelo administrador master.",
+      `Motivo: ${reason}.`,
+      admin.name ? `Responsável: ${admin.name}.` : "",
+      admin.email ? `E-mail do responsável: ${admin.email}.` : "",
+      String(trackingCode || "").trim()
+        ? `Código de rastreio: ${String(trackingCode).trim()}.`
+        : "",
+      String(shippingCarrier || "").trim()
+        ? `Transportadora: ${String(shippingCarrier).trim()}.`
+        : "",
+      String(note || "").trim(),
+    ].filter(Boolean);
+
+    const timelineResponse = await addTimelineEvent(
+      existingOrder.id,
+      "Entrega confirmada manualmente",
+      descriptionParts.join(" ")
+    );
+
+    if (!timelineResponse.ok) {
+      console.error("MANUAL DELIVERY TIMELINE ERROR:", {
+        orderId: existingOrder.id,
+        data: timelineResponse.data,
+      });
+    }
+  }
+
+  setTimeout(() => {
+    notifyOrderDelivered(refreshedOrder).catch((notificationError) => {
+      console.error("MANUAL DELIVERY NOTIFICATION ERROR:", {
+        orderId: refreshedOrder.id,
+        message: notificationError?.message || String(notificationError),
+      });
+    });
+  }, 0);
+
+  const normalizedOrder = await buildOrderDetails(refreshedOrder);
+
+  return res.status(200).json({
+    success: true,
+    message: rpcResult.idempotent
+      ? "A entrega manual já estava confirmada e o ciclo de comissões foi conferido novamente."
+      : "Entrega manual confirmada e comissões liberadas com segurança.",
+    order: normalizedOrder,
+    manualDelivery: rpcResult,
+    affiliateLifecycle: affiliateLifecycleResult,
+  });
+}
+
+async function processManualDeliveryReversal({
+  req,
+  res,
+  existingOrder,
+  targetStatus,
+  revertManualDeliveryReason,
+  revertManualDeliveryConfirmed,
+}) {
+  if (!isMasterAdmin(req.auth?.admin || {})) {
+    return res.status(403).json({
+      success: false,
+      message: "Somente o administrador master pode reverter uma entrega manual.",
+      code: "MANUAL_DELIVERY_REVERT_MASTER_REQUIRED",
+    });
+  }
+
+  const reason = String(revertManualDeliveryReason || "").trim();
+
+  if (!isExplicitTrue(revertManualDeliveryConfirmed)) {
+    return res.status(400).json({
+      success: false,
+      message: "Confirme que deseja reverter a entrega manual.",
+      code: "MANUAL_DELIVERY_REVERT_CONFIRMATION_REQUIRED",
+    });
+  }
+
+  if (reason.length < 10) {
+    return res.status(400).json({
+      success: false,
+      message: "Informe um motivo de reversão com pelo menos 10 caracteres.",
+      code: "MANUAL_DELIVERY_REVERT_REASON_REQUIRED",
+    });
+  }
+
+  const admin = getAdminIdentity(req);
+  const rpcResponse = await callRpc("revert_order_manual_delivery", {
+    p_order_id: existingOrder.id,
+    p_admin_id: admin.id,
+    p_admin_email: admin.email,
+    p_admin_name: admin.name,
+    p_reason: reason,
+    p_target_status: targetStatus,
+  });
+
+  if (!rpcResponse.ok) {
+    return res.status(rpcResponse.status === 404 ? 404 : 409).json({
+      success: false,
+      message: getRpcErrorMessage(
+        rpcResponse.data,
+        "Não foi possível reverter a entrega manual."
+      ),
+      code: "MANUAL_DELIVERY_REVERT_RPC_FAILED",
+      details: rpcResponse.data,
+    });
+  }
+
+  const refreshedResponse = await fetchOrderRawById(existingOrder.id);
+  const refreshedOrder = refreshedResponse.data[0] || null;
+
+  if (!refreshedResponse.ok || !refreshedOrder) {
+    return res.status(500).json({
+      success: false,
+      message: "A entrega foi revertida, mas o pedido não pôde ser recarregado.",
+    });
+  }
+
+  let affiliateLifecycleResult = null;
+
+  if (targetStatus === "cancelled") {
+    affiliateLifecycleResult = await syncAffiliateCommissionLifecycleForOrder(
+      refreshedOrder,
+      "admin_order_update_cancelled"
+    );
+  }
+
+  const timelineResponse = await addTimelineEvent(
+    existingOrder.id,
+    "Entrega manual revertida",
+    [
+      `Motivo: ${reason}.`,
+      `Novo status: ${mapOrderStatusLabel(targetStatus)}.`,
+      admin.name ? `Responsável: ${admin.name}.` : "",
+      admin.email ? `E-mail do responsável: ${admin.email}.` : "",
+    ]
+      .filter(Boolean)
+      .join(" ")
+  );
+
+  if (!timelineResponse.ok) {
+    console.error("MANUAL DELIVERY REVERT TIMELINE ERROR:", {
+      orderId: existingOrder.id,
+      data: timelineResponse.data,
+    });
+  }
+
+  if (targetStatus === "cancelled") {
+    setTimeout(() => {
+      notifyOrderCancelled(refreshedOrder).catch((notificationError) => {
+        console.error("MANUAL DELIVERY REVERT NOTIFICATION ERROR:", {
+          orderId: refreshedOrder.id,
+          message: notificationError?.message || String(notificationError),
+        });
+      });
+    }, 0);
+  }
+
+  const normalizedOrder = await buildOrderDetails(refreshedOrder);
+
+  return res.status(200).json({
+    success: true,
+    message: "Entrega manual revertida com segurança.",
+    order: normalizedOrder,
+    manualDeliveryReversal: Array.isArray(rpcResponse.data)
+      ? rpcResponse.data[0] || {}
+      : rpcResponse.data || {},
+    affiliateLifecycle: affiliateLifecycleResult,
+  });
 }
 
 router.get("/", requireAuth, async (req, res) => {
@@ -864,6 +1283,7 @@ router.get("/", requireAuth, async (req, res) => {
     ]);
 
     const normalizedOrders = orders.map((order) => {
+      const manualDelivery = getManualDeliveryAudit(order);
       const affiliateLink = buildAffiliateLinkInfo(
         order,
         affiliateMap.get(String(order.affiliate_id || "").trim()) || null,
@@ -900,6 +1320,14 @@ router.get("/", requireAuth, async (req, res) => {
       shipping_shipment_id: order.shipping_shipment_id || "",
       shipping_label_generated_at: order.shipping_label_generated_at || "",
       shipping_label_error: order.shipping_label_error || "",
+      delivery_source: manualDelivery.source,
+      manual_delivery_active: manualDelivery.active,
+      manual_delivery_reason: manualDelivery.reason,
+      manual_delivery_at: manualDelivery.confirmedAt,
+      manual_delivery_by_admin_id: manualDelivery.confirmedByAdminId,
+      manual_delivery_by_admin_email: manualDelivery.confirmedByAdminEmail,
+      manual_delivery_by_admin_name: manualDelivery.confirmedByAdminName,
+      delivery_officially_confirmed: manualDelivery.officiallyConfirmed,
 
       number: order.order_number,
       customerName: order.customer_name,
@@ -930,6 +1358,16 @@ router.get("/", requireAuth, async (req, res) => {
         ? formatDate(order.shipping_label_generated_at)
         : "",
       shippingLabelError: order.shipping_label_error || "",
+      deliverySource: manualDelivery.source,
+      manualDeliveryActive: manualDelivery.active,
+      manualDeliveryReason: manualDelivery.reason,
+      manualDeliveryAt: manualDelivery.confirmedAt
+        ? formatDate(manualDelivery.confirmedAt)
+        : "",
+      manualDeliveryByAdminId: manualDelivery.confirmedByAdminId,
+      manualDeliveryByAdminEmail: manualDelivery.confirmedByAdminEmail,
+      manualDeliveryByAdminName: manualDelivery.confirmedByAdminName,
+      deliveryOfficiallyConfirmed: manualDelivery.officiallyConfirmed,
       addressLine: buildAddressLine(order),
       itemsCount: orderItemCounts.get(String(order.id || "")) || 0,
     });
@@ -997,6 +1435,10 @@ router.put("/:id/tracking", requireAuth, async (req, res) => {
       note = "",
       shippingCarrier = "",
       adminNotes = "",
+      manualDeliveryReason = "",
+      manualDeliveryConfirmed = false,
+      revertManualDeliveryReason = "",
+      revertManualDeliveryConfirmed = false,
     } = req.body || {};
 
     if (!id) {
@@ -1030,15 +1472,6 @@ router.put("/:id/tracking", requireAuth, async (req, res) => {
         existingOrder.delivered_at
     );
 
-    if (normalizedStatus === "delivered" && !orderWasAlreadyDelivered) {
-      return res.status(409).json({
-        success: false,
-        message:
-          "A entrega só pode ser confirmada pelo webhook ou pela sincronização oficial do Melhor Envio.",
-        code: "DELIVERY_REQUIRES_CARRIER_CONFIRMATION",
-      });
-    }
-
     if (normalizedStatus === "paid" && !isMasterAdmin(req.auth?.admin || {})) {
       return res.status(403).json({
         success: false,
@@ -1057,6 +1490,42 @@ router.put("/:id/tracking", requireAuth, async (req, res) => {
       return res.status(409).json({
         success: false,
         message: "Não é permitido enviar ou entregar um pedido antes da confirmação do pagamento.",
+      });
+    }
+
+    const manualDeliveryAudit = getManualDeliveryAudit(existingOrder);
+
+    if (normalizedStatus === "delivered" && !orderWasAlreadyDelivered) {
+      return await processManualDeliveryConfirmation({
+        req,
+        res,
+        existingOrder,
+        trackingCode,
+        shippingCarrier,
+        note,
+        adminNotes,
+        manualDeliveryReason,
+        manualDeliveryConfirmed,
+      });
+    }
+
+    if (orderWasAlreadyDelivered && normalizedStatus !== "delivered") {
+      if (!manualDeliveryAudit.active) {
+        return res.status(409).json({
+          success: false,
+          message:
+            "Uma entrega confirmada pela transportadora não pode ser revertida pelo painel.",
+          code: "OFFICIAL_DELIVERY_CANNOT_BE_REVERTED",
+        });
+      }
+
+      return await processManualDeliveryReversal({
+        req,
+        res,
+        existingOrder,
+        targetStatus: normalizedStatus,
+        revertManualDeliveryReason,
+        revertManualDeliveryConfirmed,
       });
     }
 

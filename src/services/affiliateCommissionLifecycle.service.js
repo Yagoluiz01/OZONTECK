@@ -79,6 +79,7 @@ const TRUSTED_DELIVERY_RELEASE_SOURCES = new Set([
   "melhor_envio_webhook_order_delivered",
   "melhor_envio_label_sync",
   "melhor_envio_sync",
+  "admin_manual_delivery",
 ]);
 
 function isTrustedDeliveryReleaseSource(source) {
@@ -327,18 +328,23 @@ async function releaseAffiliateConversion(conversion, order, source) {
     released_tracking_status: order?.shipping_label_raw?.sync_tracking_status || null,
   };
 
+  const manualDelivery = normalizeStatus(source) === "admin_manual_delivery";
+  const releaseNote = manualDelivery
+    ? "Comissão liberada após confirmação manual auditada da entrega ao cliente final."
+    : "Comissão liberada automaticamente após confirmação de entrega ao cliente final.";
+
   const payloads = [
     {
       status: "released",
       released_at: now,
       metadata,
-      notes: `${conversion.notes || ""}\nComissão liberada automaticamente após confirmação de entrega ao cliente final.`.trim(),
+      notes: `${conversion.notes || ""}\n${releaseNote}`.trim(),
     },
     {
       status: "approved",
       released_at: now,
       metadata,
-      notes: `${conversion.notes || ""}\nComissão liberada automaticamente após confirmação de entrega ao cliente final.`.trim(),
+      notes: `${conversion.notes || ""}\n${releaseNote}`.trim(),
     },
   ];
 
@@ -462,8 +468,8 @@ export async function syncAffiliateCommissionLifecycleForOrder(order, source = "
   const trustedDeliverySource = isTrustedDeliveryReleaseSource(source);
 
   // A comissão só pode ser liberada quando pagamento e entrega estiverem
-  // confirmados, e a entrega tiver vindo do webhook ou da sincronização oficial
-  // do Melhor Envio. Alteração manual no admin nunca libera saldo.
+  // confirmados. A fonte precisa ser o Melhor Envio ou a confirmação manual
+  // auditada e restrita ao administrador master.
   const shouldRelease =
     isPaymentConfirmed && hasDeliveryConfirmation && trustedDeliverySource;
 
