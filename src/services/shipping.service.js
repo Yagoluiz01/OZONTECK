@@ -886,6 +886,15 @@ async function syncAffiliateCommissionAfterShippingUpdate(order, source) {
 
     const result = await syncAffiliateCommissionLifecycleForOrder(order, source);
 
+    if (result?.success === false) {
+      const error = new Error(
+        "O ciclo de comissões não foi concluído após a sincronização do Melhor Envio."
+      );
+      error.statusCode = 503;
+      error.details = result;
+      throw error;
+    }
+
     console.log(
       "AFFILIATE COMMISSION AFTER MELHOR ENVIO SYNC: " +
         JSON.stringify({
@@ -910,11 +919,11 @@ async function syncAffiliateCommissionAfterShippingUpdate(order, source) {
         })
     );
 
-    return {
-      success: false,
-      skipped: false,
-      error: error?.message || "Erro ao sincronizar comissão após Melhor Envio"
-    };
+    if (!error.statusCode) {
+      error.statusCode = 503;
+    }
+
+    throw error;
   }
 }
 
@@ -1209,7 +1218,7 @@ async function syncSingleCartCreatedOrder(order, accessToken, baseUrl) {
     }
   }
 
-  const updatedOrder = await updateOrderSyncRecord(order.id, syncUpdatePayload);
+  let updatedOrder = await updateOrderSyncRecord(order.id, syncUpdatePayload);
 
   await syncAffiliateCommissionAfterShippingUpdate(
     updatedOrder || {
@@ -1219,8 +1228,17 @@ async function syncSingleCartCreatedOrder(order, accessToken, baseUrl) {
     "melhor_envio_label_sync"
   );
 
+  // Só encerra o monitoramento automático depois que a entrega e a liberação
+  // das comissões terminarem com sucesso. Se a liberação falhar, o status fica
+  // como generated e a sincronização periódica poderá tentar novamente.
+  if (isMelhorEnvioDeliveredStatus(trackingInfo.status)) {
+    updatedOrder = await updateOrderSyncRecord(order.id, {
+      shipping_label_status: "delivered",
+      shipping_label_error: ""
+    });
+  }
 
-    const customerTrackingOrder = updatedOrder || {
+  const customerTrackingOrder = updatedOrder || {
     ...order,
     ...syncUpdatePayload
   };
@@ -1267,11 +1285,17 @@ async function syncSingleCartCreatedOrder(order, accessToken, baseUrl) {
     }
   }
 
+  const deliveryConfirmed = isMelhorEnvioDeliveredStatus(trackingInfo.status);
+
   await addOrderSyncTimeline(
     order.id,
-    "Etiqueta sincronizada automaticamente",
+    deliveryConfirmed
+      ? "Entrega confirmada pelo Melhor Envio"
+      : "Etiqueta sincronizada automaticamente",
     [
-      "Etiqueta detectada automaticamente após compra manual no Melhor Envio.",
+      deliveryConfirmed
+        ? "A transportadora confirmou a entrega ao cliente final e o ciclo de comissões foi processado."
+        : "Etiqueta detectada automaticamente após compra manual no Melhor Envio.",
       carrier ? `Transportadora: ${carrier}.` : "",
       trackingCode ? `Código de rastreio: ${trackingCode}.` : "",
       shipmentId ? `ID do envio/carrinho: ${shipmentId}.` : "",
@@ -1284,7 +1308,7 @@ async function syncSingleCartCreatedOrder(order, accessToken, baseUrl) {
   return {
     orderId: order?.id || null,
     orderNumber: order?.order_number || null,
-    status: "generated",
+    status: deliveryConfirmed ? "delivered" : "generated",
     orderStatus: updatedOrder?.order_status || syncUpdatePayload.order_status || order?.order_status || null,
     deliveredAt: updatedOrder?.delivered_at || syncUpdatePayload.delivered_at || order?.delivered_at || null,
     shipmentId,
@@ -1352,7 +1376,9 @@ export async function syncPendingMelhorEnvioLabels({
     }
   }
 
-  const updated = results.filter((item) => item.status === "generated").length;
+  const updated = results.filter((item) =>
+    ["generated", "delivered"].includes(item.status)
+  ).length;
   const pending = results.filter((item) => item.status === "cart_still_pending").length;
 
   return {

@@ -326,8 +326,15 @@ function getAdminAffiliateConversionLifecycle({ conversion = {}, order = {} } = 
     return "cancelled";
   }
 
-  if (isAdminOrderDelivered(order)) {
-    return "delivered";
+  if (isCommissionPaidLikeStatus(conversion.status)) {
+    return "paid";
+  }
+
+  if (
+    isCommissionReleasedLikeStatus(conversion.status) ||
+    Boolean(conversion.released_at)
+  ) {
+    return "released";
   }
 
   return "waiting_delivery";
@@ -476,7 +483,9 @@ async function buildSafeAffiliateSummaries(affiliateIds = []) {
       summary.recruitment_bonus_total += commission;
       summary.approved_commission += commission;
 
-      if (lifecycle === "delivered") {
+      if (lifecycle === "paid") {
+        summary.paid_commission_by_conversion += commission;
+      } else if (lifecycle === "released") {
         summary.released_commission += commission;
       }
 
@@ -490,7 +499,10 @@ async function buildSafeAffiliateSummaries(affiliateIds = []) {
 
       if (isCommissionPaidLikeStatus(conversion.status)) {
         summary.paid_commission_by_conversion += commission;
-      } else if (isCommissionReleasedLikeStatus(conversion.status)) {
+      } else if (
+        isCommissionReleasedLikeStatus(conversion.status) ||
+        Boolean(conversion.released_at)
+      ) {
         summary.released_commission += commission;
       }
 
@@ -510,13 +522,14 @@ async function buildSafeAffiliateSummaries(affiliateIds = []) {
     summary.total_referred_sales += total;
     summary.approved_commission += commission;
 
-    if (lifecycle === "delivered") {
-      summary.released_commission += commission;
+    if (lifecycle === "paid") {
+      summary.paid_commission_by_conversion += commission;
       return;
     }
 
-    if (isCommissionPaidLikeStatus(conversion.status)) {
-      summary.paid_commission_by_conversion += commission;
+    if (lifecycle === "released") {
+      summary.released_commission += commission;
+      return;
     }
 
     summary.waiting_delivery_commission += commission;
@@ -1837,7 +1850,11 @@ export async function listAffiliateBonusOverview(filters = {}) {
   }
 
   const rows = await supabaseRequest(`/affiliate_bonus_overview?${params.toString()}`);
-  return Array.isArray(rows) ? rows : [];
+  return (Array.isArray(rows) ? rows : []).filter((row) => {
+    const amount = Number(row?.bonus_amount || 0);
+    const notes = String(row?.admin_notes || "");
+    return !(amount === 0 && notes.startsWith("[PRODUCT_GOAL_MARKER]"));
+  });
 }
 
 export async function processAffiliateLevelProgress(id) {
@@ -1847,7 +1864,7 @@ export async function processAffiliateLevelProgress(id) {
     throw new Error("ID do afiliado é obrigatório.");
   }
 
-  const rows = await supabaseRequest("/rpc/process_affiliate_level_progress", {
+  const rows = await supabaseRequest("/rpc/process_affiliate_level_progress_first_wins", {
     method: "POST",
     headers: {
       Prefer: "return=representation",

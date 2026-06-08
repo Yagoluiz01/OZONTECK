@@ -407,13 +407,25 @@ function isOrderInShipping(order = {}) {
   );
 }
 
+function isConversionFormallyReleased(conversion = {}) {
+  return Boolean(conversion.released_at) || isReleasedLikeStatus(conversion.status);
+}
+
 function getAffiliateOrderLifecycle({ conversion = {}, order = {} } = {}) {
   if (isCancelledLikeStatus(conversion.status) || isOrderCancelled(order)) {
     return "cancelled";
   }
 
+  if (isPaidConversionStatus(conversion.status)) {
+    return "paid";
+  }
+
+  if (isConversionFormallyReleased(conversion)) {
+    return "released";
+  }
+
   if (isOrderDelivered(order)) {
-    return "delivered";
+    return "delivery_confirmed_pending_release";
   }
 
   if (isApprovedLikeStatus(conversion.status) || isOrderInShipping(order)) {
@@ -430,11 +442,14 @@ function getFriendlyAffiliateCommissionStatus({ conversion = {}, order = {} } = 
     return "cancelled";
   }
 
-  if (lifecycle === "delivered") {
-    return "released";
+  if (lifecycle === "released" || lifecycle === "paid") {
+    return lifecycle;
   }
 
-  if (lifecycle === "pending_shipping") {
+  if (
+    lifecycle === "pending_shipping" ||
+    lifecycle === "delivery_confirmed_pending_release"
+  ) {
     return "pending_shipping";
   }
 
@@ -823,7 +838,9 @@ export async function getAffiliateSummary(affiliateId) {
         acc.network_commission_total += commission;
         acc.recruitment_bonus_total += commission;
 
-        if (isReleasedLikeStatus(conversion.status)) {
+        if (isPaidConversionStatus(conversion.status)) {
+          acc.paid_commission_by_conversion += commission;
+        } else if (isConversionFormallyReleased(conversion)) {
           acc.released_commission += commission;
         } else {
           acc.approved_commission += commission;
@@ -837,10 +854,10 @@ export async function getAffiliateSummary(affiliateId) {
           return acc;
         }
 
-        if (isReleasedLikeStatus(conversion.status)) {
-          acc.released_commission += commission;
-        } else if (isPaidConversionStatus(conversion.status)) {
+        if (isPaidConversionStatus(conversion.status)) {
           acc.paid_commission_by_conversion += commission;
+        } else if (isConversionFormallyReleased(conversion)) {
+          acc.released_commission += commission;
         } else {
           acc.approved_commission += commission;
         }
@@ -860,10 +877,10 @@ export async function getAffiliateSummary(affiliateId) {
       acc.total_conversions += 1;
       acc.total_referred_sales += total;
 
-      if (lifecycle === "delivered") {
-        acc.released_commission += commission;
-      } else if (isPaidConversionStatus(conversion.status)) {
+      if (lifecycle === "paid") {
         acc.paid_commission_by_conversion += commission;
+      } else if (lifecycle === "released") {
+        acc.released_commission += commission;
       } else {
         /*
           A comissão criada após pagamento fica aqui até a entrega ao cliente final.

@@ -75,6 +75,36 @@ function isAlreadyReleased(value) {
   ].includes(normalizeStatus(value));
 }
 
+const TRUSTED_DELIVERY_RELEASE_SOURCES = new Set([
+  "melhor_envio_webhook_order_delivered",
+  "melhor_envio_label_sync",
+  "melhor_envio_sync",
+]);
+
+function isTrustedDeliveryReleaseSource(source) {
+  return TRUSTED_DELIVERY_RELEASE_SOURCES.has(normalizeStatus(source));
+}
+
+function isProductGoalBonusConversion(conversion = {}) {
+  return normalizeStatus(conversion.conversion_type) === "product_goal_bonus";
+}
+
+function orderExpectsAffiliateConversions(order = {}) {
+  return Boolean(
+    String(order.affiliate_id || "").trim() ||
+      String(order.affiliate_ref_code || "").trim() ||
+      Number(order.affiliate_commission_amount || 0) > 0
+  );
+}
+
+function createLifecycleError(message, details = null, statusCode = 503) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  error.code = "AFFILIATE_COMMISSION_LIFECYCLE_FAILED";
+  error.details = details;
+  return error;
+}
+
 function safeMetadata(value) {
   if (value && typeof value === "object" && !Array.isArray(value)) {
     return value;
@@ -103,13 +133,15 @@ function getCommissionAmount(conversion = {}) {
 
 function wasAlreadyReleasedByDelivery(conversion = {}) {
   const metadata = safeMetadata(conversion.metadata);
-  const status = normalizeStatus(conversion.status);
 
-  if (["paid", "pago"].includes(status)) {
+  if (isAlreadyReleased(conversion.status)) {
     return true;
   }
 
-  return Boolean(conversion.released_at && metadata.released_by_delivery);
+  return Boolean(
+    conversion.released_at &&
+      (metadata.released_by_delivery || metadata.released_by_delivery_at)
+  );
 }
 
 function getAffiliateLabel(conversion = {}) {
@@ -190,10 +222,21 @@ async function fetchAffiliateConversionsByOrderId(orderId) {
       data,
     });
 
-    return [];
+    throw createLifecycleError(
+      "Falha ao consultar as comissões do pedido.",
+      { orderId: cleanOrderId, status: response.status, data },
+      response.status >= 500 ? 503 : 500
+    );
   }
 
-  return Array.isArray(data) ? data : [];
+  if (!Array.isArray(data)) {
+    throw createLifecycleError(
+      "Resposta inválida ao consultar as comissões do pedido.",
+      { orderId: cleanOrderId, data }
+    );
+  }
+
+  return data;
 }
 
 async function patchAffiliateConversion(conversionId, payload) {
@@ -212,11 +255,15 @@ async function patchAffiliateConversion(conversionId, payload) {
 
   const data = await response.json().catch(() => []);
 
+  const rows = Array.isArray(data) ? data : [];
+  const updated = response.ok && rows.length === 1;
+
   return {
-    ok: response.ok,
+    ok: updated,
     status: response.status,
-    data: Array.isArray(data) ? data : [],
+    data: rows,
     raw: data,
+    reason: response.ok && rows.length !== 1 ? "conversion_not_updated" : null,
   };
 }
 
@@ -412,10 +459,13 @@ export async function syncAffiliateCommissionLifecycleForOrder(order, source = "
     isDeliveredLikeStatus(deliveryStatus) ||
     isDeliveredLikeStatus(trackingStatus) ||
     hasDeliveredAt;
+  const trustedDeliverySource = isTrustedDeliveryReleaseSource(source);
 
-  // Entrega isolada nunca libera dinheiro. O pagamento também precisa estar
-  // confirmado para evitar comissão em pedido pendente, rejeitado ou estornado.
-  const shouldRelease = isPaymentConfirmed && hasDeliveryConfirmation;
+  // A comissão só pode ser liberada quando pagamento e entrega estiverem
+  // confirmados, e a entrega tiver vindo do webhook ou da sincronização oficial
+  // do Melhor Envio. Alteração manual no admin nunca libera saldo.
+  const shouldRelease =
+    isPaymentConfirmed && hasDeliveryConfirmation && trustedDeliverySource;
 
   if (!shouldRelease && !shouldCancel) {
     return {
@@ -423,6 +473,8 @@ export async function syncAffiliateCommissionLifecycleForOrder(order, source = "
       skipped: true,
       reason: hasDeliveryConfirmation && !isPaymentConfirmed
         ? "delivery_without_confirmed_payment"
+        : hasDeliveryConfirmation && !trustedDeliverySource
+        ? "delivery_source_not_trusted"
         : "status_without_lifecycle_action",
       orderId: order.id,
       orderStatus: order.order_status || null,
@@ -450,12 +502,33 @@ export async function syncAffiliateCommissionLifecycleForOrder(order, source = "
       skipped: false,
       reason: "product_goal_lifecycle_error",
       error: error?.message || String(error),
+      details: error?.details || null,
     };
   }
 
   const conversions = await fetchAffiliateConversionsByOrderId(order.id);
 
   if (!conversions.length) {
+    if (shouldRelease && orderExpectsAffiliateConversions(order)) {
+      throw createLifecycleError(
+        "Pedido entregue e vinculado a afiliado, mas nenhuma comissão foi encontrada.",
+        {
+          orderId: order.id,
+          orderNumber: order.order_number || null,
+          affiliateId: order.affiliate_id || null,
+          source,
+          productGoalLifecycle,
+        }
+      );
+    }
+
+    if (productGoalLifecycle?.success === false && !productGoalLifecycle?.skipped) {
+      throw createLifecycleError(
+        "Falha ao processar o bônus de meta por produto.",
+        { orderId: order.id, source, productGoalLifecycle }
+      );
+    }
+
     return {
       success: true,
       skipped: true,
@@ -469,6 +542,16 @@ export async function syncAffiliateCommissionLifecycleForOrder(order, source = "
   const results = [];
 
   for (const conversion of conversions) {
+    if (isProductGoalBonusConversion(conversion)) {
+      results.push({
+        updated: false,
+        skipped: true,
+        reason: "managed_by_product_goal_lifecycle",
+        conversionId: conversion.id || null,
+      });
+      continue;
+    }
+
     if (shouldCancel) {
       results.push(await cancelAffiliateConversion(conversion, order, source));
       continue;
@@ -478,6 +561,9 @@ export async function syncAffiliateCommissionLifecycleForOrder(order, source = "
   }
 
   const updated = results.filter((item) => item.updated).length;
+  const failedResults = results.filter((item) => !item.updated && !item.skipped);
+  const productGoalFailed =
+    productGoalLifecycle?.success === false && !productGoalLifecycle?.skipped;
 
   console.log("AFFILIATE COMMISSION LIFECYCLE RESULT:", {
     orderId: order.id,
@@ -490,6 +576,23 @@ export async function syncAffiliateCommissionLifecycleForOrder(order, source = "
     checked: conversions.length,
     results,
   });
+
+  if (failedResults.length || productGoalFailed) {
+    throw createLifecycleError(
+      shouldCancel
+        ? "Falha ao cancelar uma ou mais comissões do pedido."
+        : "Falha ao liberar uma ou mais comissões após a entrega.",
+      {
+        orderId: order.id,
+        orderNumber: order.order_number || null,
+        source,
+        failedResults,
+        productGoalLifecycle,
+        checked: conversions.length,
+        updated,
+      }
+    );
+  }
 
   return {
     success: true,

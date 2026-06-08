@@ -44,16 +44,22 @@ test("checkout usa criação atômica e número criptográfico", () => {
   assert.match(source, /createStoreOrderAtomic\(orderPayload, orderItemsPayload\)/);
 });
 
-test("webhook Mercado Pago exige assinatura e transição atômica", () => {
+test("webhook Mercado Pago valida o pagamento na API oficial e usa transição atômica", () => {
   const source = read("routes/store.routes.js");
-  assert.match(source, /message: "Assinatura do webhook inválida\."/);
+  assert.match(source, /validateMercadoPagoWebhookSignature\(/);
+  assert.match(source, /getMercadoPagoPayment\(dataId\)/);
+  assert.match(source, /amountMatches/);
+  assert.match(source, /identityMatches/);
   assert.match(source, /applyMercadoPagoPaymentTransition\(/);
   assert.match(source, /claimOrderShippingLabelGeneration\(/);
 });
 
-test("liberação de comissão exige pagamento e entrega", () => {
+test("liberação de comissão exige pagamento, entrega e fonte oficial", () => {
   const source = read("services/affiliateCommissionLifecycle.service.js");
-  assert.match(source, /const shouldRelease = isPaymentConfirmed && hasDeliveryConfirmation/);
+  assert.match(
+    source,
+    /const shouldRelease =[\s\S]{0,180}isPaymentConfirmed[\s\S]{0,180}hasDeliveryConfirmation[\s\S]{0,180}trustedDeliverySource/
+  );
 });
 
 test("migration contém estoque, idempotência, OAuth e unicidade", () => {

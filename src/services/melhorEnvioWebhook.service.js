@@ -414,6 +414,20 @@ export async function handleMelhorEnvioWebhook({ payload, rawBody, signature }) 
   if (!match.order?.id) {
     if (delivered) {
       await notifyDeliveredWebhookOrderNotFound(payload);
+
+      const error = new Error(
+        "Entrega confirmada pelo Melhor Envio, mas o pedido correspondente não foi encontrado."
+      );
+      error.statusCode = 409;
+      error.code = "MELHOR_ENVIO_DELIVERED_ORDER_NOT_FOUND";
+      error.details = {
+        event,
+        shipmentId: payload?.data?.id || null,
+        protocol: payload?.data?.protocol || null,
+        tracking: payload?.data?.tracking || null,
+        matcherVersion: MELHOR_ENVIO_WEBHOOK_MATCHER_VERSION,
+      };
+      throw error;
     }
 
     return {
@@ -437,6 +451,18 @@ export async function handleMelhorEnvioWebhook({ payload, rawBody, signature }) 
     updatedOrder,
     delivered ? "melhor_envio_webhook_order_delivered" : "melhor_envio_webhook_order_cancelled"
   );
+
+  if (lifecycleResult?.success === false) {
+    const error = new Error(
+      delivered
+        ? "Pedido entregue, mas a liberação das comissões não foi concluída."
+        : "Pedido cancelado, mas o ciclo das comissões não foi concluído."
+    );
+    error.statusCode = 503;
+    error.code = "AFFILIATE_LIFECYCLE_NOT_COMPLETED";
+    error.details = lifecycleResult;
+    throw error;
+  }
 
   let stockReleaseResult = null;
 

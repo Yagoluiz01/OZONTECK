@@ -1025,6 +1025,20 @@ router.put("/:id/tracking", requireAuth, async (req, res) => {
       });
     }
 
+    const orderWasAlreadyDelivered = Boolean(
+      String(existingOrder.order_status || "").trim().toLowerCase() === "delivered" ||
+        existingOrder.delivered_at
+    );
+
+    if (normalizedStatus === "delivered" && !orderWasAlreadyDelivered) {
+      return res.status(409).json({
+        success: false,
+        message:
+          "A entrega só pode ser confirmada pelo webhook ou pela sincronização oficial do Melhor Envio.",
+        code: "DELIVERY_REQUIRES_CARRIER_CONFIRMATION",
+      });
+    }
+
     if (normalizedStatus === "paid" && !isMasterAdmin(req.auth?.admin || {})) {
       return res.status(403).json({
         success: false,
@@ -1085,10 +1099,6 @@ router.put("/:id/tracking", requireAuth, async (req, res) => {
 
     if (normalizedStatus === "shipped" && !existingOrder.shipped_at) {
       updatePayload.shipped_at = new Date().toISOString();
-    }
-
-    if (normalizedStatus === "delivered") {
-      updatePayload.delivered_at = new Date().toISOString();
     }
 
     let shippingLabelClaim = null;
