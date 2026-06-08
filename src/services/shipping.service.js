@@ -948,6 +948,41 @@ function isMelhorEnvioDeliveredStatus(status) {
   ].includes(normalizeShippingStatus(status));
 }
 
+function isMelhorEnvioActuallyShippedStatus(status) {
+  return [
+    "posted",
+    "postado",
+    "shipped",
+    "enviado",
+    "sent",
+    "in_transit",
+    "intransit",
+    "em_transito",
+    "collected",
+    "coletado",
+    "picked_up",
+    "pickup_completed",
+    "objeto_postado",
+    "objeto_em_transito"
+  ].includes(normalizeShippingStatus(status));
+}
+
+function getMelhorEnvioShippedAt(trackingRaw, fallback) {
+  const explicitTimestamp = pickFirstNonEmptyString(
+    trackingRaw?.posted_at,
+    trackingRaw?.shipped_at,
+    trackingRaw?.collected_at,
+    trackingRaw?.picked_up_at,
+    trackingRaw?.in_transit_at
+  );
+
+  if (explicitTimestamp && !Number.isNaN(Date.parse(explicitTimestamp))) {
+    return new Date(explicitTimestamp).toISOString();
+  }
+
+  return fallback;
+}
+
 function pickFirstNonEmptyString(...values) {
   for (const value of values) {
     const text = String(value || "").trim();
@@ -1155,13 +1190,22 @@ async function syncSingleCartCreatedOrder(order, accessToken, baseUrl) {
     syncUpdatePayload.delivered_at = order?.delivered_at || now;
 
     if (!order?.shipped_at) {
-      syncUpdatePayload.shipped_at = now;
+      syncUpdatePayload.shipped_at = getMelhorEnvioShippedAt(
+        trackingInfo.raw,
+        now
+      );
     }
-  } else if (!isOrderAlreadyFinalStatus(order?.order_status)) {
+  } else if (
+    isMelhorEnvioActuallyShippedStatus(trackingInfo.status) &&
+    !isOrderAlreadyFinalStatus(order?.order_status)
+  ) {
     syncUpdatePayload.order_status = "shipped";
 
     if (!order?.shipped_at) {
-      syncUpdatePayload.shipped_at = now;
+      syncUpdatePayload.shipped_at = getMelhorEnvioShippedAt(
+        trackingInfo.raw,
+        now
+      );
     }
   }
 
