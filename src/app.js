@@ -51,6 +51,11 @@ import { captureAdminMutationAudit } from "./middlewares/audit.middleware.js";
 
 const app = express();
 
+// A API roda atrás do proxy reverso do Render.
+// Confiar em exatamente um salto permite que req.ip e o express-rate-limit
+// identifiquem cada cliente pelo IP real, em vez de agrupar todos no IP do proxy.
+app.set("trust proxy", 1);
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
