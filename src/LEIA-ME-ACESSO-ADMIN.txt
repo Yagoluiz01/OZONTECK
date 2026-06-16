@@ -1,0 +1,44 @@
+CORREÇÃO: Solicitação de cadastro para administradores
+
+Arquivos novos/alterados nesta etapa:
+- app.js
+- routes/adminAccessRequests.routes.js
+- sql/admin-access-requests.sql
+
+O que foi criado na API:
+1. POST /api/auth/admin-register-request
+   Rota pública para solicitar cadastro de administrador.
+   Campos aceitos:
+   - full_name ou name
+   - email
+   - password
+   - confirm_password ou confirmPassword
+
+2. GET /api/admin/access-requests?status=pending
+   Lista solicitações. Exige token admin e administrador master.
+
+3. POST /api/admin/access-requests/:id/approve
+   Aprova uma solicitação. Exige token admin e administrador master.
+
+4. POST /api/admin/access-requests/:id/reject
+   Recusa uma solicitação. Exige token admin e administrador master.
+
+Antes de subir:
+1. Rode no Supabase SQL Editor:
+   sql/admin-access-requests.sql
+
+2. No Render da API, adicione a variável:
+   MASTER_ADMIN_EMAIL=seu_email_master
+
+Exemplo recomendado:
+   MASTER_ADMIN_EMAIL=ozonteck14@gmail.com
+
+Segurança:
+- A senha do novo usuário não é salva em texto puro no banco.
+- A API cria o usuário no Supabase Auth, mas ele só entra no admin se for aprovado.
+- Enquanto estiver pendente, o usuário autentica no Supabase, mas não passa no login da API porque não existe na tabela admins.
+- Somente o e-mail definido em MASTER_ADMIN_EMAIL pode listar, aprovar ou recusar solicitações.
+
+Depois da API:
+- Ainda falta aplicar a tela no painel admin: botão "Solicitar acesso" no login e uma aba/card para aprovar/recusar.
+- Para isso preciso do zip mais recente do admin.

@@ -1,0 +1,26 @@
+MELHORIA 5 - LIMPEZA TÉCNICA SEGURA DA API
+
+Arquivos alterados:
+- src/routes/auth.routes.js
+- src/app.js
+
+O que foi feito:
+- Criada rota POST /api/auth/forgot-password para solicitar recuperação de senha do admin.
+- A rota verifica se o e-mail pertence a um admin ativo antes de enviar recuperação.
+- A resposta é genérica para não expor se um e-mail existe ou não.
+- O redirect de recuperação usa:
+  ADMIN_PASSWORD_RESET_REDIRECT_URL, se existir;
+  ou ADMIN_FRONTEND_URL/reset-password;
+  ou https://ozonteck-admin.onrender.com/reset-password como fallback.
+- Logs de login ficaram menos sensíveis: não imprimem mais e-mail completo, usuário completo nem retorno completo da tabela admins.
+- A montagem de /api/auth ficou antes das rotas de solicitações de admin, reduzindo risco de rota protegida interferir no login.
+
+Não foi alterado:
+- Checkout
+- Pagamento
+- Mercado Pago
+- Melhor Envio
+- Frete
+- Comissão
+- Afiliados
+- Pedidos

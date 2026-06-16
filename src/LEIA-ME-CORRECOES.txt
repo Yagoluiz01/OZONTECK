@@ -1,0 +1,42 @@
+Correções seguras aplicadas na API OZONTECK - api(41)
+
+Arquivos alterados:
+1. app.js
+2. routes/shipping.routes.js
+3. services/melhorEnvio.service.js
+
+O que foi feito:
+- Removidas rotas duplicadas no app.js:
+  - /api/tracking estava montada duas vezes
+  - /api/store estava montada duas vezes
+  - /api/admin/financial estava montada duas vezes
+  - /api/admin/notifications estava montada duas vezes
+
+- Protegidas rotas sensíveis do Melhor Envio:
+  - GET /api/shipping/melhor-envio/connect agora exige token de admin
+  - GET /api/shipping/melhor-envio/status agora exige token de admin
+
+- Adicionado suporte opcional a state no OAuth do Melhor Envio:
+  - Se MELHOR_ENVIO_OAUTH_STATE estiver configurado no ambiente, a URL de autorização envia esse state.
+  - O callback valida o state recebido antes de salvar tokens.
+  - Se MELHOR_ENVIO_OAUTH_STATE não estiver configurado, o fluxo continua como antes para não quebrar produção.
+
+O que NÃO foi alterado:
+- Fluxo de checkout
+- Fluxo de pedidos
+- Fluxo de Mercado Pago
+- Webhook de pagamento
+- Webhook do Melhor Envio
+- Lógica de comissão
+- Lógica de liberação após entrega
+- Banco Supabase
+- Rotas de afiliados
+- Rotas da loja
+
+Validação feita:
+- node --check em todos os arquivos .js da API
+- Resultado: 0 erros de sintaxe
+
+Observação:
+- Para usar a proteção extra de OAuth state, crie a variável MELHOR_ENVIO_OAUTH_STATE no Render com um valor secreto forte.
+- Depois, reconecte o Melhor Envio usando o painel/admin.

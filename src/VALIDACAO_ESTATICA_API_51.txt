@@ -1,0 +1,131 @@
+OZONTECK API 51 - VALIDACAO ESTATICA FINAL
+Data: 2026-06-07
+
+[1] Sintaxe JavaScript
+OK: 179 arquivos JavaScript
+
+[2] Imports relativos
+OK: 173 imports relativos; ausentes: 0
+
+[3] Testes de regressao
+TAP version 13
+# Subtest: marketing administrativo exige autenticação e master nas mutações
+ok 1 - marketing administrativo exige autenticação e master nas mutações
+  ---
+  duration_ms: 1.338784
+  type: 'test'
+  ...
+# Subtest: consultas de leads exigem admin master
+ok 2 - consultas de leads exigem admin master
+  ---
+  duration_ms: 0.59978
+  type: 'test'
+  ...
+# Subtest: ações de treinamento usam a identidade do token
+ok 3 - ações de treinamento usam a identidade do token
+  ---
+  duration_ms: 0.29252
+  type: 'test'
+  ...
+# Subtest: simulação de pagamento exige master
+ok 4 - simulação de pagamento exige master
+  ---
+  duration_ms: 1.460665
+  type: 'test'
+  ...
+# Subtest: checkout usa criação atômica e número criptográfico
+ok 5 - checkout usa criação atômica e número criptográfico
+  ---
+  duration_ms: 1.800564
+  type: 'test'
+  ...
+# Subtest: webhook Mercado Pago exige assinatura e transição atômica
+ok 6 - webhook Mercado Pago exige assinatura e transição atômica
+  ---
+  duration_ms: 1.727869
+  type: 'test'
+  ...
+# Subtest: liberação de comissão exige pagamento e entrega
+ok 7 - liberação de comissão exige pagamento e entrega
+  ---
+  duration_ms: 0.288914
+  type: 'test'
+  ...
+# Subtest: migration contém estoque, idempotência, OAuth e unicidade
+ok 8 - migration contém estoque, idempotência, OAuth e unicidade
+  ---
+  duration_ms: 0.314591
+  type: 'test'
+  ...
+# Subtest: sessão administrativa é revalidada no banco
+ok 9 - sessão administrativa é revalidada no banco
+  ---
+  duration_ms: 0.403942
+  type: 'test'
+  ...
+# Subtest: cliente de checkout não pode ser reivindicado apenas pelo e-mail
+ok 10 - cliente de checkout não pode ser reivindicado apenas pelo e-mail
+  ---
+  duration_ms: 0.504763
+  type: 'test'
+  ...
+# Subtest: sessão do afiliado exige status ativo
+ok 11 - sessão do afiliado exige status ativo
+  ---
+  duration_ms: 0.619565
+  type: 'test'
+  ...
+# Subtest: OAuth do Melhor Envio usa state aleatório, expirável e de uso único
+ok 12 - OAuth do Melhor Envio usa state aleatório, expirável e de uso único
+  ---
+  duration_ms: 0.189066
+  type: 'test'
+  ...
+# Subtest: webhook do Melhor Envio não usa correspondência aproximada
+ok 13 - webhook do Melhor Envio não usa correspondência aproximada
+  ---
+  duration_ms: 0.22426
+  type: 'test'
+  ...
+# Subtest: uploads possuem limite e validação de assinatura real
+ok 14 - uploads possuem limite e validação de assinatura real
+  ---
+  duration_ms: 0.271462
+  type: 'test'
+  ...
+# Subtest: limite JSON alto fica isolado no módulo de upload
+ok 15 - limite JSON alto fica isolado no módulo de upload
+  ---
+  duration_ms: 0.18867
+  type: 'test'
+  ...
+# Subtest: produção recusa simulação de pagamento ativa
+ok 16 - produção recusa simulação de pagamento ativa
+  ---
+  duration_ms: 0.098515
+  type: 'test'
+  ...
+1..16
+# tests 16
+# suites 0
+# pass 16
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 109.255071
+
+[4] Integridade da migration
+Delimitadores dollar quote: 26
+BEGIN: 1
+COMMIT: 1
+OK: create_store_order_atomic
+OK: release_order_stock
+OK: ensure_order_stock_reserved
+OK: release_expired_order_stock_reservations
+OK: claim_order_shipping_label_generation
+OK: apply_mercado_pago_payment_transition
+
+[5] Artefatos de dependencia ausentes no pacote original
+ATENCAO: package.json ausente
+ATENCAO: lockfile ausente

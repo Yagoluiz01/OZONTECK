@@ -1,4 +1,5 @@
 import { env } from "../config/env.js";
+import { deepseek } from "../services/deepseek.service.js";
 
 const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_MODEL = "claude-sonnet-4-6";
@@ -69,6 +70,31 @@ export async function aiChat(req, res) {
       ...history,
       { role: "user", content: userMessage },
     ];
+
+
+    const completion = await deepseek.chat.completions.create({
+  model: "deepseek-chat",
+  messages: [
+    {
+      role: "system",
+      content: getSystemPrompt(req.admin),
+    },
+    ...messages,
+  ],
+  max_tokens: 200,
+});
+
+console.log(
+  "[DEEPSEEK_TEST]",
+  completion?.choices?.[0]?.message?.content
+);
+
+return res.status(200).json({
+  success: true,
+  reply:
+    completion?.choices?.[0]?.message?.content ||
+    "Sem resposta",
+});
 
     const response = await fetch(ANTHROPIC_API_URL, {
       method: "POST",

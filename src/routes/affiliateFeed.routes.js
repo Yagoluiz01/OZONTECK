@@ -6,6 +6,10 @@ import {
   listAffiliateFeedPosts,
   toggleAffiliateFeedLike,
 } from "../services/affiliateFeed.service.js";
+import {
+  createAffiliateFeedStory,
+  listAffiliateFeedStories,
+} from "../services/affiliateFeedStories.service.js";
 
 const router = express.Router();
 
@@ -56,6 +60,20 @@ function rejectLargePayload(req, res, next) {
   return next();
 }
 
+function rejectLargeStoryPayload(req, res, next) {
+  const contentLength = Number(req.headers["content-length"] || 0);
+  const maxBytes = Number(process.env.AFFILIATE_STORY_PAYLOAD_MAX_BYTES || 30 * 1024 * 1024);
+
+  if (contentLength && contentLength > maxBytes) {
+    return res.status(413).json({
+      success: false,
+      message: "Vídeo muito grande. Envie um vídeo curto e leve.",
+    });
+  }
+
+  return next();
+}
+
 function sendError(res, error) {
   const statusCode = error.statusCode || error.status || 500;
   const safeMessage = statusCode >= 500 ? "Erro interno no feed dos afiliados." : error.message;
@@ -77,6 +95,34 @@ router.get("/", readLimiter, async (req, res) => {
     return res.json({
       success: true,
       posts,
+    });
+  } catch (error) {
+    return sendError(res, error);
+  }
+});
+
+
+router.get("/stories", readLimiter, async (req, res) => {
+  try {
+    const stories = await listAffiliateFeedStories(req.affiliateId, req.query || {});
+
+    return res.json({
+      success: true,
+      stories,
+    });
+  } catch (error) {
+    return sendError(res, error);
+  }
+});
+
+router.post("/stories", rejectLargeStoryPayload, postLimiter, async (req, res) => {
+  try {
+    const story = await createAffiliateFeedStory(req.affiliate, req.body || {});
+
+    return res.status(201).json({
+      success: true,
+      message: "Story de vídeo enviado para aprovação.",
+      story,
     });
   } catch (error) {
     return sendError(res, error);
