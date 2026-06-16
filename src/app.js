@@ -1,3 +1,4 @@
+app.use("/api/admin/ai", adminAiRoutes);
 import adminMarketingPixelsRoutes from "./routes/adminMarketingPixels.routes.js";
 import adminAffiliateMarketingRoutes from "./routes/adminAffiliateMarketing.routes.js";
 import affiliateMarketingRoutes from './routes/affiliateMarketing.routes.js';
