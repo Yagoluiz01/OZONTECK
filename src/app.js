@@ -1,4 +1,4 @@
-app.use("/api/admin/ai", adminAiRoutes);
+import adminAiRoutes from "./routes/adminAi.routes.js";
 import adminMarketingPixelsRoutes from "./routes/adminMarketingPixels.routes.js";
 import adminAffiliateMarketingRoutes from "./routes/adminAffiliateMarketing.routes.js";
 import affiliateMarketingRoutes from './routes/affiliateMarketing.routes.js';
@@ -206,6 +206,7 @@ app.post("/api/store/customer/register", storeCustomerAuthLimiter);
 app.post("/api/store/shipping/quote", storeQuoteLimiter);
 app.post("/api/store/orders", storeCheckoutLimiter);
 
+
 app.use((req, res, next) => {
   if (req.path.startsWith("/api/auth") || req.path.startsWith("/api/admin")) {
     res.setHeader("Cache-Control", "no-store");
@@ -284,6 +285,7 @@ app.use("/api/settings", settingsRoutes);
 app.use("/api/shipping", shippingRoutes);
 app.use("/api/affiliate/feed", affiliateFeedRoutes);
 app.use("/api/affiliate", affiliatePortalRoutes);
+app.use("/api/admin/ai", adminAiRoutes);
 
 // Alias direto de segurança para a foto da loja do afiliado.
 // Mantém a rota funcionando mesmo se o roteador do portal não for recarregado em ambiente local.
