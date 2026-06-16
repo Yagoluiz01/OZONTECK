@@ -1,24 +1,63 @@
-import { env } from "../config/env.js";
 import { deepseek } from "../services/deepseek.service.js";
 
-const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
-const ANTHROPIC_MODEL = "claude-sonnet-4-6";
-const MAX_TOKENS = 1024;
 const MAX_HISTORY = 20;
 
 function getSystemPrompt(admin) {
   const name = admin?.fullName || admin?.email || "Administrador";
   const role = admin?.role || "admin";
 
-  return `Você é um assistente de negócios integrado ao painel administrativo da Ozonteck. Você ajuda o administrador "${name}" (função: ${role}) a analisar dados, gerar relatórios, interpretar métricas e automatizar tarefas do dia a dia.
+  return `Você é um assistente de negócios integrado ao painel administrativo da OZONTECK.
 
-Você tem conhecimento sobre:
-- Pedidos, clientes, produtos e estoque
-- Métricas financeiras, DRE, frete e precificação
-- Afiliados, cupons, banners e configurações da loja
-- Alertas operacionais e ações recomendadas
+Você auxilia o administrador "${name}" (função: ${role}) em tarefas operacionais, estratégicas e administrativas.
 
-Responda sempre em português do Brasil. Seja direto, objetivo e prático. Quando sugerir ações, indique o caminho no painel (ex: "vá em Pedidos > Filtrar por pendente"). Formate respostas longas com marcadores para facilitar a leitura.`;
+Você pode ajudar com:
+- Estratégias de vendas
+- Marketing digital
+- Gestão de afiliados
+- Atendimento ao cliente
+- Organização operacional
+- Processos internos
+- Sugestões de melhoria
+
+IMPORTANTE:
+
+Você NÃO possui acesso direto ao banco de dados da OZONTECK.
+
+Você NÃO possui acesso direto a:
+- pedidos
+- clientes
+- produtos
+- estoque
+- afiliados
+- faturamento
+- relatórios
+- métricas em tempo real
+
+Se o usuário solicitar informações sobre qualquer dado real do sistema e essas informações não forem fornecidas explicitamente pelo backend nesta conversa, responda exatamente:
+
+"Não tenho acesso aos dados reais do sistema para responder essa pergunta."
+
+NUNCA tente estimar.
+
+NUNCA tente deduzir.
+
+NUNCA invente:
+- IDs
+- pedidos
+- clientes
+- produtos
+- valores financeiros
+- faturamento
+- métricas
+- estatísticas
+
+A precisão é mais importante do que fornecer uma resposta.
+
+Responda sempre em português do Brasil.
+
+Seja direto, objetivo e prático.
+
+Quando sugerir ações administrativas, indique o caminho dentro do painel quando possível.`;
 }
 
 function sanitizeHistory(history) {
@@ -28,7 +67,11 @@ function sanitizeHistory(history) {
     .filter((msg) => {
       const role = String(msg?.role || "");
       const content = String(msg?.content || "").trim();
-      return (role === "user" || role === "assistant") && content.length > 0;
+
+      return (
+        (role === "user" || role === "assistant") &&
+        content.length > 0
+      );
     })
     .slice(-MAX_HISTORY)
     .map((msg) => ({
@@ -39,12 +82,13 @@ function sanitizeHistory(history) {
 
 export async function aiChat(req, res) {
   try {
-    const apiKey = process.env.ANTHROPIC_API_KEY;
+    const apiKey = process.env.DEEPSEEK_API_KEY;
 
     if (!apiKey) {
       return res.status(503).json({
         success: false,
-        message: "Assistente de IA não configurado. Adicione ANTHROPIC_API_KEY nas variáveis de ambiente.",
+        message:
+          "Assistente de IA não configurado. Adicione DEEPSEEK_API_KEY nas variáveis de ambiente.",
       });
     }
 
@@ -68,88 +112,28 @@ export async function aiChat(req, res) {
 
     const messages = [
       ...history,
-      { role: "user", content: userMessage },
+      {
+        role: "user",
+        content: userMessage,
+      },
     ];
 
-
     const completion = await deepseek.chat.completions.create({
-  model: "deepseek-chat",
-  messages: [
-    {
-      role: "system",
-      content: getSystemPrompt(req.admin),
-    },
-    ...messages,
-  ],
-  max_tokens: 200,
-});
-
-console.log(
-  "[DEEPSEEK_TEST]",
-  completion?.choices?.[0]?.message?.content
-);
-
-return res.status(200).json({
-  success: true,
-  reply:
-    completion?.choices?.[0]?.message?.content ||
-    "Sem resposta",
-});
-
-    const response = await fetch(ANTHROPIC_API_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: ANTHROPIC_MODEL,
-        max_tokens: MAX_TOKENS,
-        system: getSystemPrompt(req.admin),
-        messages,
-      }),
+      model: "deepseek-chat",
+      temperature: 0,
+      max_tokens: 300,
+      messages: [
+        {
+          role: "system",
+          content: getSystemPrompt(req.admin),
+        },
+        ...messages,
+      ],
     });
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error("[ADMIN_AI_ANTHROPIC_ERROR]", {
-        status: response.status,
-        body: errorText.slice(0, 300),
-      });
-
-      if (response.status === 401) {
-        return res.status(503).json({
-          success: false,
-          message: "Chave de API inválida. Verifique ANTHROPIC_API_KEY.",
-        });
-      }
-
-      if (response.status === 429) {
-        return res.status(429).json({
-          success: false,
-          message: "Limite de requisições atingido. Tente novamente em alguns segundos.",
-        });
-      }
-
-      return res.status(502).json({
-        success: false,
-        message: "Não foi possível conectar ao assistente de IA agora.",
-      });
-    }
-
-    const data = await response.json();
-    const reply = data?.content
-      ?.filter((block) => block?.type === "text")
-      ?.map((block) => block.text)
-      ?.join("") || "";
-
-    if (!reply) {
-      return res.status(502).json({
-        success: false,
-        message: "O assistente retornou uma resposta vazia.",
-      });
-    }
+    const reply =
+      completion?.choices?.[0]?.message?.content?.trim() ||
+      "Sem resposta.";
 
     return res.status(200).json({
       success: true,
