@@ -135,6 +135,11 @@ const response = await fetch(
 
 const orders = await response.json();
 
+const systemData = `
+PEDIDOS REAIS DO SISTEMA:
+${JSON.stringify(orders)}
+`;
+
 console.log("=================================");
 console.log("TESTE IA -> ORDERS");
 console.log("STATUS:", response.status);
@@ -147,13 +152,13 @@ console.log("=================================");
       model: "deepseek-chat",
       temperature: 0,
       max_tokens: 300,
-      messages: [
-        {
-          role: "system",
-          content: getSystemPrompt(req.admin),
-        },
-        ...messages,
-      ],
+     messages: [
+  {
+    role: "system",
+    content: getSystemPrompt(req.admin) + "\n\n" + systemData,
+  },
+  ...messages,
+],
     });
 
     const reply =
