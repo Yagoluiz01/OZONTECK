@@ -1,5 +1,5 @@
 import { deepseek } from "../services/deepseek.service.js";
-
+import { env } from "../config/env.js";
 const MAX_HISTORY = 20;
 
 function getSystemPrompt(admin) {
@@ -82,7 +82,7 @@ function sanitizeHistory(history) {
 
 export async function aiChat(req, res) {
   try {
-    const apiKey = process.env.DEEPSEEK_API_KEY;
+    const apiKey = env.deepseekApiKey;
 
     if (!apiKey) {
       return res.status(503).json({
@@ -117,6 +117,31 @@ export async function aiChat(req, res) {
         content: userMessage,
       },
     ];
+
+
+
+const response = await fetch(
+  `${env.supabaseUrl}/rest/v1/orders?select=id`,
+  {
+    method: "GET",
+    headers: {
+      apikey: env.supabaseServiceRoleKey,
+      Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+  }
+);
+
+const orders = await response.json();
+
+console.log("=================================");
+console.log("TESTE IA -> ORDERS");
+console.log("STATUS:", response.status);
+console.log("TOTAL ORDERS:", Array.isArray(orders) ? orders.length : 0);
+console.log("DADOS:", orders);
+console.log("=================================");
+
 
     const completion = await deepseek.chat.completions.create({
       model: "deepseek-chat",
