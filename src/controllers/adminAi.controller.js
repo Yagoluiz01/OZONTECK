@@ -6,58 +6,41 @@ function getSystemPrompt(admin) {
   const name = admin?.fullName || admin?.email || "Administrador";
   const role = admin?.role || "admin";
 
-  return `Você é um assistente de negócios integrado ao painel administrativo da OZONTECK.
+  return `
+Você é o assistente administrativo inteligente da OZONTECK.
 
-Você auxilia o administrador "${name}" (função: ${role}) em tarefas operacionais, estratégicas e administrativas.
+Você auxilia o administrador:
 
-Você pode ajudar com:
-- Estratégias de vendas
-- Marketing digital
-- Gestão de afiliados
-- Atendimento ao cliente
-- Organização operacional
-- Processos internos
-- Sugestões de melhoria
+Nome: ${name}
+Função: ${role}
+
+Você possui acesso aos dados enviados pelo backend desta conversa.
 
 IMPORTANTE:
 
-Você NÃO possui acesso direto ao banco de dados da OZONTECK.
+Sempre considere os dados recebidos no prompt do sistema como dados reais do sistema.
 
-Você NÃO possui acesso direto a:
+Quando houver informações de:
 - pedidos
 - clientes
 - produtos
-- estoque
 - afiliados
+- estoque
 - faturamento
 - relatórios
-- métricas em tempo real
 
-Se o usuário solicitar informações sobre qualquer dado real do sistema e essas informações não forem fornecidas explicitamente pelo backend nesta conversa, responda exatamente:
+Você deve utilizar esses dados para responder.
 
-"Não tenho acesso aos dados reais do sistema para responder essa pergunta."
+Nunca diga que não possui acesso aos dados se eles foram enviados pelo backend.
 
-NUNCA tente estimar.
+Nunca invente dados inexistentes.
 
-NUNCA tente deduzir.
-
-NUNCA invente:
-- IDs
-- pedidos
-- clientes
-- produtos
-- valores financeiros
-- faturamento
-- métricas
-- estatísticas
-
-A precisão é mais importante do que fornecer uma resposta.
+Se uma informação não estiver presente nos dados recebidos, informe apenas que ela não foi encontrada.
 
 Responda sempre em português do Brasil.
 
-Seja direto, objetivo e prático.
-
-Quando sugerir ações administrativas, indique o caminho dentro do painel quando possível.`;
+Seja objetivo, preciso e útil.
+`;
 }
 
 function sanitizeHistory(history) {
@@ -121,7 +104,7 @@ export async function aiChat(req, res) {
 
 
 const response = await fetch(
-  `${env.supabaseUrl}/rest/v1/orders?select=id`,
+  `${env.supabaseUrl}/rest/v1/orders?select=*`,
   {
     method: "GET",
     headers: {
@@ -136,8 +119,10 @@ const response = await fetch(
 const orders = await response.json();
 
 const systemData = `
-PEDIDOS REAIS DO SISTEMA:
-${JSON.stringify(orders)}
+DADOS REAIS DA OZONTECK
+
+PEDIDOS:
+${JSON.stringify(orders, null, 2)}
 `;
 
 console.log("=================================");
@@ -146,7 +131,8 @@ console.log("STATUS:", response.status);
 console.log("TOTAL ORDERS:", Array.isArray(orders) ? orders.length : 0);
 console.log("DADOS:", orders);
 console.log("=================================");
-
+console.log("SYSTEM DATA:");
+console.log(systemData);
 
     const completion = await deepseek.chat.completions.create({
       model: "deepseek-chat",
