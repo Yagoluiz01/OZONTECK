@@ -40,7 +40,7 @@ export const env = {
   supabaseAnonKey: process.env.SUPABASE_ANON_KEY,
   jwtSecret: process.env.JWT_SECRET,
   frontendUrl: process.env.FRONTEND_URL,
-
+  deepseekApiKey: process.env.DEEPSEEK_API_KEY || "",
   apiBaseUrl: process.env.API_BASE_URL || "",
 
   mercadoPagoAccessToken: process.env.MERCADO_PAGO_ACCESS_TOKEN || "",
