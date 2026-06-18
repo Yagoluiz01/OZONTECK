@@ -64,7 +64,7 @@ function sanitizeHistory(history) {
     }));
 }
 
-async function fetchTable(table, select = "*", limit = 20) {
+async function fetchTable(table, select = "*", limit = 1000) {
   try {
     const response = await fetch(
       `${env.supabaseUrl}/rest/v1/${table}?select=${select}&limit=${limit}`,
