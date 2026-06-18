@@ -80,7 +80,7 @@ async function fetchTable(table, select = "*", limit = 1000) {
     );
 
     if (!response.ok) {
-      console.log(`Erro ao buscar tabela ${table}:`, response.status);
+      console.error(`Erro ao buscar tabela ${table}:`, response.status);
       return [];
     }
 
@@ -98,9 +98,12 @@ async function buildSystemData() {
     fetchTable("products"),
   ]);
 
+  console.log("=================================");
+  console.log("DADOS DA IA");
   console.log("ORDERS:", orders.length);
   console.log("CUSTOMERS:", customers.length);
   console.log("PRODUCTS:", products.length);
+  console.log("=================================");
 
   return `
 DADOS REAIS DA OZONTECK
@@ -120,4 +123,79 @@ ${JSON.stringify(customers.slice(0, 10), null, 2)}
 PRODUTOS:
 ${JSON.stringify(products, null, 2)}
 `;
+}
+
+export async function aiChat(req, res) {
+  try {
+    const apiKey = env.deepseekApiKey;
+
+    if (!apiKey) {
+      return res.status(503).json({
+        success: false,
+        message:
+          "Assistente de IA não configurado. Adicione DEEPSEEK_API_KEY nas variáveis de ambiente.",
+      });
+    }
+
+    const userMessage = String(req.body?.message || "").trim();
+
+    if (!userMessage) {
+      return res.status(400).json({
+        success: false,
+        message: "Mensagem não pode estar vazia.",
+      });
+    }
+
+    if (userMessage.length > 4000) {
+      return res.status(400).json({
+        success: false,
+        message: "Mensagem muito longa. Limite de 4000 caracteres.",
+      });
+    }
+
+    const history = sanitizeHistory(req.body?.history);
+
+    const messages = [
+      ...history,
+      {
+        role: "user",
+        content: userMessage,
+      },
+    ];
+
+    const systemData = await buildSystemData();
+
+    const completion = await deepseek.chat.completions.create({
+      model: "deepseek-chat",
+      temperature: 0,
+      max_tokens: 500,
+      messages: [
+        {
+          role: "system",
+          content: getSystemPrompt(req.admin) + "\n\n" + systemData,
+        },
+        ...messages,
+      ],
+    });
+
+    const reply =
+      completion?.choices?.[0]?.message?.content?.trim() ||
+      "Sem resposta.";
+
+    return res.status(200).json({
+      success: true,
+      reply,
+    });
+  } catch (error) {
+    console.error("[ADMIN_AI_CHAT_ERROR]", {
+      message: error?.message,
+      name: error?.name,
+      stack: error?.stack,
+    });
+
+    return res.status(500).json({
+      success: false,
+      message: "Erro interno ao processar sua mensagem.",
+    });
+  }
 }
