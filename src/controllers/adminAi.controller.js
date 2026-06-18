@@ -1,5 +1,6 @@
 import { deepseek } from "../services/deepseek.service.js";
 import { env } from "../config/env.js";
+
 const MAX_HISTORY = 20;
 
 function getSystemPrompt(admin) {
@@ -63,6 +64,64 @@ function sanitizeHistory(history) {
     }));
 }
 
+async function fetchTable(table, select = "*", limit = 20) {
+  try {
+    const response = await fetch(
+      `${env.supabaseUrl}/rest/v1/${table}?select=${select}&limit=${limit}`,
+      {
+        method: "GET",
+        headers: {
+          apikey: env.supabaseServiceRoleKey,
+          Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+      }
+    );
+
+    if (!response.ok) {
+      console.log(`Erro ao buscar tabela ${table}:`, response.status);
+      return [];
+    }
+
+    return await response.json();
+  } catch (error) {
+    console.error(`Erro na tabela ${table}:`, error?.message);
+    return [];
+  }
+}
+
+async function buildSystemData() {
+  const [orders, customers, products] = await Promise.all([
+    fetchTable("orders"),
+    fetchTable("customers"),
+    fetchTable("products"),
+  ]);
+
+  console.log("ORDERS:", orders.length);
+  console.log("CUSTOMERS:", customers.length);
+  console.log("PRODUCTS:", products.length);
+
+  return `
+DADOS REAIS DA OZONTECK
+
+RESUMO:
+
+TOTAL_PEDIDOS: ${orders.length}
+TOTAL_CLIENTES: ${customers.length}
+TOTAL_PRODUTOS: ${products.length}
+
+ULTIMOS_PEDIDOS:
+${JSON.stringify(orders.slice(0, 10), null, 2)}
+
+ULTIMOS_CLIENTES:
+${JSON.stringify(customers.slice(0, 10), null, 2)}
+
+PRODUTOS:
+${JSON.stringify(products.slice(0, 20), null, 2)}
+`;
+}
+
 export async function aiChat(req, res) {
   try {
     const apiKey = env.deepseekApiKey;
@@ -101,50 +160,24 @@ export async function aiChat(req, res) {
       },
     ];
 
+    const systemData = await buildSystemData();
 
-
-const response = await fetch(
-  `${env.supabaseUrl}/rest/v1/orders?select=*`,
-  {
-    method: "GET",
-    headers: {
-      apikey: env.supabaseServiceRoleKey,
-      Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
-      "Content-Type": "application/json",
-      Accept: "application/json",
-    },
-  }
-);
-
-const orders = await response.json();
-
-const systemData = `
-DADOS REAIS DA OZONTECK
-
-PEDIDOS:
-${JSON.stringify(orders, null, 2)}
-`;
-
-console.log("=================================");
-console.log("TESTE IA -> ORDERS");
-console.log("STATUS:", response.status);
-console.log("TOTAL ORDERS:", Array.isArray(orders) ? orders.length : 0);
-console.log("DADOS:", orders);
-console.log("=================================");
-console.log("SYSTEM DATA:");
-console.log(systemData);
+    console.log("=================================");
+    console.log("SYSTEM DATA");
+    console.log(systemData);
+    console.log("=================================");
 
     const completion = await deepseek.chat.completions.create({
       model: "deepseek-chat",
       temperature: 0,
       max_tokens: 300,
-     messages: [
-  {
-    role: "system",
-    content: getSystemPrompt(req.admin) + "\n\n" + systemData,
-  },
-  ...messages,
-],
+      messages: [
+        {
+          role: "system",
+          content: getSystemPrompt(req.admin) + "\n\n" + systemData,
+        },
+        ...messages,
+      ],
     });
 
     const reply =
@@ -159,6 +192,7 @@ console.log(systemData);
     console.error("[ADMIN_AI_CHAT_ERROR]", {
       message: error?.message,
       name: error?.name,
+      stack: error?.stack,
     });
 
     return res.status(500).json({
