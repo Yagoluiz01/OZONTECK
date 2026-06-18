@@ -118,9 +118,7 @@ ULTIMOS_CLIENTES:
 ${JSON.stringify(customers.slice(0, 10), null, 2)}
 
 PRODUTOS:
-${JSON.stringify(products.slice(0, 20), null, 2)}
-`;
-}
+${JSON.stringify(products, null, 2)}
 
 export async function aiChat(req, res) {
   try {
