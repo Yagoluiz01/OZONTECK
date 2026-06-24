@@ -1,3 +1,4 @@
+import reportRoutes from "./routes/report.routes.js";
 import adminAiRoutes from "./routes/adminAi.routes.js";
 import adminMarketingPixelsRoutes from "./routes/adminMarketingPixels.routes.js";
 import adminAffiliateMarketingRoutes from "./routes/adminAffiliateMarketing.routes.js";
@@ -263,6 +264,7 @@ app.use("/api/store/customer", storeCustomerAccountRoutes);
 app.use("/api/store", storeRoutes);
 app.use("/api/integrations/melhor-envio", melhorEnvioWebhookRoutes);
 
+
 app.use("/api/admin/store-theme", adminStoreThemeRoutes);
 app.use("/api/admin/marketing-pixels", adminMarketingPixelsRoutes);
 app.use("/api/admin/affiliate-marketing", adminAffiliateMarketingRoutes);
@@ -278,6 +280,7 @@ app.use("/api/auth", authRoutes);
 app.use("/api", adminAccessRequestsRoutes);
 app.use("/api/admin/push", adminPushRoutes);
 app.use("/api/products", productsRoutes);
+app.use("/api/reports", reportRoutes);
 app.use("/api/categories", categoriesRoutes);
 app.use("/api/orders", ordersRoutes);
 app.use("/api/customers", customersRoutes);
@@ -286,6 +289,7 @@ app.use("/api/shipping", shippingRoutes);
 app.use("/api/affiliate/feed", affiliateFeedRoutes);
 app.use("/api/affiliate", affiliatePortalRoutes);
 app.use("/api/admin/ai", adminAiRoutes);
+app.use("/api/admin/reports", reportRoutes);
 
 // Alias direto de segurança para a foto da loja do afiliado.
 // Mantém a rota funcionando mesmo se o roteador do portal não for recarregado em ambiente local.
