@@ -98,6 +98,28 @@ async function buildSystemData() {
     fetchTable("products"),
   ]);
 
+
+  const activeProducts = products.filter(
+  (p) => p.status === "active"
+);
+
+const inactiveProducts = products.filter(
+  (p) => p.status === "inactive"
+);
+
+const draftProducts = products.filter(
+  (p) => p.status === "draft"
+);
+
+const lowStockProducts = products.filter((p) => {
+  const stock = Number(p.stock_quantity || 0);
+  return stock > 0 && stock <= 5;
+});
+
+const outOfStockProducts = products.filter(
+  (p) => Number(p.stock_quantity || 0) === 0
+);
+
   console.log("=================================");
   console.log("DADOS DA IA");
   console.log("ORDERS:", orders.length);
@@ -112,13 +134,41 @@ RESUMO:
 
 TOTAL_PEDIDOS: ${orders.length}
 TOTAL_CLIENTES: ${customers.length}
+
 TOTAL_PRODUTOS: ${products.length}
+PRODUTOS_ATIVOS: ${activeProducts.length}
+PRODUTOS_INATIVOS: ${inactiveProducts.length}
+PRODUTOS_DRAFT: ${draftProducts.length}
+
+PRODUTOS_ESTOQUE_BAIXO: ${lowStockProducts.length}
+PRODUTOS_SEM_ESTOQUE: ${outOfStockProducts.length}
 
 ULTIMOS_PEDIDOS:
 ${JSON.stringify(orders.slice(0, 10), null, 2)}
 
 ULTIMOS_CLIENTES:
 ${JSON.stringify(customers.slice(0, 10), null, 2)}
+
+
+ESTOQUE_BAIXO:
+${JSON.stringify(
+  lowStockProducts.map((p) => ({
+    name: p.name,
+    stock: p.stock_quantity,
+  })),
+  null,
+  2
+)}
+
+SEM_ESTOQUE:
+${JSON.stringify(
+  outOfStockProducts.map((p) => ({
+    name: p.name,
+    stock: p.stock_quantity,
+  })),
+  null,
+  2
+)}
 
 PRODUTOS:
 ${JSON.stringify(products, null, 2)}
@@ -185,6 +235,21 @@ INDICADORES:
 CONCLUSÃO:
 
 Use exclusivamente os dados enviados pelo backend.
+
+NUNCA conte produtos manualmente.
+
+NUNCA calcule indicadores por conta própria.
+
+Utilize exatamente os valores:
+
+TOTAL_PRODUTOS
+PRODUTOS_ATIVOS
+PRODUTOS_INATIVOS
+PRODUTOS_DRAFT
+PRODUTOS_ESTOQUE_BAIXO
+PRODUTOS_SEM_ESTOQUE
+
+Se esses valores estiverem presentes, utilize-os sem recalcular.
 `;
 }
 
