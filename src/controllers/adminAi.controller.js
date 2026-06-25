@@ -139,6 +139,11 @@ export async function aiChat(req, res) {
 
     const userMessage = String(req.body?.message || "").trim();
 
+
+    const isReportRequest =
+  userMessage.toLowerCase().includes("relatório") ||
+  userMessage.toLowerCase().includes("relatorio");
+
     if (!userMessage) {
       return res.status(400).json({
         success: false,
@@ -165,6 +170,24 @@ export async function aiChat(req, res) {
 
     const systemData = await buildSystemData();
 
+
+    let reportInstructions = "";
+
+if (isReportRequest) {
+  reportInstructions = `
+O usuário está solicitando um relatório.
+
+Retorne o relatório em formato estruturado:
+
+TÍTULO:
+RESUMO:
+INDICADORES:
+CONCLUSÃO:
+
+Use exclusivamente os dados enviados pelo backend.
+`;
+}
+
     const completion = await deepseek.chat.completions.create({
       model: "deepseek-chat",
       temperature: 0,
@@ -172,7 +195,12 @@ export async function aiChat(req, res) {
       messages: [
         {
           role: "system",
-          content: getSystemPrompt(req.admin) + "\n\n" + systemData,
+          content:
+  getSystemPrompt(req.admin) +
+  "\n\n" +
+  systemData +
+  "\n\n" +
+  reportInstructions,
         },
         ...messages,
       ],
