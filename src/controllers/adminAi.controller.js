@@ -190,6 +190,27 @@ export async function aiChat(req, res) {
     const userMessage = String(req.body?.message || "").trim();
 
 
+
+    const lowerMessage = userMessage.toLowerCase();
+
+const wantsExcel =
+  lowerMessage.includes("excel") ||
+  lowerMessage.includes("xlsx") ||
+  lowerMessage.includes("planilha");
+
+const wantsPdf =
+  lowerMessage.includes("pdf");
+
+const wantsProductsReport =
+  lowerMessage.includes("produto");
+
+const wantsCustomersReport =
+  lowerMessage.includes("cliente");
+
+const wantsOrdersReport =
+  lowerMessage.includes("pedido");
+
+
     const isReportRequest =
   userMessage.toLowerCase().includes("relatório") ||
   userMessage.toLowerCase().includes("relatorio");
@@ -251,6 +272,19 @@ PRODUTOS_SEM_ESTOQUE
 
 Se esses valores estiverem presentes, utilize-os sem recalcular.
 `;
+}
+
+
+
+if (wantsExcel && wantsProductsReport) {
+  return res.status(200).json({
+    success: true,
+    action: "download_report",
+    reportType: "products",
+    format: "excel",
+    downloadUrl: "/api/reports/products/excel",
+    message: "Relatório pronto para download."
+  });
 }
 
     const completion = await deepseek.chat.completions.create({
