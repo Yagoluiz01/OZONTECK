@@ -31,6 +31,13 @@ export async function generateProductsReport(req, res) {
 
     const worksheet = workbook.addWorksheet("Produtos");
 
+    worksheet.views = [
+  {
+    state: "frozen",
+    ySplit: 1,
+  },
+];
+
     worksheet.columns = [
       { header: "ID", key: "id", width: 40 },
       { header: "Produto", key: "name", width: 45 },
@@ -57,6 +64,8 @@ export async function generateProductsReport(req, res) {
       horizontal: "center",
     };
 
+    headerRow.height = 25;
+
     products.forEach((product) => {
       worksheet.addRow({
         id: product.id,
@@ -78,11 +87,20 @@ export async function generateProductsReport(req, res) {
       },
     ];
 
-    worksheet.eachRow((row) => {
-      row.alignment = {
-        vertical: "middle",
-      };
-    });
+   worksheet.eachRow((row) => {
+  row.alignment = {
+    vertical: "middle",
+  };
+
+  row.eachCell((cell) => {
+    cell.border = {
+      top: { style: "thin" },
+      left: { style: "thin" },
+      bottom: { style: "thin" },
+      right: { style: "thin" },
+    };
+  });
+});
 
     res.setHeader(
       "Content-Type",
