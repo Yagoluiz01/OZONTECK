@@ -215,6 +215,9 @@ const wantsOrdersReport =
   lowerMessage.includes("pedido");
 
 
+  console.log("wantsExcel:", wantsExcel);
+console.log("wantsProductsReport:", wantsProductsReport);
+
     const isReportRequest =
   userMessage.toLowerCase().includes("relatório") ||
   userMessage.toLowerCase().includes("relatorio");
@@ -281,13 +284,15 @@ Se esses valores estiverem presentes, utilize-os sem recalcular.
 
 
 if (wantsExcel && wantsProductsReport) {
+
+  console.log("ENTROU NO DOWNLOAD REPORT");
+
   return res.status(200).json({
     success: true,
     action: "download_report",
     reportType: "products",
     format: "excel",
-    downloadUrl: "/api/reports/products/excel",
-    message: "Relatório pronto para download."
+    downloadUrl: "/api/reports/products/excel"
   });
 }
 
