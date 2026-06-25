@@ -193,6 +193,10 @@ export async function aiChat(req, res) {
 
     const lowerMessage = userMessage.toLowerCase();
 
+    console.log("=================================");
+    console.log("MENSAGEM RECEBIDA:", userMessage);
+    console.log("=================================");
+
 const wantsExcel =
   lowerMessage.includes("excel") ||
   lowerMessage.includes("xlsx") ||
