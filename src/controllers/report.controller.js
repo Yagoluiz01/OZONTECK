@@ -26,20 +26,35 @@ export async function generateProductsReport(req, res) {
     const workbook = new ExcelJS.Workbook();
 
     workbook.creator = "OZONTECK";
+    workbook.company = "OZONTECK";
     workbook.created = new Date();
 
     const worksheet = workbook.addWorksheet("Produtos");
 
     worksheet.columns = [
       { header: "ID", key: "id", width: 40 },
-      { header: "Produto", key: "name", width: 40 },
+      { header: "Produto", key: "name", width: 45 },
       { header: "Status", key: "status", width: 15 },
       { header: "Estoque", key: "stock_quantity", width: 15 },
     ];
 
-    worksheet.getRow(1).font = {
+    const headerRow = worksheet.getRow(1);
+
+    headerRow.font = {
       bold: true,
+      color: { argb: "FFFFFFFF" },
       size: 12,
+    };
+
+    headerRow.fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FF1F2937" },
+    };
+
+    headerRow.alignment = {
+      vertical: "middle",
+      horizontal: "center",
     };
 
     products.forEach((product) => {
@@ -47,8 +62,26 @@ export async function generateProductsReport(req, res) {
         id: product.id,
         name: product.name,
         status: product.status,
-        stock_quantity: product.stock_quantity,
+        stock_quantity: product.stock_quantity ?? 0,
       });
+    });
+
+    worksheet.autoFilter = {
+      from: "A1",
+      to: "D1",
+    };
+
+    worksheet.views = [
+      {
+        state: "frozen",
+        ySplit: 1,
+      },
+    ];
+
+    worksheet.eachRow((row) => {
+      row.alignment = {
+        vertical: "middle",
+      };
     });
 
     res.setHeader(
