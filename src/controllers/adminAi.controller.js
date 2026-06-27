@@ -208,6 +208,7 @@ const wantsPdf =
 const wantsProductsReport =
   lowerMessage.includes("produto");
 
+
 const wantsCustomersReport =
   lowerMessage.includes("cliente");
 
@@ -295,6 +296,16 @@ if (wantsExcel && wantsProductsReport) {
     downloadUrl: "/api/reports/products/excel"
   });
 }
+
+
+
+if (wantsPdf && wantsProductsReport) {
+  return res.json({
+    action: "download_report",
+    downloadUrl: "/api/reports/products/pdf",
+  });
+}
+
 
     const completion = await deepseek.chat.completions.create({
       model: "deepseek-chat",
