@@ -1,4 +1,5 @@
 import ExcelJS from "exceljs";
+import PDFDocument from "pdfkit";
 import { env } from "../config/env.js";
 
 async function fetchProducts() {
@@ -121,6 +122,65 @@ export async function generateProductsReport(req, res) {
     return res.status(500).json({
       success: false,
       message: "Erro ao gerar relatório.",
+    });
+  }
+}
+
+
+
+export async function generateProductsPdf(req, res) {
+  try {
+    const products = await fetchProducts();
+
+    const doc = new PDFDocument({
+      margin: 40,
+      size: "A4",
+    });
+
+    res.setHeader(
+      "Content-Type",
+      "application/pdf"
+    );
+
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename=produtos-${Date.now()}.pdf`
+    );
+
+    doc.pipe(res);
+
+    doc.fontSize(20);
+    doc.text("RELATÓRIO DE PRODUTOS OZONTECK", {
+      align: "center",
+    });
+
+    doc.moveDown();
+
+    doc.fontSize(12);
+
+    products.forEach((product, index) => {
+      doc.text(
+        `${index + 1}. ${product.name}`
+      );
+
+      doc.text(
+        `Status: ${product.status}`
+      );
+
+      doc.text(
+        `Estoque: ${product.stock_quantity ?? 0}`
+      );
+
+      doc.moveDown();
+    });
+
+    doc.end();
+  } catch (error) {
+    console.error("[PDF_REPORT_ERROR]", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Erro ao gerar PDF.",
     });
   }
 }

@@ -1,5 +1,8 @@
 import { Router } from "express";
-import { generateProductsReport } from "../controllers/report.controller.js";
+import {
+  generateProductsReport,
+  generateProductsPdf,
+} from "../controllers/report.controller.js";
 import { requireAdminAuth } from "../middlewares/auth.middleware.js";
 import { requireMasterAdmin } from "../middlewares/masterAdmin.middleware.js";
 
@@ -11,6 +14,11 @@ router.use(requireMasterAdmin);
 router.get(
   "/products/excel",
   generateProductsReport
+);
+
+router.get(
+  "/products/pdf",
+  generateProductsPdf
 );
 
 export default router;
