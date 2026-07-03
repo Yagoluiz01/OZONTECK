@@ -13,25 +13,19 @@
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.5",
     "dotenv": "^17.3.1",
-    "exceljs": "^4.4.0",
     "express": "^5.1.0",
     "express-rate-limit": "^8.4.1",
     "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.2",
     "mercadopago": "^2.12.1",
-    "module-alias": "^2.3.4",
     "morgan": "^1.10.1",
     "multer": "^2.1.1",
-    "nodemailer": "^8.0.7",
+    "nodemailer": "^9.0.1",
     "openai": "^6.42.0",
-    "pdfkit": "^0.19.1",
     "sharp": "^0.33.5",
     "web-push": "^3.6.7"
   },
   "devDependencies": {
     "nodemon": "^3.1.10"
-  },
-  "_moduleAliases": {
-    "@": "src"
   }
 }

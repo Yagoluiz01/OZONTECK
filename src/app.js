@@ -1,3 +1,4 @@
+import aiRoutes from "./routes/ai.routes.js";
 import reportRoutes from "./routes/report.routes.js";
 import adminAiRoutes from "./routes/adminAi.routes.js";
 import adminMarketingPixelsRoutes from "./routes/adminMarketingPixels.routes.js";
@@ -290,6 +291,7 @@ app.use("/api/affiliate/feed", affiliateFeedRoutes);
 app.use("/api/affiliate", affiliatePortalRoutes);
 app.use("/api/admin/ai", adminAiRoutes);
 app.use("/api/admin/reports", reportRoutes);
+app.use("/api/ai", aiRoutes);
 
 // Alias direto de segurança para a foto da loja do afiliado.
 // Mantém a rota funcionando mesmo se o roteador do portal não for recarregado em ambiente local.

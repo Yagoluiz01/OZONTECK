@@ -457,9 +457,9 @@ function buildCartPayload(order, items = []) {
         agencyId: agencyId || null
       })
   );
-  console.log("DEBUG REMETENTE DOCUMENT:", from.document);
-  console.log("DEBUG DESTINATARIO DOCUMENT:", to.document);
-  console.log("DEPURAR PEDIDO CLIENTE CPF:", order?.customer_cpf);
+  console.log("DEBUG REMETENTE DOCUMENT: [REDACTED]");
+  console.log("DEBUG DESTINATARIO DOCUMENT: [REDACTED]");
+  console.log("DEPURAR PEDIDO CLIENTE CPF: [REDACTED]");
 
   const payload = {
     service: serviceCode,

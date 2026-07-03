@@ -1,6 +1,22 @@
 import app from "./app.js";
+import 'module-alias/register';
+import aiRoutes from "./services/AI/router/ai.route.js";
 import { syncPendingMelhorEnvioLabels } from "./services/shipping.service.js";
 import { runExpiredStockReservationCleanup } from "./jobs/releaseExpiredStockReservations.js";
+
+// Rede de segurança: um erro não tratado em qualquer parte do código não pode
+// mais derrubar o processo inteiro. Apenas loga o erro e mantém a API no ar.
+// Isso não altera nenhuma regra de negócio nem o comportamento das rotas.
+process.on("uncaughtException", (error) => {
+  console.error("[UNCAUGHT_EXCEPTION] API continua rodando. Detalhes:", {
+    message: error?.message,
+    stack: error?.stack,
+  });
+});
+
+process.on("unhandledRejection", (reason) => {
+  console.error("[UNHANDLED_REJECTION] API continua rodando. Detalhes:", reason);
+});
 
 const PORT = process.env.PORT || 5000;
 
