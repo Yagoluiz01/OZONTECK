@@ -118,6 +118,37 @@ export async function runAgent({
         tool: "report.generate",
         ...toolResult,
       };
+    } else if (wantsProducts) {
+      // Hard-deny: operações de escrita em produtos (create/update/delete) só
+      // são permitidas com permissão explícita products.manage.
+      const managePerm = modulePermissions.products_manage || "products.manage";
+      const hasManagePermission = permissions.includes(managePerm) || permissions.includes("admin");
+
+      if (!hasManagePermission) {
+        audit.ok = false;
+        audit.toolCalls.push({
+          name: "products.write",
+          status: "blocked",
+          reason: "missing_permission",
+          required: managePerm,
+        });
+
+        return {
+          success: false,
+          error: true,
+          message: "Sem permissão para alterar produtos.",
+          audit,
+        };
+      }
+
+      // Observação: por enquanto o agent core só executa report/download.
+      // Quando o pipeline de tools do CRUD estiver conectado, este bloco
+      // será o ponto de autorização.
+      agentReply = {
+        success: true,
+        reply:
+          "Permissão confirmada para operações de produtos. Aguarde a integração completa do tool CRUD.",
+      };
     } else {
       // responder sem executar ações
       const promptContext = {

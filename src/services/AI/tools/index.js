@@ -6,9 +6,11 @@ import { affiliatesTool } from "./affiliates.tool.js";
 import { leadsTool } from "./leads.tool.js";
 import { dashboardTool } from "./dashboard.tool.js";
 import { reportsTool } from "./reports.tool.js";
+import { productsWriteToolWrapper } from "./products.write.tool.js";
 
 export const aiTools = {
   products: productsTool,
+  products_write: productsWriteToolWrapper,
   financial: financialTool,
   orders: ordersTool,
   customers: customersTool,

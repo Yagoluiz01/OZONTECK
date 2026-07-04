@@ -2,7 +2,6 @@ import { productsActions } from "./products.actions.js";
 import { financialActions } from "./financial.actions.js";
 import { ordersActions } from "./orders.actions.js";
 
-
 export async function executeActions(signals, knowledge) {
   const results = [];
 
@@ -19,6 +18,24 @@ export async function executeActions(signals, knowledge) {
           alert: "Produtos sem estoque detectados",
           data: signal.data,
         });
+        break;
+
+      case "PRODUCTS_CREATE":
+        results.push(
+          await productsActions.createProduct({ knowledge, payload: signal.payload })
+        );
+        break;
+
+      case "PRODUCTS_UPDATE":
+        results.push(
+          await productsActions.updateProduct({ knowledge, payload: signal.payload })
+        );
+        break;
+
+      case "PRODUCTS_DELETE":
+        results.push(
+          await productsActions.deleteProduct({ knowledge, payload: signal.payload })
+        );
         break;
 
       case "NEGATIVE_CASHFLOW":
