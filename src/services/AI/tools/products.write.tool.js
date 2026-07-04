@@ -1,5 +1,6 @@
-import { env } from "../../config/env.js";
-import { recordAuditLog } from "../../services/audit.service.js";
+import { env } from "../../../config/env.js";
+import { recordAuditLog } from "../../audit.service.js";
+
 
 function scrub(value) {
   const s = typeof value === "string" ? value : JSON.stringify(value);
