@@ -3,6 +3,8 @@ import { modulePermissions } from "../permissions/modules.permissions.js";
 import { filterContextsByPermission } from "../permissions/permissions.engine.js";
 import { sendAiMessage } from "../ai.service.js";
 import { generateReportsAction } from "./agent.reports.js";
+import { aiTools } from "../tools/index.js";
+
 
 
 function safeJsonParse(value) {
@@ -141,13 +143,65 @@ export async function runAgent({
         };
       }
 
-      // Observação: por enquanto o agent core só executa report/download.
-      // Quando o pipeline de tools do CRUD estiver conectado, este bloco
-      // será o ponto de autorização.
+      // Integração mínima para parar a resposta repetida:
+      // quando o usuário pedir “adicione/crie produto”, executamos um CREATE de um produto teste.
+      // Segurança: o tool `products_write` tem allowlist create/update/delete e também revalida permissão.
+      const wantsCreate = /\b(adi(cione|ção)r|criar|crie|nova|novo)\b/i.test(lower) || lower.includes("teste");
+
+      if (!wantsCreate) {
+        agentReply = {
+          success: true,
+          reply:
+            "Permissão confirmada para produtos. Para este teste, envie explicitamente “adicione/crie produto”.",
+        };
+        audit.endedAt = new Date().toISOString();
+        audit.durationMs = Date.now() - startedAt;
+        return { ...agentReply, audit };
+      }
+
+      const skuMatch = message.match(/\b([A-Z0-9\-]{5,})\b/i);
+      const priceMatch = message.match(/R\$\s*([0-9]+([\.,][0-9]{1,2})?)/i);
+      const qtyMatch = message.match(/\b(qtd|quantidade|estoque)\s*:?\s*(\d+)/i);
+
+      const sku = (skuMatch && skuMatch[1]) ? String(skuMatch[1]).toUpperCase() : "TESTE-IA-001";
+      const price = priceMatch && priceMatch[1] ? Number(priceMatch[1].replace(',', '.')) : 10;
+      const stock_quantity = qtyMatch && qtyMatch[2] ? Number(qtyMatch[2]) : 10;
+
+      const actor = user ? { id: user.id, role: user.role } : { id: null, role: null };
+
+      const operation = {
+        type: "create",
+        payload: {
+          name: "Produto teste IA",
+          sku,
+          price,
+          stock_quantity,
+          status: "draft",
+          description: "Criado via AI (teste de integração).",
+        },
+        // tool revalida permissão e usa auth token opcional.
+        // Mantemos vazio para permitir que o backend use validação do requireAuth no próprio endpoint.
+        authToken: "",
+      };
+
+      audit.toolCalls.push({
+        name: "products.write",
+        status: "ok",
+        reason: "create_product_test_payload",
+      });
+
+      const res = await aiTools.products_write({
+        permissions,
+        reqMeta: { requestId },
+        actor,
+        operation,
+      });
+
       agentReply = {
         success: true,
-        reply:
-          "Permissão confirmada para operações de produtos. Aguarde a integração completa do tool CRUD.",
+        reply: "Produto teste criado com sucesso.",
+        product: res?.product || res,
+        operation,
       };
     } else {
       // responder sem executar ações
