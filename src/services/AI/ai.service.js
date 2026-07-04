@@ -6,19 +6,34 @@ export async function sendAiMessage({
   user,
   promptContext,
 } = {}) {
-  // Nesta fase (Fase 1: agente consulta/relatórios), não chamamos LLM.
-  // Mantemos comportamento determinístico e seguro.
-  // Se no futuro quiser usar LLM, aqui é o único lugar.
+  // Segurança com LLM (sem liberar ações destrutivas):
+  // - Sempre usamos apenas o contexto permitido (o agent/core faz o filtro)
+  // - Aqui usamos DeepSeek para gerar texto de resposta (reply)
+  // - Não executamos tools aqui; tool execution fica no agent (runAgent / agent.reports)
+
   if (!promptContext) {
-    // fallback: usa o runAI existente para manter compatibilidade
+    // fallback: texto simples via runAI (compatibilidade)
     return await runAI({ contexts: [], message });
   }
 
+  // DeepSeek: monta prompt (systemPrompt) e usa o contexto como conteúdo.
+  // Observação: `deepseek.provider` já faz o create() e retorna {success, reply}
+  // O agente garante que promptContext só contenha dados permitidos.
+  const { askDeepSeek } = await import("./providers/deepseek.provider.js");
+  const systemPrompt = promptContext?.base?.systemPrompt || "Você é um assistente de negócios.";
+
+  const replyText = await askDeepSeek({
+    message,
+    history,
+    systemPrompt,
+  });
+
   return {
     success: true,
-    message,
-    promptContext,
-    user: user ? { id: user.id, role: user.role } : null,
-    note: "AI em modo seguro (Fase 1).",
+    reply: replyText?.reply || "Sem resposta.",
+    note: "AI modo seguro com LLM (DeepSeek).",
+    promptContextSummary: {
+      allowedContexts: promptContext?.allowedContexts?.length || 0,
+    },
   };
 }
