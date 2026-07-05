@@ -53,7 +53,14 @@ export async function aiChat(req, res) {
     const tenantGuard = enforceTenantGuard({
       req,
       user: req.admin,
-      company: req.admin?.company,
+      // auth.middleware.js preenche req.admin.company_id/tenant_id
+      // e aqui o guard espera company_id/tenant_id ou company/tenant.
+      company:
+        req.admin?.company_id ??
+        req.admin?.tenant_id ??
+        req.admin?.company ??
+        req.admin?.tenant ??
+        null,
     });
 
     if (!tenantGuard?.ok) {
