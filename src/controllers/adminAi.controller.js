@@ -1,9 +1,14 @@
 import { env } from "../config/env.js";
 import { sendAiMessage } from "../services/AI/ai.service.js";
 import { runAgent } from "../services/AI/agent/index.js";
+import { applyAiSecurityLayer } from "../services/AI/security/aiSecurityLayer.js";
+import { enforceTenantGuard } from "../services/AI/security/aiTenantGuard.js";
+import { runOrchestrator } from "../services/AI/orchestrator/index.js";
+
 
 
 const MAX_HISTORY = 20;
+
 
 function sanitizeHistory(history) {
   if (!Array.isArray(history)) return [];
@@ -40,6 +45,42 @@ export async function aiChat(req, res) {
     }
 
     const userMessage = String(req.body?.message || "").trim();
+
+    // Segurança/Governança (antes de qualquer processamento)
+    const historyRaw = req.body?.history;
+
+    // Tenant guard antes de qualquer acesso a dados/LLM
+    const tenantGuard = enforceTenantGuard({
+      req,
+      user: req.admin,
+      company: req.admin?.company,
+    });
+
+    if (!tenantGuard?.ok) {
+      return res.status(200).json(
+        {
+          success: false,
+          reply: "Sem tenant válido para processar esta solicitação.",
+          data: {},
+          actions: [],
+          metadata: {
+            ...tenantGuard.metadata,
+          },
+        }
+      );
+    }
+
+    const security = applyAiSecurityLayer({
+      req,
+      message: userMessage,
+      history: historyRaw,
+    });
+
+    if (!security?.ok) {
+      return res.status(200).json(security.response);
+    }
+
+
 
     if (!userMessage) {
       return res.status(400).json({
@@ -103,46 +144,22 @@ export async function aiChat(req, res) {
      * IA
      */
 
-    // Se a intenção for criar/adicione produto, encaminha para o agent.
-    // Mantém simples e tolerante, porque o front pode mandar textos sem padronização.
-    const wantsProductsCreate = (
-      /crie|criar|adicione|adicionar/i.test(userMessage) ||
-      /\b(novo|novos)\b/i.test(lowerMessage) ||
-      /produtos?|produto/i.test(lowerMessage) ||
-      /\b(teste)\b/i.test(lowerMessage)
-    );
+    // Todo o pipeline (Planner + Orchestrator + Decision/Dispatch/Tools/Repositories)
+    // passa a ser executado dentro do Orchestrator.
 
+    const contexts = [];
 
-    if (wantsProductsCreate) {
-      const authorization = String(req.headers?.authorization || "").trim();
-
-      const result = await runAgent({
-        message: userMessage,
-        contexts: [],
-        history,
-        user: req.admin || req.body?.user || { id: null, role: "unknown" },
-        permissions:
-          req.permissions || req.body?.permissions || [],
-        requestId: req.headers?.["x-request-id"] || null,
-        authToken: authorization || null,
-      });
-
-
-      return res.status(200).json(result);
-    }
-
-    const reply = await sendAiMessage(
-      {
-        message: userMessage,
-        history,
-      },
-      req.admin
-    );
-
-    return res.status(200).json({
-      success: true,
-      reply,
+    const orchestratorResult = await runOrchestrator({
+      message: userMessage,
+      contexts,
+      user: req.admin || req.body?.user || null,
     });
+
+    return res.status(200).json(orchestratorResult);
+
+
+
+
 
 
   } catch (error) {
