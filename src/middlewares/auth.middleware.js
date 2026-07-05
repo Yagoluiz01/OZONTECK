@@ -80,13 +80,21 @@ export async function requireAdminAuth(req, res, next) {
     // Assim, bloqueio, exclusão ou troca de função passa a valer imediatamente.
     const currentAdmin = await loadActiveAdmin(decoded);
 
+    // Tenant/company enrichment (needed by AI tenant guard)
+    // We do not assume a specific column name in `admins`.
+    // If present, we propagate it to `req.admin.company_id` / `req.admin.tenant_id`.
+    const tenantId = currentAdmin.company_id ?? currentAdmin.tenant_id ?? currentAdmin.tenantId ?? currentAdmin.companyId ?? null;
+
     req.admin = {
       id: currentAdmin.id,
       userId: currentAdmin.auth_user_id || decoded.sub || null,
       email: currentAdmin.email,
       fullName: currentAdmin.full_name || null,
       role: currentAdmin.role,
+      company_id: tenantId,
+      tenant_id: tenantId,
     };
+
 
     return next();
   } catch (error) {
