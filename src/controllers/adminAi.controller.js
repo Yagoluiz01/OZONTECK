@@ -24,7 +24,11 @@ function sanitizeHistory(history) {
 }
 
 export async function aiChat(req, res) {
+  // fallback chat (não executa tools/CRUD). 
+  // Se o cliente estiver chamando este endpoint para criar/alterar entidades,
+  // ele ficará somente em resposta textual.
   try {
+
     if (!env.deepseekApiKey) {
       return res.status(503).json({
         success: false,
