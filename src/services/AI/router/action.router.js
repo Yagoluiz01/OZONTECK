@@ -1,35 +1,55 @@
 export function resolveAction(message) {
   if (!message) return null;
 
-  const text = message.toLowerCase();
+  const text = String(message).toLowerCase();
 
-  if (text.includes("produto") || text.includes("estoque")) {
-    return "products";
+  // SECURITY: reduzir superfície de ataque
+  // -> não faz matching amplo; usa allowlist de módulos esperados.
+  const ALLOWED = new Set([
+    "products",
+    "customers",
+    "orders",
+    "financial",
+    "affiliates",
+    "leads",
+    "dashboard",
+  ]);
+
+  // Produto/Estoque
+  if (text.includes("produto") || text.includes("produtos") || text.includes("estoque")) {
+    return ALLOWED.has("products") ? "products" : null;
   }
 
-  if (text.includes("cliente")) {
-    return "customers";
+  // Cliente
+  if (text.includes("cliente") || text.includes("clientes")) {
+    return ALLOWED.has("customers") ? "customers" : null;
   }
 
-  if (text.includes("pedido")) {
-    return "orders";
+  // Pedidos
+  if (text.includes("pedido") || text.includes("pedidos")) {
+    return ALLOWED.has("orders") ? "orders" : null;
   }
 
-  if (text.includes("financeiro") || text.includes("caixa")) {
-    return "financial";
+  // Financeiro
+  if (text.includes("financeiro") || text.includes("caixa") || text.includes("faturamento")) {
+    return ALLOWED.has("financial") ? "financial" : null;
   }
 
-  if (text.includes("afiliado")) {
-    return "affiliates";
+  // Afiliados
+  if (text.includes("afiliado") || text.includes("afiliados")) {
+    return ALLOWED.has("affiliates") ? "affiliates" : null;
   }
 
-  if (text.includes("lead")) {
-    return "leads";
+  // Leads
+  if (text.includes("lead") || text.includes("leads")) {
+    return ALLOWED.has("leads") ? "leads" : null;
   }
 
-  if (text.includes("dashboard") || text.includes("painel")) {
-    return "dashboard";
+  // Dashboard
+  if (text.includes("dashboard") || text.includes("painel") || text.includes("painéis")) {
+    return ALLOWED.has("dashboard") ? "dashboard" : null;
   }
 
   return null;
 }
+

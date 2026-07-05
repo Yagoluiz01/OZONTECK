@@ -1,15 +1,20 @@
 import { aiTools } from "./index.js";
 
-export async function executeTools(contexts) {
+export async function executeTools(items = []) {
+  // items: [{ tool: 'products_write', args: {...} }] ou ['products_write']
   const result = {};
 
-  await Promise.all(
-    contexts.map(async (context) => {
-      const tool = aiTools[context];
+  const list = Array.isArray(items) ? items : [];
 
+  await Promise.all(
+    list.map(async (item) => {
+      const name = typeof item === "string" ? item : item?.tool;
+      const args = typeof item === "string" ? {} : item?.args || {};
+
+      const tool = aiTools[name];
       if (!tool) return;
 
-      result[context] = await tool();
+      result[name] = await tool(args);
     })
   );
 

@@ -1,7 +1,8 @@
 
-export function decisionEngine(knowledge) {
+export function decisionEngine(knowledge, message = "") {
   const signals = [];
 
+  // Automations base (estoque/caixa)
   const lowStock = knowledge.products?.lowStock ?? [];
   const outStock = knowledge.products?.outOfStock ?? [];
 
@@ -26,6 +27,27 @@ export function decisionEngine(knowledge) {
     signals.push({
       type: "NEGATIVE_CASHFLOW",
       data: { revenue, expenses },
+    });
+  }
+
+  // Perguntas de negócio => sinais para actions de leitura
+  const lower = String(message || "").toLowerCase();
+  const wantsVendasMes = lower.includes("vendas") && (lower.includes("mês") || lower.includes("mes"));
+  const wantsFaturamos = lower.includes("fatur") || lower.includes("faturamos") || lower.includes("receita");
+  const wantsPedidos = lower.includes("quant") && lower.includes("pedido");
+  const wantsLucro = lower.includes("lucro");
+
+  if (wantsVendasMes || wantsFaturamos || wantsLucro) {
+    signals.push({
+      type: "FINANCIAL_SUMMARY",
+      data: {},
+    });
+  }
+
+  if (wantsPedidos) {
+    signals.push({
+      type: "ORDERS_SUMMARY",
+      data: {},
     });
   }
 

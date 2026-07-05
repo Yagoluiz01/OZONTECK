@@ -24,27 +24,26 @@ export const productsActions = {
     };
   },
 
-  // Write operations - execute via tools/products.tool.js (real CRUD routes)
+  // Write operations are handled by tools layer (products_write).
+  // Actions should only generate an intent payload consumível pelo dispatcher.
   createProduct: async ({ knowledge, payload }) => {
-    // tools are executed inside the tools layer; actions just pass through
-    // to keep agent policy centralized in tools.
     return {
-      mode: "products_create_pending",
-      payload,
+      intent: "products.write",
+      operation: { type: "create", payload },
     };
   },
 
   updateProduct: async ({ knowledge, payload }) => {
     return {
-      mode: "products_update_pending",
-      payload,
+      intent: "products.write",
+      operation: { type: "update", payload },
     };
   },
 
   deleteProduct: async ({ knowledge, payload }) => {
     return {
-      mode: "products_delete_pending",
-      payload,
+      intent: "products.write",
+      operation: { type: "delete", payload },
     };
   },
 };

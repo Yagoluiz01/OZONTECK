@@ -3,9 +3,7 @@ import { modulePermissions } from "../permissions/modules.permissions.js";
 import { filterContextsByPermission } from "../permissions/permissions.engine.js";
 import { sendAiMessage } from "../ai.service.js";
 import { generateReportsAction } from "./agent.reports.js";
-import { aiTools } from "../tools/index.js";
-
-
+// NOTE: mantém arquitetura existente, mas evita execução direta fora do pipeline.
 
 function safeJsonParse(value) {
   try {
@@ -15,6 +13,7 @@ function safeJsonParse(value) {
     return null;
   }
 }
+
 
 function normalizeContexts(contexts) {
   if (!Array.isArray(contexts)) return [];
@@ -108,8 +107,10 @@ export async function runAgent({
 
         return {
           success: false,
-          error: true,
-          message: "Sem permissão para gerar relatórios.",
+          reply: "Sem permissão para gerar relatórios.",
+          data: {},
+          actions: [],
+          metadata: {},
           audit,
         };
       }
@@ -124,8 +125,9 @@ export async function runAgent({
       agentReply = {
         success: true,
         reply: "Relatório gerado com sucesso.",
-        tool: "report.generate",
-        ...toolResult,
+        data: { ...(toolResult || {}) },
+        actions: [],
+        metadata: { tool: "report.generate" },
       };
     } else if (wantsProducts) {
       // Hard-deny: operações de escrita em produtos (create/update/delete) só
@@ -144,8 +146,10 @@ export async function runAgent({
 
         return {
           success: false,
-          error: true,
-          message: "Sem permissão para alterar produtos.",
+          reply: "Sem permissão para alterar produtos.",
+          data: {},
+          actions: [],
+          metadata: {},
           audit,
         };
       }
@@ -156,60 +160,40 @@ export async function runAgent({
       const wantsCreate = /\b(adi(cione|ção)r|criar|crie|nova|novo)\b/i.test(lower) || lower.includes("teste");
 
       if (!wantsCreate) {
-        agentReply = {
-          success: true,
-          reply:
-            "Permissão confirmada para produtos. Para este teste, envie explicitamente “adicione/crie produto”.",
-        };
-        audit.endedAt = new Date().toISOString();
-        audit.durationMs = Date.now() - startedAt;
-        return { ...agentReply, audit };
-      }
-
-      const skuMatch = message.match(/\b([A-Z0-9\-]{5,})\b/i);
-      const priceMatch = message.match(/R\$\s*([0-9]+([\.,][0-9]{1,2})?)/i);
-      const qtyMatch = message.match(/\b(qtd|quantidade|estoque)\s*:?\s*(\d+)/i);
-
-      const sku = (skuMatch && skuMatch[1]) ? String(skuMatch[1]).toUpperCase() : "TESTE-IA-001";
-      const price = priceMatch && priceMatch[1] ? Number(priceMatch[1].replace(',', '.')) : 10;
-      const stock_quantity = qtyMatch && qtyMatch[2] ? Number(qtyMatch[2]) : 10;
-
-      const actor = user ? { id: user.id, role: user.role } : { id: null, role: null };
-
-      const operation = {
-        type: "create",
-        payload: {
-          name: "Produto teste IA",
-          sku,
-          price,
-          stock_quantity,
-          status: "draft",
-          description: "Criado via AI (teste de integração).",
-        },
-        // tool revalida permissão e usa auth token opcional.
-        // Mantemos vazio para permitir que o backend use validação do requireAuth no próprio endpoint.
-        authToken: authToken || "",
-      };
-
-
-      audit.toolCalls.push({
-        name: "products.write",
-        status: "ok",
-        reason: "create_product_test_payload",
-      });
-
-      const res = await aiTools.products_write({
-        permissions,
-        reqMeta: { requestId },
-        actor,
-        operation,
-      });
-
       agentReply = {
         success: true,
-        reply: "Produto teste criado com sucesso.",
-        product: res?.product || res,
-        operation,
+        reply:
+          "Permissão confirmada para produtos. Para executar escrita, envie explicitamente “Adicionar produto” (com dados).",
+        data: {},
+        actions: [],
+        metadata: {},
+      };
+
+      audit.endedAt = new Date().toISOString();
+      audit.durationMs = Date.now() - startedAt;
+
+      return {
+        ...agentReply,
+        audit,
+        data: {
+          ...(agentReply.data || {}),
+          allowedContexts,
+        },
+      };
+      }
+
+      // Mantém compatibilidade: execução de products_write permanece no tool,
+      // mas não vamos forçar payload de teste aqui; a escrita real deve vir do dispatcher.
+      // Se o cliente ainda enviar sem dados estruturados, devolvemos instrução clara.
+      agentReply = {
+        success: true,
+        reply:
+          "Para criar/atualizar produto via AI, envie dados suficientes (nome, SKU e preço/estoque).",
+        data: {},
+        actions: [],
+        metadata: {
+          hint: "Exemplo: Adicionar produto nome=Perfume X sku=ABC123 price=49,90 estoque=10",
+        },
       };
     } else {
       // responder sem executar ações
@@ -231,6 +215,9 @@ export async function runAgent({
       agentReply = {
         success: true,
         reply: String(replyString || "Sem resposta."),
+        data: {},
+        actions: [],
+        metadata: {},
       };
     }
 
@@ -249,8 +236,10 @@ export async function runAgent({
 
     return {
       success: false,
-      error: true,
-      message: error?.message || "Erro ao executar agente.",
+      reply: error?.message || "Erro ao executar agente.",
+      data: {},
+      actions: [],
+      metadata: {},
       audit,
     };
   }
