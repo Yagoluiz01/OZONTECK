@@ -114,6 +114,8 @@ export async function aiChat(req, res) {
 
 
     if (wantsProductsCreate) {
+      const authorization = String(req.headers?.authorization || "").trim();
+
       const result = await runAgent({
         message: userMessage,
         contexts: [],
@@ -122,7 +124,9 @@ export async function aiChat(req, res) {
         permissions:
           req.permissions || req.body?.permissions || [],
         requestId: req.headers?.["x-request-id"] || null,
+        authToken: authorization || null,
       });
+
 
       return res.status(200).json(result);
     }

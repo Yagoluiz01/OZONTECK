@@ -41,6 +41,7 @@ export async function runAgent({
   contexts = [],
   permissions = [],
   requestId,
+  authToken = null,
 } = {}) {
   // hardening: evita erros em cenários onde caller manda undefined
   message = String(message || "");
@@ -187,8 +188,9 @@ export async function runAgent({
         },
         // tool revalida permissão e usa auth token opcional.
         // Mantemos vazio para permitir que o backend use validação do requireAuth no próprio endpoint.
-        authToken: "",
+        authToken: authToken || "",
       };
+
 
       audit.toolCalls.push({
         name: "products.write",
@@ -220,13 +222,15 @@ export async function runAgent({
         { message, history, promptContext, user }
       );
 
-
-
-
+      // Garantir formato esperado: reply SEMPRE string
+      const replyString =
+        typeof replyText === "string"
+          ? replyText
+          : replyText?.reply || replyText?.message || "";
 
       agentReply = {
         success: true,
-        reply: replyText,
+        reply: String(replyString || "Sem resposta."),
       };
     }
 
