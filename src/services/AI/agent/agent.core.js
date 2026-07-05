@@ -69,6 +69,12 @@ export async function runAgent({
 
   const wantsProducts = lower.includes("produto") || lower.includes("produtos");
 
+  // Detecção robusta (evita fallback quando o usuário pede create/CRUD)
+  // - aceita 'adi(cione|ção)r', 'criar', 'crie', 'novo', e também a palavra 'teste'
+  // - com bordas de palavra para não pegar 'produto' como 'novo'
+  const wantsCreate = /\b(adi(cione|ção)|criar|crie|novo|novos)\b/i.test(lower) || lower.includes("teste");
+
+
   const audit = {
     requestId: requestId || null,
     startedAt: new Date(startedAt).toISOString(),
