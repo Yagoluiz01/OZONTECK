@@ -1,5 +1,7 @@
 import { env } from "../config/env.js";
 import { sendAiMessage } from "../services/AI/ai.service.js";
+import { runAgent } from "../services/AI/agent/index.js";
+
 
 const MAX_HISTORY = 20;
 
@@ -59,6 +61,7 @@ export async function aiChat(req, res) {
 
     const wantsExcel =
       lowerMessage.includes("excel") ||
+
       lowerMessage.includes("xlsx") ||
       lowerMessage.includes("planilha");
 
@@ -100,6 +103,30 @@ export async function aiChat(req, res) {
      * IA
      */
 
+    // Se a intenção for criar/adicione produto, encaminha para o agent.
+    // Mantém simples e tolerante, porque o front pode mandar textos sem padronização.
+    const wantsProductsCreate = (
+      /crie|criar|adicione|adicionar/i.test(userMessage) ||
+      /\b(novo|novos)\b/i.test(lowerMessage) ||
+      /produtos?|produto/i.test(lowerMessage) ||
+      /\b(teste)\b/i.test(lowerMessage)
+    );
+
+
+    if (wantsProductsCreate) {
+      const result = await runAgent({
+        message: userMessage,
+        contexts: [],
+        history,
+        user: req.admin || req.body?.user || { id: null, role: "unknown" },
+        permissions:
+          req.permissions || req.body?.permissions || [],
+        requestId: req.headers?.["x-request-id"] || null,
+      });
+
+      return res.status(200).json(result);
+    }
+
     const reply = await sendAiMessage(
       {
         message: userMessage,
@@ -112,6 +139,7 @@ export async function aiChat(req, res) {
       success: true,
       reply,
     });
+
 
   } catch (error) {
     console.error("[ADMIN_AI_CHAT_ERROR]", error);
