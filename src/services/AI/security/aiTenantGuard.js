@@ -1,42 +1,55 @@
-// Tenant Guard (hardening)
-// Mantém a arquitetura existente e só adiciona validações defensivas.
-// Objetivo: reduzir risco de leitura/escrita cruzada entre empresas quando
-// o tenant (companyId) não estiver explícito.
+// Tenant Guard
+// Compatível com a arquitetura atual do OZONTECK.
+// Hoje o sistema é single-tenant.
+// Se no futuro houver company_id/tenant_id, ele utilizará automaticamente.
 
-function normalizeId(v) {
-  const s = v === undefined || v === null ? null : String(v).trim();
-  return s && s.length ? s : null;
-}
+function normalizeId(value) {
+  if (value === undefined || value === null) return null;
 
-function hasTenant({ user, company } = {}) {
-  // Preferência: company explícito vindo do contexto/auth.
-  const companyId = normalizeId(company);
-  const userCompany = normalizeId(user?.company_id || user?.tenant_id || user?.companyId || user?.tenantId);
-  return companyId || userCompany;
+  const id = String(value).trim();
+
+  return id.length ? id : null;
 }
 
 export function enforceTenantGuard({ req, user, company } = {}) {
-  // Se o sistema atual não informa tenant, bloqueamos para evitar risco de cross-tenant.
-  // Isso é intencionalmente mais restritivo (security-first).
-  const tenantId = hasTenant({ user, company });
+  // Se existir company/tenant utiliza normalmente.
+  const tenantId =
+    normalizeId(company) ||
+    normalizeId(user?.company_id) ||
+    normalizeId(user?.tenant_id) ||
+    normalizeId(user?.companyId) ||
+    normalizeId(user?.tenantId);
 
-  if (!tenantId) {
+  // Multi-tenant (futuro)
+  if (tenantId) {
+    req.tenant = tenantId;
+
     return {
-      ok: false,
-      reason: "missing_tenant",
-      metadata: {
-        security: "tenant_guard",
-        required: true,
-      },
+      ok: true,
+      tenantId,
+      mode: "multi-tenant",
     };
   }
 
-  // Insere no req para downstream providers/repositories usarem (se existir suporte).
-  req.tenant = tenantId;
+  // Single-tenant (atual)
+  // Apenas exige administrador autenticado.
+  if (user?.id) {
+    req.tenant = "default";
 
+    return {
+      ok: true,
+      tenantId: "default",
+      mode: "single-tenant",
+    };
+  }
+
+  // Sem autenticação
   return {
-    ok: true,
-    tenantId,
+    ok: false,
+    reason: "unauthenticated",
+    metadata: {
+      security: "tenant_guard",
+      required: true,
+    },
   };
 }
-

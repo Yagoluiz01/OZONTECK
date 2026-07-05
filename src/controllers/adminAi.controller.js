@@ -48,7 +48,10 @@ export async function aiChat(req, res) {
 
     // Segurança/Governança (antes de qualquer processamento)
     const historyRaw = req.body?.history;
-
+    
+    console.log("===== ADMIN =====");
+    console.log(req.admin);
+    console.log("=================");
     // Tenant guard antes de qualquer acesso a dados/LLM
     const tenantGuard = enforceTenantGuard({
       req,
@@ -154,7 +157,28 @@ export async function aiChat(req, res) {
     // Todo o pipeline (Planner + Orchestrator + Decision/Dispatch/Tools/Repositories)
     // passa a ser executado dentro do Orchestrator.
 
-    const contexts = [];
+    // Inferência de contexts para garantir consultas ao banco quando o usuário pergunta métricas.
+    // Mantém a arquitetura existente e apenas popula a lista de contexts.
+    const lower = userMessage.toLowerCase();
+
+    const contextsSet = new Set();
+
+    if (/(venda|vendas|fatur|lucro|receita|despesa|financeiro|caixa|pagamentos)/i.test(lower)) {
+      contextsSet.add("financial");
+    }
+
+    if (/(pedido|pedidos|quantos pedidos|status de pedido|atraso|entreg|shipping)/i.test(lower)) {
+      contextsSet.add("orders");
+    }
+
+    if (/(produto|produtos|estoque|cat[aá]logo)/i.test(lower)) {
+      contextsSet.add("products");
+    }
+
+    // fallback neutro para dashboard
+    if (contextsSet.size === 0) contextsSet.add("dashboard");
+
+    const contexts = Array.from(contextsSet);
 
     const orchestratorResult = await runOrchestrator({
       message: userMessage,

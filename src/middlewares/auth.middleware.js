@@ -20,7 +20,15 @@ function getBearerToken(req) {
 async function loadActiveAdmin(decoded) {
   const { data, error } = await supabaseAdmin
     .from("admins")
-    .select("id,full_name,email,role,is_active,auth_user_id")
+    .select(`
+id,
+full_name,
+email,
+role,
+is_active,
+auth_user_id,
+company_id
+`)
     .eq("id", decoded.admin_id)
     .maybeSingle();
 
