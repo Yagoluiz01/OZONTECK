@@ -1,10 +1,8 @@
 import express from "express";
 
 import { requireAdminAuth } from "../middlewares/auth.middleware.js";
-import {
-  isMasterAdmin,
-  requireMasterAdmin,
-} from "../middlewares/masterAdmin.middleware.js";
+import { isMasterAdmin } from "../middlewares/masterAdmin.middleware.js";
+import { requirePermission } from "../middlewares/permission.middleware.js";
 import {
   deleteAuditLog,
   getAuditDashboard,
@@ -19,7 +17,7 @@ router.get("/access", requireAdminAuth, (req, res) => {
   });
 });
 
-router.get("/logs", requireAdminAuth, requireMasterAdmin, async (req, res, next) => {
+router.get("/logs", requireAdminAuth, requirePermission("audit.read"), async (req, res, next) => {
   try {
     const data = await getAuditDashboard({
       page: req.query.page,
@@ -42,7 +40,7 @@ router.get("/logs", requireAdminAuth, requireMasterAdmin, async (req, res, next)
   }
 });
 
-router.delete("/logs/:id", requireAdminAuth, requireMasterAdmin, async (req, res, next) => {
+router.delete("/logs/:id", requireAdminAuth, requirePermission("audit.delete"), async (req, res, next) => {
   try {
     const deleted = await deleteAuditLog({ id: req.params.id });
 

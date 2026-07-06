@@ -1,6 +1,6 @@
 import express from "express";
 import { requireAdminAuth } from "../middlewares/auth.middleware.js";
-import { requireMasterAdmin } from "../middlewares/masterAdmin.middleware.js";
+import { requirePermission } from "../middlewares/permission.middleware.js";
 import {
   listFinancialCategories,
   createFinancialCategory,
@@ -18,7 +18,7 @@ import {
 
 const router = express.Router();
 
-router.use(requireAdminAuth, requireMasterAdmin);
+router.use(requireAdminAuth, requirePermission("financial.read"));
 
 function ok(res, data = {}, message = "OK") {
   return res.status(200).json({

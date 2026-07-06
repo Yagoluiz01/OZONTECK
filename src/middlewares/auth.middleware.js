@@ -17,6 +17,44 @@ function getBearerToken(req) {
   return authHeader.slice("Bearer ".length).trim() || null;
 }
 
+function getJwtVerifyOptions() {
+  const options = {
+    algorithms: ["HS256"],
+  };
+
+  const issuer = String(process.env.JWT_ISSUER || "").trim();
+  const audience = String(process.env.JWT_AUDIENCE || "").trim();
+
+  if (issuer) {
+    options.issuer = issuer;
+  }
+
+  if (audience) {
+    options.audience = audience;
+  }
+
+  return options;
+}
+
+function sanitizeJwtErrorMessage(error) {
+  const errorName = String(error?.name || "");
+  const message = String(error?.message || "").toLowerCase();
+
+  if (errorName === "TokenExpiredError" || message.includes("expired")) {
+    return "Token expirado.";
+  }
+
+  if (
+    errorName === "JsonWebTokenError" ||
+    errorName === "NotBeforeError" ||
+    message.includes("jwt")
+  ) {
+    return "Token inválido ou expirado.";
+  }
+
+  return "Token inválido ou expirado.";
+}
+
 async function loadActiveAdmin(decoded) {
   const { data, error } = await supabaseAdmin
     .from("admins")
@@ -74,7 +112,7 @@ export async function requireAdminAuth(req, res, next) {
       });
     }
 
-    const decoded = jwt.verify(token, env.jwtSecret);
+    const decoded = jwt.verify(token, env.jwtSecret, getJwtVerifyOptions());
 
     if (!decoded?.admin_id || !decoded?.email || !decoded?.role) {
       return res.status(401).json({
@@ -87,34 +125,41 @@ export async function requireAdminAuth(req, res, next) {
     // Assim, bloqueio, exclusão ou troca de função passa a valer imediatamente.
     const currentAdmin = await loadActiveAdmin(decoded);
 
-    // Tenant/company enrichment (needed by AI tenant guard)
-    // We do not assume a specific column name in `admins`.
-    // If present, we propagate it to `req.admin.company_id` / `req.admin.tenant_id`.
-    const tenantId = null;
-
     req.admin = {
-  id: currentAdmin.id,
-  userId: currentAdmin.auth_user_id || decoded.sub || null,
-  email: currentAdmin.email,
-  fullName: currentAdmin.full_name || null,
-  role: currentAdmin.role,
-
-  company_id: tenantId,
-  tenant_id: tenantId,
-};
+      id: currentAdmin.id,
+      userId: currentAdmin.auth_user_id || decoded.sub || null,
+      email: currentAdmin.email,
+      fullName: currentAdmin.full_name || null,
+      role: currentAdmin.role,
+    };
 
 
 
     return next();
   } catch (error) {
+    const isJwtError =
+      error?.name === "TokenExpiredError" ||
+      error?.name === "JsonWebTokenError" ||
+      error?.name === "NotBeforeError";
+
     const statusCode = Number(error?.statusCode || 401);
+
+    if (isJwtError) {
+      console.warn("[ADMIN_AUTH_JWT_INVALID]", {
+        path: req.originalUrl,
+        method: req.method,
+        reason: error?.name || "JWT_ERROR",
+      });
+    }
 
     return res.status(statusCode).json({
       success: false,
       message:
         statusCode === 503
           ? "Não foi possível validar a sessão agora. Tente novamente."
-          : error?.message || "Token inválido ou expirado.",
+          : isJwtError
+            ? sanitizeJwtErrorMessage(error)
+            : error?.message || "Token inválido ou expirado.",
     });
   }
 }

@@ -4,6 +4,7 @@ import { supabaseAdmin } from "../config/supabase.js";
 import { env } from "../config/env.js";
 import { requireAdminAuth } from "../middlewares/auth.middleware.js";
 import { createAdminNotification } from "../services/adminNotifications.service.js";
+import { assignAdminPermissions, isMasterAdmin as isMasterFromService } from "../services/permissions/permission.service.js";
 
 const router = express.Router();
 
@@ -32,15 +33,7 @@ function getMasterEmails() {
 }
 
 function isMasterAdmin(admin = {}) {
-  const adminEmail = normalizeEmail(admin.email);
-  const masterEmails = getMasterEmails();
-
-  if (masterEmails.length > 0) {
-    return masterEmails.includes(adminEmail);
-  }
-
-  const role = String(admin.role || "").toLowerCase();
-  return ["master", "owner", "super_admin", "superadmin"].includes(role);
+  return isMasterFromService(admin);
 }
 
 function requireMasterAdmin(req, res, next) {
@@ -389,6 +382,10 @@ router.post("/admin/access-requests/:id/approve", requireAdminAuth, requireMaste
     const requestId = req.params.id;
     const requestedRole = String(req.body?.role || "administrator").toLowerCase();
     const role = ALLOWED_ROLES.has(requestedRole) ? requestedRole : "administrator";
+    const isMaster = Boolean(req.body?.is_master);
+    const requestedPermissions = Array.isArray(req.body?.permissions)
+      ? [...new Set(req.body.permissions.map((item) => String(item || "").trim()).filter(Boolean))]
+      : [];
 
     const { data: request, error: requestError } = await supabaseAdmin
       .from("admin_access_requests")
@@ -422,6 +419,7 @@ router.post("/admin/access-requests/:id/approve", requireAdminAuth, requireMaste
         email,
         role,
         is_active: true,
+        is_master: isMaster,
       };
 
       // Em muitos projetos Supabase, a tabela admins usa o mesmo UUID do auth.users.
@@ -454,6 +452,7 @@ router.post("/admin/access-requests/:id/approve", requireAdminAuth, requireMaste
               full_name: fullName,
               role,
               is_active: true,
+              is_master: isMaster,
             })
             .eq("email", email)
             .select("*")
@@ -473,6 +472,12 @@ router.post("/admin/access-requests/:id/approve", requireAdminAuth, requireMaste
       }
     }
 
+    const permissionResult = await assignAdminPermissions({
+      adminId: admin.id,
+      permissions: requestedPermissions,
+      isMaster,
+    });
+
     const { data: updatedRequest, error: updateError } = await supabaseAdmin
       .from("admin_access_requests")
       .update({
@@ -481,6 +486,11 @@ router.post("/admin/access-requests/:id/approve", requireAdminAuth, requireMaste
         reviewed_at: new Date().toISOString(),
         reviewed_by: req.admin.id,
         rejection_reason: null,
+        metadata: {
+          ...getPlainMetadata(request.metadata),
+          is_master: Boolean(permissionResult?.is_master),
+          permissions: permissionResult?.permissions || [],
+        },
       })
       .eq("id", requestId)
       .select("*")
@@ -496,6 +506,8 @@ router.post("/admin/access-requests/:id/approve", requireAdminAuth, requireMaste
         user_metadata: {
           full_name: fullName,
           admin_access_status: "approved",
+          is_master: Boolean(permissionResult?.is_master),
+          permissions: permissionResult?.permissions || [],
         },
       }).catch((metadataError) => {
         console.error("[ADMIN_ACCESS_AUTH_METADATA_APPROVE_ERROR]", metadataError);
@@ -521,7 +533,11 @@ router.post("/admin/access-requests/:id/approve", requireAdminAuth, requireMaste
       success: true,
       message: "Administrador aprovado com sucesso.",
       request: updatedRequest,
-      admin,
+      admin: {
+        ...admin,
+        is_master: Boolean(permissionResult?.is_master),
+        permissions: permissionResult?.permissions || [],
+      },
     });
   } catch (error) {
     return next(error);

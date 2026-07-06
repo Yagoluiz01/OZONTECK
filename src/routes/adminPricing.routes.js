@@ -1,6 +1,6 @@
 import express from "express";
 import { requireAdminAuth } from "../middlewares/auth.middleware.js";
-import { requireMasterAdmin } from "../middlewares/masterAdmin.middleware.js";
+import { requirePermission } from "../middlewares/permission.middleware.js";
 import { recordAuditLog } from "../services/audit.service.js";
 import {
   applyProductGoalTargets,
@@ -18,7 +18,7 @@ import {
 
 const router = express.Router();
 
-router.use(requireAdminAuth, requireMasterAdmin);
+router.use(requireAdminAuth, requirePermission("pricing.read"));
 
 function toMoney(value) {
   const number = Number(value);

@@ -1,5 +1,6 @@
 import express from "express";
 import { requireAdminAuth } from "../middlewares/auth.middleware.js";
+import { requirePermission } from "../middlewares/permission.middleware.js";
 import {
   createAdminNotification,
   listAdminNotifications,
@@ -9,7 +10,7 @@ import {
 
 const router = express.Router();
 
-router.use(requireAdminAuth);
+router.use(requireAdminAuth, requirePermission("notifications.read"));
 
 router.get("/", async (req, res, next) => {
   try {

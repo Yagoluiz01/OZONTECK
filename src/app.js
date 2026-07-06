@@ -24,6 +24,7 @@ import {
 import adminNotificationsRoutes from "./routes/adminNotifications.routes.js";
 import adminAuditRoutes from "./routes/adminAudit.routes.js";
 import adminAccessRequestsRoutes from "./routes/adminAccessRequests.routes.js";
+import adminPermissionsRoutes from "./routes/adminPermissions.routes.js";
 import adminPushRoutes from "./routes/adminPush.routes.js";
 import adminStoreThemeRoutes from "./routes/adminStoreTheme.routes.js";
 import storeThemeRoutes from "./routes/storeTheme.routes.js";
@@ -177,6 +178,20 @@ const corsMiddleware = cors({
  */
 app.use(corsMiddleware);
 
+const adminAiLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: Number(process.env.ADMIN_AI_RATE_LIMIT_MAX || 40),
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip(req) {
+    return req.method === "OPTIONS";
+  },
+  message: {
+    success: false,
+    message: "Muitas requisições para o assistente. Tente novamente em instantes.",
+  },
+});
+
 const globalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: Number(process.env.RATE_LIMIT_MAX || 1000),
@@ -219,6 +234,22 @@ app.use((req, res, next) => {
 app.use(
   helmet({
     crossOriginResourcePolicy: false,
+    contentSecurityPolicy: {
+      useDefaults: true,
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        imgSrc: ["'self'", "data:", "blob:", "https:"],
+        connectSrc: ["'self'", "https:", "wss:"],
+        frameAncestors: ["'none'"],
+        objectSrc: ["'none'"],
+        baseUri: ["'self'"],
+      },
+    },
+    frameguard: { action: "deny" },
+    noSniff: true,
+    referrerPolicy: { policy: "strict-origin-when-cross-origin" },
   })
 );
 
@@ -279,6 +310,7 @@ app.use("/api/admin/notifications", adminNotificationsRoutes);
 app.use("/api/admin/audit", adminAuditRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api", adminAccessRequestsRoutes);
+app.use("/api", adminPermissionsRoutes);
 app.use("/api/admin/push", adminPushRoutes);
 app.use("/api/products", productsRoutes);
 app.use("/api/reports", reportRoutes);
@@ -289,7 +321,7 @@ app.use("/api/settings", settingsRoutes);
 app.use("/api/shipping", shippingRoutes);
 app.use("/api/affiliate/feed", affiliateFeedRoutes);
 app.use("/api/affiliate", affiliatePortalRoutes);
-app.use("/api/admin/ai", adminAiRoutes);
+app.use("/api/admin/ai", adminAiLimiter, adminAiRoutes);
 app.use("/api/admin/reports", reportRoutes);
 app.use("/api/ai", aiRoutes);
 

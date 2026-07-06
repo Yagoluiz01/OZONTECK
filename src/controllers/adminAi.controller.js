@@ -8,12 +8,29 @@ import { runOrchestrator } from "../services/AI/orchestrator/index.js";
 
 
 const MAX_HISTORY = 20;
+const MAX_MESSAGE_LENGTH = 4000;
+const MAX_HISTORY_ITEMS = 50;
+const MAX_PAYLOAD_CHARS = 25000;
 
+function sanitizeTextInput(value) {
+  return String(value || "")
+    .replace(/\0/g, "")
+    .trim();
+}
+
+function estimatePayloadSize(value) {
+  try {
+    return JSON.stringify(value || {}).length;
+  } catch {
+    return MAX_PAYLOAD_CHARS + 1;
+  }
+}
 
 function sanitizeHistory(history) {
   if (!Array.isArray(history)) return [];
 
   return history
+    .slice(-MAX_HISTORY_ITEMS)
     .filter((msg) => {
       const role = String(msg?.role || "");
       const content = String(msg?.content || "").trim();
@@ -44,26 +61,29 @@ export async function aiChat(req, res) {
       });
     }
 
-    const userMessage = String(req.body?.message || "").trim();
+    const userMessage = sanitizeTextInput(req.body?.message);
 
     // Segurança/Governança (antes de qualquer processamento)
     const historyRaw = req.body?.history;
-    
-    console.log("===== ADMIN =====");
-    console.log(req.admin);
-    console.log("=================");
+    const payloadSize = estimatePayloadSize(req.body);
+
+    if (payloadSize > MAX_PAYLOAD_CHARS) {
+      return res.status(413).json({
+        success: false,
+        message: "Payload muito grande para processamento.",
+      });
+    }
+
+    console.info("[ADMIN_AI_ACCESS]", {
+      adminId: req.admin?.id || null,
+      role: req.admin?.role || null,
+      path: req.originalUrl,
+      method: req.method,
+    });
     // Tenant guard antes de qualquer acesso a dados/LLM
     const tenantGuard = enforceTenantGuard({
       req,
       user: req.admin,
-      // auth.middleware.js preenche req.admin.company_id/tenant_id
-      // e aqui o guard espera company_id/tenant_id ou company/tenant.
-      company:
-        req.admin?.company_id ??
-        req.admin?.tenant_id ??
-        req.admin?.company ??
-        req.admin?.tenant ??
-        null,
     });
 
     if (!tenantGuard?.ok) {
@@ -99,7 +119,7 @@ export async function aiChat(req, res) {
       });
     }
 
-    if (userMessage.length > 4000) {
+    if (userMessage.length > MAX_MESSAGE_LENGTH) {
       return res.status(400).json({
         success: false,
         message: "Mensagem muito longa.",
