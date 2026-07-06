@@ -544,6 +544,94 @@ router.post("/admin/access-requests/:id/approve", requireAdminAuth, requireMaste
   }
 });
 
+router.post("/admin/access-requests/:id/permissions", requireAdminAuth, requireMasterAdmin, async (req, res, next) => {
+  try {
+    const requestId = req.params.id;
+    const request = await getAccessRequestById(requestId);
+
+    if (!request) {
+      return res.status(404).json({
+        success: false,
+        message: "Solicitação não encontrada.",
+      });
+    }
+
+    if (String(request.status || "").toLowerCase() !== "approved") {
+      return res.status(409).json({
+        success: false,
+        message: "Somente solicitações aprovadas podem ter acessos editados.",
+      });
+    }
+
+    const email = normalizeEmail(request.email);
+    const admin = await findAdminByEmail(email);
+
+    if (!admin) {
+      return res.status(404).json({
+        success: false,
+        message: "Administrador não encontrado para edição de acessos.",
+      });
+    }
+
+    const requestedPermissions = Array.isArray(req.body?.permissions)
+      ? [...new Set(req.body.permissions.map((item) => String(item || "").trim()).filter(Boolean))]
+      : [];
+    const isMaster = Boolean(req.body?.is_master);
+
+    const permissionResult = await assignAdminPermissions({
+      adminId: admin.id,
+      permissions: requestedPermissions,
+      isMaster,
+    });
+
+    const metadata = {
+      ...getPlainMetadata(request.metadata),
+      is_master: Boolean(permissionResult?.is_master),
+      permissions: permissionResult?.permissions || [],
+      permissions_updated_at: new Date().toISOString(),
+      permissions_updated_by: req.admin?.email || null,
+    };
+
+    const { data: updatedRequest, error: updateError } = await supabaseAdmin
+      .from("admin_access_requests")
+      .update({ metadata })
+      .eq("id", requestId)
+      .select("*")
+      .single();
+
+    if (updateError) {
+      console.error("[ADMIN_ACCESS_REQUEST_PERMISSIONS_UPDATE_ERROR]", updateError);
+      throw new Error("Erro ao atualizar permissões do administrador.");
+    }
+
+    if (request.auth_user_id) {
+      await supabaseAdmin.auth.admin.updateUserById(request.auth_user_id, {
+        user_metadata: {
+          full_name: request.full_name,
+          admin_access_status: "approved",
+          is_master: Boolean(permissionResult?.is_master),
+          permissions: permissionResult?.permissions || [],
+        },
+      }).catch((metadataError) => {
+        console.error("[ADMIN_ACCESS_AUTH_METADATA_PERMISSIONS_UPDATE_ERROR]", metadataError);
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: "Acessos atualizados com sucesso.",
+      request: updatedRequest,
+      admin: {
+        ...admin,
+        is_master: Boolean(permissionResult?.is_master),
+        permissions: permissionResult?.permissions || [],
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
+});
+
 router.post("/admin/access-requests/:id/ban", requireAdminAuth, requireMasterAdmin, async (req, res, next) => {
   try {
     const requestId = req.params.id;
