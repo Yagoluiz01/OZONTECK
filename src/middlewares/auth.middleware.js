@@ -64,6 +64,7 @@ full_name,
 email,
 role,
 is_active,
+is_master,
 auth_user_id
 `)
     .eq("id", decoded.admin_id)
@@ -131,6 +132,7 @@ export async function requireAdminAuth(req, res, next) {
       email: currentAdmin.email,
       fullName: currentAdmin.full_name || null,
       role: currentAdmin.role,
+      is_master: currentAdmin.is_master,
     };
 
 

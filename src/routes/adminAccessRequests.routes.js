@@ -94,7 +94,7 @@ async function findAdminsByEmails(emails = []) {
 
   const { data, error } = await supabaseAdmin
     .from("admins")
-    .select("id,full_name,email,role,is_active,created_at,updated_at")
+    .select("id,full_name,email,role,is_active,is_master,created_at,updated_at")
     .in("email", uniqueEmails);
 
   if (error) {
@@ -134,6 +134,7 @@ function buildRequestWithAdminStatus(request, adminByEmail) {
           email: admin.email,
           role: admin.role,
           is_active: admin.is_active,
+          is_master: admin.is_master,
           created_at: admin.created_at,
           updated_at: admin.updated_at,
         }

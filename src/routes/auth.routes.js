@@ -439,6 +439,7 @@ router.post("/login", async (req, res) => {
         full_name: admin.full_name,
         email: admin.email,
         role: admin.role,
+        is_master: admin.is_master,
       },
       session: {
         access_token: authData.session?.access_token || null,
@@ -543,9 +544,15 @@ router.get("/me", async (req, res) => {
       });
     }
 
+    // Garante que is_master esteja presente mesmo se a RPC não retornar
+    const isMaster = admin.is_master === true;
+
     return res.status(200).json({
       success: true,
-      user: admin,
+      user: {
+        ...admin,
+        is_master: isMaster,
+      },
     });
   } catch (error) {
     console.warn("[ADMIN_ME_TOKEN_ERROR]", {
