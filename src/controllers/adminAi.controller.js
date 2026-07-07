@@ -205,6 +205,10 @@ export async function aiChat(req, res) {
       contexts,
       user: req.admin || req.body?.user || null,
       history,
+      confirmed: Boolean(req.body?.confirmed),
+      actionDetails: req.body?.actionDetails || null,
+      authToken: req.headers?.authorization?.replace(/^Bearer\s+/i, "") || null,
+      permissions: req.admin?.permissions || [],
     });
 
     return res.status(200).json(orchestratorResult);
