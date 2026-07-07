@@ -137,7 +137,15 @@ export async function runOrchestrator({
     // ============================================
     // FASE 2.1: Detectar intenção de escrita
     // ============================================
-    const writeIntent = detectWriteIntent(message);
+    // Se confirmado com actionDetails, usa diretamente (não re-deteta da mensagem)
+    const writeIntent = (confirmed && actionDetails)
+      ? {
+          tool: actionDetails.tool,
+          operation: actionDetails.operation,
+          entity: actionDetails.entity,
+          params: actionDetails.params || {},
+        }
+      : detectWriteIntent(message);
 
     if (writeIntent && !confirmed) {
       // Detectou intenção de escrita mas não confirmada
