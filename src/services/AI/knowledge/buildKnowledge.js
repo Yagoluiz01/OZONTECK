@@ -1,6 +1,5 @@
 import { loadProductsContext } from "../providers/products.provider.js";
-import { loadAffiliatesContext as loadFinancialContext } from "../providers/financial.provider.js";
-
+import { loadFinancialContext } from "../providers/financial.provider.js";
 import { loadOrdersContext } from "../providers/orders.provider.js";
 import { loadCustomersContext } from "../providers/customers.provider.js";
 import { loadAffiliatesContext } from "../providers/affiliates.provider.js";

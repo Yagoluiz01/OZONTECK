@@ -48,9 +48,6 @@ function sanitizeHistory(history) {
 }
 
 export async function aiChat(req, res) {
-  // fallback chat (não executa tools/CRUD). 
-  // Se o cliente estiver chamando este endpoint para criar/alterar entidades,
-  // ele ficará somente em resposta textual.
   try {
 
     if (!env.deepseekApiKey) {
@@ -63,7 +60,6 @@ export async function aiChat(req, res) {
 
     const userMessage = sanitizeTextInput(req.body?.message);
 
-    // Segurança/Governança (antes de qualquer processamento)
     const historyRaw = req.body?.history;
     const payloadSize = estimatePayloadSize(req.body);
 
@@ -80,7 +76,6 @@ export async function aiChat(req, res) {
       path: req.originalUrl,
       method: req.method,
     });
-    // Tenant guard antes de qualquer acesso a dados/LLM
     const tenantGuard = enforceTenantGuard({
       req,
       user: req.admin,
@@ -142,10 +137,6 @@ export async function aiChat(req, res) {
     const wantsProductsReport =
       lowerMessage.includes("produto");
 
-    /*
-     * Download de relatório Excel
-     */
-
     if (wantsExcel && wantsProductsReport) {
       return res.status(200).json({
         success: true,
@@ -155,10 +146,6 @@ export async function aiChat(req, res) {
         downloadUrl: "/api/reports/products/excel",
       });
     }
-
-    /*
-     * Download de relatório PDF
-     */
 
     if (wantsPdf && wantsProductsReport) {
       return res.status(200).json({
@@ -170,15 +157,7 @@ export async function aiChat(req, res) {
       });
     }
 
-    /*
-     * IA
-     */
-
-    // Todo o pipeline (Planner + Orchestrator + Decision/Dispatch/Tools/Repositories)
-    // passa a ser executado dentro do Orchestrator.
-
-    // Inferência de contexts para garantir consultas ao banco quando o usuário pergunta métricas.
-    // Mantém a arquitetura existente e apenas popula a lista de contexts.
+    // Inferência de contexts para garantir consultas ao banco
     const lower = userMessage.toLowerCase();
 
     const contextsSet = new Set();
@@ -193,6 +172,18 @@ export async function aiChat(req, res) {
 
     if (/(produto|produtos|estoque|cat[aá]logo)/i.test(lower)) {
       contextsSet.add("products");
+    }
+
+    if (/(afiliad|parceir|comiss[aã]o|indic[aã]|network|rede)/i.test(lower)) {
+      contextsSet.add("affiliates");
+    }
+
+    if (/(lead|leads|funil|convers[aã]o|prospect|contato inicial)/i.test(lower)) {
+      contextsSet.add("leads");
+    }
+
+    if (/(cliente|clientes|consumidor|comprador|reten[cç][aã]o|churn|ltv|recorr[eê]ncia)/i.test(lower)) {
+      contextsSet.add("customers");
     }
 
     // fallback neutro para dashboard
@@ -212,10 +203,6 @@ export async function aiChat(req, res) {
     });
 
     return res.status(200).json(orchestratorResult);
-
-
-
-
 
   } catch (error) {
     console.error("[ADMIN_AI_CHAT_ERROR]", error);

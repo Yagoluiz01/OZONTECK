@@ -7,6 +7,11 @@ import { leadsTool } from "./leads.tool.js";
 import { dashboardTool } from "./dashboard.tool.js";
 import { reportsTool } from "./reports.tool.js";
 import { productsWriteToolWrapper } from "./products.write.tool.js";
+import {
+  affiliatesWriteToolWrapper,
+  customersWriteToolWrapper,
+  ordersWriteToolWrapper,
+} from "./entities.write.tool.js";
 
 export const aiTools = {
   products: productsTool,
@@ -18,4 +23,8 @@ export const aiTools = {
   leads: leadsTool,
   dashboard: dashboardTool,
   reports: reportsTool,
+  // Tools de escrita
+  affiliates_write: affiliatesWriteToolWrapper,
+  customers_write: customersWriteToolWrapper,
+  orders_write: ordersWriteToolWrapper,
 };
