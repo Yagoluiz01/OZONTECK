@@ -204,10 +204,10 @@ export async function aiChat(req, res) {
       message: userMessage,
       contexts,
       user: req.admin || req.body?.user || null,
+      history,
     });
 
     return res.status(200).json(orchestratorResult);
-
 
 
 

@@ -3,10 +3,13 @@ import { decisionEngine } from "../decision/decision.engine.js";
 import { executeActions } from "../actions/execute.actions.js";
 import { formatResponse, formatError } from "../core/response.core.js";
 import { planIntent } from "../planner/index.js";
+import { askDeepSeek } from "../providers/deepseek.provider.js";
+import { getSystemPrompt } from "../prompts/system.prompt.js";
 
 // AI Orchestrator (ponto central da execução)
 // - Compatível com a arquitetura existente
 // - FASE 1.2: Observabilidade/trace, steps e executionId
+// - FASE 2.0: Chama LLM (DeepSeek) para gerar resposta textual
 
 function createExecutionId(req) {
   const xReq = req?.headers?.["x-request-id"];
@@ -24,7 +27,7 @@ export async function runOrchestrator({
   knowledge = null,
   user = null,
   req = null,
-  // executionId externo (se existir). Se não existir, geramos aqui.
+  history = [],
   executionId: executionIdExternal,
 } = {}) {
   const executionId = executionIdExternal || createExecutionId(req);
@@ -110,7 +113,6 @@ export async function runOrchestrator({
     });
 
     // Dispatcher + Registry + Tools + Repositories happens inside executeActions/agent layer today.
-    // Para manter compatibilidade, medimos o bloco de execução de actions como etapa única.
     const dispatchStepId = "dispatcher_actions";
     pushStep({
       stepId: dispatchStepId,
@@ -132,11 +134,61 @@ export async function runOrchestrator({
       duration: actionsTime,
     });
 
+    // ============================================
+    // FASE 2.0: Chamar LLM (DeepSeek) para gerar resposta textual
+    // ============================================
+    const llmStepId = "llm_generation";
+    pushStep({
+      stepId: llmStepId,
+      agent: "deepseek",
+      action: "askDeepSeek",
+      status: "started",
+      startedAt: nowIso(),
+      finishedAt: null,
+      duration: null,
+      error: null,
+    });
+
+    const llmStartedAt = Date.now();
+
+    // Monta system prompt com knowledge e contexts
+    const systemPrompt = getSystemPrompt({
+      knowledge: resolvedKnowledge,
+      contexts,
+    });
+
+    // Adiciona resultados das actions ao contexto para a LLM
+    const actionsSummary = Array.isArray(actionsResult) && actionsResult.length > 0
+      ? `\n\nRESULTADOS DAS ACOES EXECUTADAS:\n${JSON.stringify(actionsResult, null, 2).slice(0, 4000)}`
+      : "";
+
+    const enrichedMessage = `${message}${actionsSummary}`;
+
+    // Chama DeepSeek
+    const llmResult = await askDeepSeek({
+      message: enrichedMessage,
+      history: Array.isArray(history) ? history : [],
+      systemPrompt,
+    });
+
+    const llmTime = Date.now() - llmStartedAt;
+    markStep(llmStepId, {
+      status: llmResult?.success ? "ok" : "error",
+      finishedAt: nowIso(),
+      duration: llmTime,
+      error: llmResult?.success ? null : (llmResult?.error?.message || "LLM error"),
+    });
+
+    // Usa a resposta da LLM, ou fallback se falhar
+    const replyText = llmResult?.success && typeof llmResult?.reply === "string"
+      ? llmResult.reply
+      : "Processamento concluido, mas nao foi possivel gerar resposta textual.";
+
     const durationMs = Date.now() - traceStartedAt;
 
     return formatResponse({
       success: true,
-      reply: "Processamento concluído.",
+      reply: replyText,
       data: {
         knowledge: resolvedKnowledge,
         signals,
@@ -144,21 +196,23 @@ export async function runOrchestrator({
       actions: Array.isArray(actionsResult) ? actionsResult : [],
       metadata: {
         generatedAt: nowIso(),
-        orchestrator: "v1_1",
+        orchestrator: "v2_0",
         executionId,
         plannerTimeMs: plannerTime,
         orchestratorTimeMs: durationMs,
+        llmTimeMs: llmTime,
         steps,
         summary: {
           signals: signals.length,
           actions: Array.isArray(actionsResult) ? actionsResult.length : 0,
+          llmSuccess: llmResult?.success || false,
         },
       },
     });
   } catch (error) {
     const durationMs = Date.now() - traceStartedAt;
 
-    // Marca a última etapa como erro se existir
+    // Marca a ultima etapa como erro se existir
     const last = steps.length ? steps[steps.length - 1] : null;
     if (last && last.status === "started") {
       last.status = "error";
@@ -171,7 +225,7 @@ export async function runOrchestrator({
       message: error?.message,
       reply: "Erro no Orchestrator",
       metadata: {
-        orchestrator: "v1_1",
+        orchestrator: "v2_0",
         executionId,
         durationMs,
         steps,
@@ -180,5 +234,3 @@ export async function runOrchestrator({
     });
   }
 }
-
-
