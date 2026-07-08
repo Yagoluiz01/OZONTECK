@@ -432,6 +432,10 @@ router.post("/login", async (req, res) => {
       { expiresIn: "8h" }
     );
 
+    // Busca permissões efetivas do admin (vazio para master)
+    const adminIsMaster = isMasterAdmin(admin);
+    const adminPermissions = adminIsMaster ? [] : await getAdminPermissions(admin.id);
+
     return res.status(200).json({
       success: true,
       message: "Login realizado com sucesso",
@@ -442,6 +446,7 @@ router.post("/login", async (req, res) => {
         email: admin.email,
         role: admin.role,
         is_master: admin.is_master,
+        permissions: adminPermissions,
       },
       session: {
         access_token: authData.session?.access_token || null,
@@ -549,11 +554,15 @@ router.get("/me", async (req, res) => {
     // Garante que is_master esteja presente mesmo se a RPC não retornar
     const isMaster = admin.is_master === true;
 
+    // Busca permissões efetivas do admin (vazio para master)
+    const adminPermissions = isMaster ? [] : await getAdminPermissions(admin.id);
+
     return res.status(200).json({
       success: true,
       user: {
         ...admin,
         is_master: isMaster,
+        permissions: adminPermissions,
       },
     });
   } catch (error) {
