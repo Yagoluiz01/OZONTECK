@@ -5,6 +5,7 @@ import { env } from "../config/env.js";
 import { requireAdminAuth } from "../middlewares/auth.middleware.js";
 import { createAdminNotification } from "../services/adminNotifications.service.js";
 import { assignAdminPermissions, isMasterAdmin as isMasterFromService } from "../services/permissions/permission.service.js";
+import { getAdminPermissions } from "../repositories/permission.repository.js";
 
 const router = express.Router();
 
@@ -113,7 +114,7 @@ function getPlainMetadata(value) {
   return value;
 }
 
-function buildRequestWithAdminStatus(request, adminByEmail) {
+function buildRequestWithAdminStatus(request, adminByEmail, permissionsByAdminId = new Map()) {
   const email = normalizeEmail(request?.email);
   const admin = adminByEmail.get(email) || null;
 
@@ -125,8 +126,13 @@ function buildRequestWithAdminStatus(request, adminByEmail) {
     adminAccessStatus = "removed";
   }
 
+  const adminPermissions = admin
+    ? (permissionsByAdminId.get(admin.id) || [])
+    : [];
+
   return {
     ...request,
+    permissions: adminPermissions,
     admin: admin
       ? {
           id: admin.id,
@@ -135,6 +141,7 @@ function buildRequestWithAdminStatus(request, adminByEmail) {
           role: admin.role,
           is_active: admin.is_active,
           is_master: admin.is_master,
+          permissions: adminPermissions,
           created_at: admin.created_at,
           updated_at: admin.updated_at,
         }
@@ -367,7 +374,18 @@ router.get("/admin/access-requests", requireAdminAuth, requireMasterAdmin, async
 
     const adminRows = await findAdminsByEmails((data || []).map((request) => request.email));
     const adminByEmail = new Map(adminRows.map((admin) => [normalizeEmail(admin.email), admin]));
-    const requests = (data || []).map((request) => buildRequestWithAdminStatus(request, adminByEmail));
+    // Busca permissões de cada admin em paralelo
+    const adminIds = adminRows.map((admin) => admin.id).filter(Boolean);
+    const permissionsResults = await Promise.all(
+      adminIds.map((adminId) => getAdminPermissions(adminId).catch(() => []))
+    );
+    const permissionsByAdminId = new Map(
+      adminIds.map((adminId, index) => [adminId, permissionsResults[index] || []])
+    );
+
+    const requests = (data || []).map((request) =>
+      buildRequestWithAdminStatus(request, adminByEmail, permissionsByAdminId)
+    );
 
     return res.json({
       success: true,
