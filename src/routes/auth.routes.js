@@ -4,6 +4,8 @@ import jwt from "jsonwebtoken";
 import { supabaseAdmin, supabaseAuth } from "../config/supabase.js";
 import { env } from "../config/env.js";
 import { recordAuditLog } from "../services/audit.service.js";
+import { getAdminPermissions } from "../repositories/permission.repository.js";
+import { isMasterAdmin } from "../services/permissions/permission.service.js";
 
 const router = express.Router();
 
