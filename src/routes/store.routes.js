@@ -77,6 +77,34 @@ function normalizeMarketingPixel(row = {}) {
   };
 }
 
+router.get("/categories/active", async (req, res) => {
+  try {
+    const { supabaseAdmin } = await import("../config/supabase.js");
+    const { data, error } = await supabaseAdmin.rpc("get_active_categories");
+
+    if (error) {
+      console.error("ERRO AO BUSCAR CATEGORIAS ATIVAS:", error);
+      return res.status(500).json({
+        success: false,
+        message: "Erro ao buscar categorias ativas",
+        categories: [],
+      });
+    }
+
+    return res.json({
+      success: true,
+      categories: data || [],
+    });
+  } catch (error) {
+    console.error("ERRO GERAL AO BUSCAR CATEGORIAS ATIVAS:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Erro ao buscar categorias ativas",
+      categories: [],
+    });
+  }
+});
+
 router.get("/marketing/pixels", async (req, res) => {
   try {
     const url = new URL(`${env.supabaseUrl}/rest/v1/marketing_pixels`);

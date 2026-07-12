@@ -9,6 +9,8 @@ import { isMasterAdmin } from "../services/permissions/permission.service.js";
 
 const router = express.Router();
 
+
+
 async function findAdminByEmail(email) {
   const response = await fetch(`${env.supabaseUrl}/rest/v1/rpc/get_admin_by_email`, {
     method: "POST",

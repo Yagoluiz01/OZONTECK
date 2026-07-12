@@ -1,7 +1,15 @@
-// categories.routes.js
 import express from "express";
 import jwt from "jsonwebtoken";
 import { env } from "../config/env.js";
+import {
+  listAllCategories,
+  listActiveCategories,
+  getCategory,
+  createCategory,
+  updateCategory,
+  deleteCategory,
+  reorderCategories,
+} from "../controllers/categories.controller.js";
 
 const router = express.Router();
 
@@ -112,44 +120,13 @@ async function requireAuth(req, res, next) {
   }
 }
 
-router.get("/", requireAuth, async (req, res) => {
-  try {
-    const response = await fetch(`${env.supabaseUrl}/rest/v1/rpc/get_product_categories`, {
-      method: "POST",
-      headers: {
-        apikey: env.supabaseServiceRoleKey,
-        Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({}),
-    });
-
-    const data = await response.json().catch(() => []);
-
-    if (!response.ok) {
-      return res.status(500).json({
-        success: false,
-        message: "Erro ao buscar categorias",
-        details: data,
-      });
-    }
-
-    return res.status(200).json({
-      success: true,
-      categories: (Array.isArray(data) ? data : []).map((item) => ({
-        id: item.id,
-        name: item.name,
-        slug: item.slug,
-      })),
-    });
-  } catch (error) {
-    console.error("ERRO AO LISTAR CATEGORIAS:", error);
-
-    return res.status(500).json({
-      success: false,
-      message: "Erro interno ao listar categorias",
-    });
-  }
-});
+// Rotas administrativas (protegidas)
+router.get("/", requireAuth, listAllCategories);
+router.get("/active", listActiveCategories);
+router.get("/:id", requireAuth, getCategory);
+router.post("/", requireAuth, createCategory);
+router.put("/:id", requireAuth, updateCategory);
+router.delete("/:id", requireAuth, deleteCategory);
+router.patch("/reorder", requireAuth, reorderCategories);
 
 export default router;

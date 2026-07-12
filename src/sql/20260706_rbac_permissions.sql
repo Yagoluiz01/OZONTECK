@@ -75,10 +75,18 @@ values
 
   ('audit.view', 'Auditoria (visualizar)', 'audit', 'Permite visualizar logs de auditoria.', true),
   ('audit.export', 'Auditoria (exportar)', 'audit', 'Permite exportar dados de auditoria.', true),
+  ('audit.delete', 'Auditoria (excluir)', 'audit', 'Permite excluir logs de auditoria.', true),
 
   ('ai.use', 'Utilizar IA', 'ai', 'Permite uso do assistente IA.', true),
   ('ai.config', 'Configurar IA', 'ai', 'Permite alterar configurações da IA.', true),
   ('ai.history', 'Visualizar histórico IA', 'ai', 'Permite visualizar histórico da IA.', true),
+
+  ('affiliates.view', 'Visualizar afiliados', 'affiliates', 'Permite listar e visualizar afiliados.', true),
+  ('affiliates.goals', 'Metas e bônus', 'affiliates', 'Permite gerenciar metas e bônus de afiliados.', true),
+  ('affiliates.marketing', 'Kit de divulgação', 'affiliates', 'Permite gerenciar kit de divulgação de afiliados.', true),
+  ('affiliates.community', 'Comunidade', 'affiliates', 'Permite acessar a comunidade de afiliados.', true),
+
+  ('leads.view', 'Inteligência de leads', 'leads', 'Permite visualizar inteligência de leads.', true),
 
   ('admins.view', 'Visualizar administradores', 'admins', 'Permite listar administradores.', true),
   ('admins.create', 'Criar administradores', 'admins', 'Permite criar administradores.', true),

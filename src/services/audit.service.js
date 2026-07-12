@@ -1,4 +1,5 @@
 import { isIP } from "node:net";
+import { supabase } from "../config/supabase.js";
 
 import {
   deleteAuditLogById,

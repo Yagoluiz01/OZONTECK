@@ -5,6 +5,7 @@ import { isMasterAdmin } from "../middlewares/masterAdmin.middleware.js";
 import { requirePermission } from "../middlewares/permission.middleware.js";
 import {
   deleteAuditLog,
+  deleteAllAuditLogs,
   getAuditDashboard,
 } from "../services/audit.service.js";
 
@@ -34,6 +35,20 @@ router.get("/logs", requireAdminAuth, requirePermission("audit.read"), async (re
     return res.status(200).json({
       success: true,
       ...data,
+    });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+router.delete("/logs", requireAdminAuth, requirePermission("audit.delete"), async (req, res, next) => {
+  try {
+    const result = await deleteAllAuditLogs();
+
+    return res.status(200).json({
+      success: true,
+      message: "Todos os registros foram excluídos com sucesso.",
+      ...result,
     });
   } catch (error) {
     return next(error);
