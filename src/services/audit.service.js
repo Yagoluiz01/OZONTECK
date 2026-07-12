@@ -111,6 +111,16 @@ export async function deleteAuditLog({ id } = {}) {
   }
 }
 
+export async function deleteAllAuditLogs() {
+  const { error } = await supabaseAdmin
+    .from("admin_audit_logs")
+    .delete()
+    .neq("id", "00000000-0000-0000-0000-000000000000");
+
+  if (error) throw error;
+  return { deleted: true };
+}
+
 export async function recordAuditLog({
   req,
   actor,
