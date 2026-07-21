@@ -90,12 +90,13 @@ export async function createCategory(req, res) {
 export async function updateCategory(req, res) {
   try {
     const { id } = req.params;
-    const { name, slug, icon, description, parent_id, sort_order, is_active } = req.body;
+    const { name, slug, icon, icon_url, description, parent_id, sort_order, is_active } = req.body;
 
     const category = await categoriesService.updateCategory(id, {
       name: name?.trim(),
       slug: slug?.trim().toLowerCase(),
       icon,
+      icon_url,
       description,
       parent_id,
       sort_order,
@@ -164,6 +165,80 @@ export async function reorderCategories(req, res) {
     return res.status(500).json({
       success: false,
       message: error.message || "Erro interno ao reordenar categorias",
+    });
+  }
+}
+
+export async function uploadCategoryIconController(req, res) {
+  try {
+    const { id } = req.params;
+
+    console.log("UPLOAD ICON REQUEST:", {
+      id,
+      hasFile: !!req.file,
+      fileInfo: req.file
+        ? {
+            originalname: req.file.originalname,
+            mimetype: req.file.mimetype,
+            size: req.file.size,
+          }
+        : null,
+    });
+
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: "Nenhum arquivo enviado. Certifique-se de enviar no campo 'icon'.",
+      });
+    }
+
+    const result = await categoriesService.uploadCategoryIcon(id, req.file);
+    return res.status(200).json({ success: true, icon_url: result.icon_url });
+  } catch (error) {
+    console.error("ERRO UPLOAD ÍCONE CATEGORIA:", {
+      message: error.message,
+      stack: error.stack,
+    });
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Erro interno ao fazer upload do ícone",
+    });
+  }
+}
+
+export async function getCategoryProducts(req, res) {
+  try {
+    const { id } = req.params;
+    const products = await categoriesService.getCategoryProducts(id);
+    return res.status(200).json({ success: true, products });
+  } catch (error) {
+    console.error("ERRO LISTAR PRODUTOS DA CATEGORIA:", error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Erro interno ao listar produtos da categoria",
+    });
+  }
+}
+
+export async function updateCategoryProducts(req, res) {
+  try {
+    const { id } = req.params;
+    const { product_ids } = req.body;
+
+    if (!Array.isArray(product_ids)) {
+      return res.status(400).json({
+        success: false,
+        message: "Lista de produtos inválida",
+      });
+    }
+
+    const result = await categoriesService.updateCategoryProducts(id, product_ids);
+    return res.status(200).json({ success: true, message: result.message });
+  } catch (error) {
+    console.error("ERRO ATUALIZAR PRODUTOS DA CATEGORIA:", error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Erro interno ao atualizar produtos da categoria",
     });
   }
 }

@@ -105,6 +105,61 @@ router.get("/categories/active", async (req, res) => {
   }
 });
 
+// Rota pública para buscar uma categoria pelo ID (slug ou UUID)
+router.get("/categories/:idOrSlug", async (req, res) => {
+  try {
+    const { idOrSlug } = req.params;
+    const { supabaseAdmin } = await import("../config/supabase.js");
+
+    // Tenta encontrar pelo ID (UUID) ou pelo slug
+    let category = null;
+
+    // Primeira tentativa: buscar por slug
+    const { data: bySlug } = await supabaseAdmin
+      .from("categories")
+      .select("*")
+      .eq("slug", idOrSlug)
+      .eq("is_active", true)
+      .single();
+
+    if (bySlug) {
+      category = bySlug;
+    } else {
+      // Segunda tentativa: buscar por ID (UUID)
+      const { data: byId } = await supabaseAdmin
+        .from("categories")
+        .select("*")
+        .eq("id", idOrSlug)
+        .eq("is_active", true)
+        .single();
+
+      if (byId) {
+        category = byId;
+      }
+    }
+
+    if (!category) {
+      return res.status(404).json({
+        success: false,
+        message: "Categoria não encontrada",
+        category: null,
+      });
+    }
+
+    return res.json({
+      success: true,
+      category,
+    });
+  } catch (error) {
+    console.error("ERRO AO BUSCAR CATEGORIA:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Erro ao buscar categoria",
+      category: null,
+    });
+  }
+});
+
 router.get("/marketing/pixels", async (req, res) => {
   try {
     const url = new URL(`${env.supabaseUrl}/rest/v1/marketing_pixels`);
@@ -1506,11 +1561,13 @@ function normalizeProduct(product) {
   const sku = String(product?.sku || "").trim();
   const slug = String(product?.slug || sku || slugify(name || id)).trim();
 
-  return {
+    return {
     id,
     sku,
     slug,
     name,
+    category_id: String(product?.category_id || "").trim(),
+    categoryId: String(product?.category_id || "").trim(),
     category: String(product?.category || "").trim(),
     shortDescription: String(
       product?.short_description ||
@@ -3234,11 +3291,20 @@ router.get("/products", async (req, res) => {
       });
     }
 
-    const products = rankStorefrontProducts(
-      response.data
-        .map(normalizeProduct)
-        .filter((product) => product.id && product.name)
-    );
+    let products = response.data
+      .map(normalizeProduct)
+      .filter((product) => product.id && product.name);
+
+    // Filtro por category_id quando passado na query string
+    const categoryId = String(req.query.category_id || "").trim();
+    if (categoryId) {
+      products = products.filter((product) => {
+        const productCategoryId = String(product.category_id || product.categoryId || "").trim();
+        return productCategoryId === categoryId;
+      });
+    }
+
+    products = rankStorefrontProducts(products);
 
     return res.status(200).json({
       success: true,

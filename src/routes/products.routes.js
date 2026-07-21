@@ -2,6 +2,7 @@ import express from "express";
 import crypto from "crypto";
 import jwt from "jsonwebtoken";
 import multer from "multer";
+import sharp from "sharp";
 import { env } from "../config/env.js";
 import { recordAuditLog } from "../services/audit.service.js";
 
@@ -249,6 +250,21 @@ function parseBoolean(value, fallback = false) {
   return fallback;
 }
 
+async function optimizeProductImage(buffer) {
+  try {
+    const optimized = await sharp(buffer)
+      .rotate() // mantém orientação correta
+      .resize(1200, 1200, { fit: "inside", withoutEnlargement: true })
+      .webp({ quality: 85 })
+      .toBuffer();
+
+    return optimized;
+  } catch (error) {
+    console.warn("Falha ao otimizar imagem do produto, usando original:", error);
+    return buffer;
+  }
+}
+
 async function uploadImageToStorage(file) {
   if (!file) return null;
 
@@ -279,9 +295,11 @@ async function uploadImageToStorage(file) {
     throw error;
   }
 
+  const optimizedBuffer = await optimizeProductImage(file.buffer);
+
   const originalBaseName = sanitizeFileName(file.originalname || "imagem")
     .replace(/\.[a-z0-9]+$/i, "") || "imagem";
-  const fileName = `${Date.now()}-${crypto.randomBytes(8).toString("hex")}-${originalBaseName}.${detectedType.extension}`;
+  const fileName = `${Date.now()}-${crypto.randomBytes(8).toString("hex")}-${originalBaseName}.webp`;
   const bucketName = "product-images";
   const uploadUrl = `${env.supabaseUrl}/storage/v1/object/${bucketName}/${fileName}`;
 
@@ -290,10 +308,10 @@ async function uploadImageToStorage(file) {
     headers: {
       apikey: env.supabaseServiceRoleKey,
       Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
-      "Content-Type": detectedType.mimeType,
+      "Content-Type": "image/webp",
       "x-upsert": "false",
     },
-    body: file.buffer,
+    body: optimizedBuffer,
   });
 
   const rawText = await uploadResponse.text();
@@ -305,7 +323,7 @@ async function uploadImageToStorage(file) {
     uploadData = rawText;
   }
 
-  console.log("STORAGE UPLOAD STATUS:", uploadResponse.status);
+  console.log("STORAGE UPLOAD STATUS:", uploadResponse.status, "size:", optimizedBuffer.length);
   console.log("STORAGE UPLOAD RESPONSE:", uploadData);
 
   if (!uploadResponse.ok) {

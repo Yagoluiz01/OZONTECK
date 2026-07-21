@@ -27,3 +27,6 @@ Thumbs.db
 
 # Local tools / agents
 .agents/
+
+# Build artifacts
+*.zip

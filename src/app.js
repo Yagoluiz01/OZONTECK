@@ -33,6 +33,8 @@ import { env } from "./config/env.js";
 import authRoutes from "./routes/auth.routes.js";
 import productsRoutes from "./routes/products.routes.js";
 import categoriesRoutes from "./routes/categories.routes.js";
+import bannersRoutes from "./routes/banners.routes.js";
+import bannerUploadsRoutes from "./routes/bannerUploads.routes.js";
 import ordersRoutes from "./routes/orders.routes.js";
 import customersRoutes from "./routes/customers.routes.js";
 import settingsRoutes from "./routes/settings.routes.js";
@@ -274,8 +276,8 @@ app.use(
   express.json({ limit: "70mb" })
 );
 
-// Demais endpoints não precisam aceitar corpos gigantes em memória.
-app.use(express.json({ limit: "2mb" }));
+// Aumentar limite para permitir uploads de ícone de categoria (até 15MB)
+app.use(express.json({ limit: "15mb" }));
 
 // Registra automaticamente alterações administrativas após a resposta terminar.
 // A falha da auditoria nunca bloqueia a operação principal.
@@ -315,6 +317,8 @@ app.use("/api/admin/push", adminPushRoutes);
 app.use("/api/products", productsRoutes);
 app.use("/api/reports", reportRoutes);
 app.use("/api/categories", categoriesRoutes);
+app.use("/api/banners", bannersRoutes);
+app.use("/api/banners", bannerUploadsRoutes);
 app.use("/api/orders", ordersRoutes);
 app.use("/api/customers", customersRoutes);
 app.use("/api/settings", settingsRoutes);
