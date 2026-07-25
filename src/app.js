@@ -169,6 +169,7 @@ const corsMiddleware = cors({
     "X-ME-Event-ID",
     "X-ME-WEBHOOK-SIGNATURE",
     "X-ME-Signature",
+    "X-Idempotency-Key",
   ],
   optionsSuccessStatus: 204,
 });
