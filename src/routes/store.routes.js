@@ -1587,6 +1587,24 @@ function normalizeProduct(product) {
         ""
     ).trim(),
 
+    // Versões otimizadas de imagem (geradas automaticamente no upload)
+    image_thumb_url: String(product?.image_thumb_url || "").trim(),
+    imageCardUrl: String(product?.image_card_url || product?.image_thumb_url || "").trim(),
+    image_card_url: String(product?.image_card_url || "").trim(),
+    imageDetailUrl: String(product?.image_detail_url || product?.image_url || "").trim(),
+    image_detail_url: String(product?.image_detail_url || "").trim(),
+    imageZoomUrl: String(product?.image_zoom_url || product?.image_url || "").trim(),
+    image_zoom_url: String(product?.image_zoom_url || "").trim(),
+    imageLqip: String(product?.image_lqip || "").trim(),
+    image_lqip: String(product?.image_lqip || "").trim(),
+
+    // Versões otimizadas para imagem 2
+    image_2_thumb_url: String(product?.image_2_thumb_url || "").trim(),
+    image_2_card_url: String(product?.image_2_card_url || "").trim(),
+    image_2_detail_url: String(product?.image_2_detail_url || "").trim(),
+    image_2_zoom_url: String(product?.image_2_zoom_url || "").trim(),
+    image_2_lqip: String(product?.image_2_lqip || "").trim(),
+
     // Vídeo do produto usado na página de detalhes.
     // Mantemos snake_case e camelCase para compatibilidade com o frontend.
     video_url: String(product?.video_url || product?.videoUrl || "").trim(),

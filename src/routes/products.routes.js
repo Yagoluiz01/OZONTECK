@@ -3,6 +3,7 @@ import crypto from "crypto";
 import jwt from "jsonwebtoken";
 import multer from "multer";
 import sharp from "sharp";
+import { processAndUploadProductImage } from "../services/image-optimizer.service.js";
 import { env } from "../config/env.js";
 import { recordAuditLog } from "../services/audit.service.js";
 
@@ -295,47 +296,18 @@ async function uploadImageToStorage(file) {
     throw error;
   }
 
-  const optimizedBuffer = await optimizeProductImage(file.buffer);
+  // Usa o novo service de otimização que gera múltiplas versões
+  const urls = await processAndUploadProductImage(file.buffer, file.originalname || "imagem");
 
-  const originalBaseName = sanitizeFileName(file.originalname || "imagem")
-    .replace(/\.[a-z0-9]+$/i, "") || "imagem";
-  const fileName = `${Date.now()}-${crypto.randomBytes(8).toString("hex")}-${originalBaseName}.webp`;
-  const bucketName = "product-images";
-  const uploadUrl = `${env.supabaseUrl}/storage/v1/object/${bucketName}/${fileName}`;
-
-  const uploadResponse = await fetch(uploadUrl, {
-    method: "POST",
-    headers: {
-      apikey: env.supabaseServiceRoleKey,
-      Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
-      "Content-Type": "image/webp",
-      "x-upsert": "false",
-    },
-    body: optimizedBuffer,
+  console.log("IMAGEM OTIMIZADA - Versões geradas:", {
+    thumb: urls.thumb?.substring(0, 60) + "...",
+    card: urls.card?.substring(0, 60) + "...",
+    detail: urls.detail?.substring(0, 60) + "...",
+    zoom: urls.zoom?.substring(0, 60) + "...",
+    hasLqip: Boolean(urls.lqip),
   });
 
-  const rawText = await uploadResponse.text();
-  let uploadData = null;
-
-  try {
-    uploadData = rawText ? JSON.parse(rawText) : null;
-  } catch {
-    uploadData = rawText;
-  }
-
-  console.log("STORAGE UPLOAD STATUS:", uploadResponse.status, "size:", optimizedBuffer.length);
-  console.log("STORAGE UPLOAD RESPONSE:", uploadData);
-
-  if (!uploadResponse.ok) {
-    throw new Error(
-      uploadData?.message ||
-        uploadData?.error ||
-        (typeof uploadData === "string" ? uploadData : null) ||
-        "Erro ao enviar imagem para o storage"
-    );
-  }
-
-  return `${env.supabaseUrl}/storage/v1/object/public/${bucketName}/${fileName}`;
+  return urls;
 }
 
 function getUploadedFile(req, fieldName) {
@@ -671,13 +643,16 @@ router.post(
 
       let uploadedImageUrl = "";
       let uploadedImageUrl2 = "";
+      let imageVersions = null;
+      let image2Versions = null;
 
       const image1File = getUploadedFile(req, "image");
       const image2File = getUploadedFile(req, "image2");
 
       if (image1File) {
         try {
-          uploadedImageUrl = (await uploadImageToStorage(image1File)) || "";
+          imageVersions = await uploadImageToStorage(image1File);
+          uploadedImageUrl = imageVersions?.zoom || imageVersions?.detail || "";
         } catch (error) {
           console.error("ERRO NO UPLOAD DA IMAGEM 1:", error.message);
           throw error;
@@ -686,7 +661,8 @@ router.post(
 
       if (image2File) {
         try {
-          uploadedImageUrl2 = (await uploadImageToStorage(image2File)) || "";
+          image2Versions = await uploadImageToStorage(image2File);
+          uploadedImageUrl2 = image2Versions?.zoom || image2Versions?.detail || "";
         } catch (error) {
           console.error("ERRO NO UPLOAD DA IMAGEM 2:", error.message);
           throw error;
@@ -716,6 +692,17 @@ router.post(
         variant_order,
         image_url: uploadedImageUrl || "",
         image_url_2: uploadedImageUrl2 || "",
+        // Novos campos de versões otimizadas
+        image_thumb_url: imageVersions?.thumb || "",
+        image_card_url: imageVersions?.card || "",
+        image_detail_url: imageVersions?.detail || "",
+        image_zoom_url: imageVersions?.zoom || "",
+        image_lqip: imageVersions?.lqip || "",
+        image_2_thumb_url: image2Versions?.thumb || "",
+        image_2_card_url: image2Versions?.card || "",
+        image_2_detail_url: image2Versions?.detail || "",
+        image_2_zoom_url: image2Versions?.zoom || "",
+        image_2_lqip: image2Versions?.lqip || "",
       };
 
       const response = await fetch(`${env.supabaseUrl}/rest/v1/products`, {
@@ -831,13 +818,16 @@ router.put(
 
       let finalImageUrl = currentProduct.image_url || "";
       let finalImageUrl2 = currentProduct.image_url_2 || "";
+      let imageVersions = null;
+      let image2Versions = null;
 
       const image1File = getUploadedFile(req, "image");
       const image2File = getUploadedFile(req, "image2");
 
       if (image1File) {
         try {
-          finalImageUrl = (await uploadImageToStorage(image1File)) || finalImageUrl;
+          imageVersions = await uploadImageToStorage(image1File);
+          finalImageUrl = imageVersions?.zoom || imageVersions?.detail || finalImageUrl;
         } catch (error) {
           console.error("ERRO NO UPLOAD DA NOVA IMAGEM 1:", error.message);
           throw error;
@@ -846,7 +836,8 @@ router.put(
 
       if (image2File) {
         try {
-          finalImageUrl2 = (await uploadImageToStorage(image2File)) || finalImageUrl2;
+          image2Versions = await uploadImageToStorage(image2File);
+          finalImageUrl2 = image2Versions?.zoom || image2Versions?.detail || finalImageUrl2;
         } catch (error) {
           console.error("ERRO NO UPLOAD DA NOVA IMAGEM 2:", error.message);
           throw error;
@@ -876,6 +867,21 @@ router.put(
         variant_order,
         image_url: finalImageUrl || "",
         image_url_2: finalImageUrl2 || "",
+        // Atualiza versões otimizadas se nova imagem foi enviada
+        ...(imageVersions ? {
+          image_thumb_url: imageVersions.thumb || "",
+          image_card_url: imageVersions.card || "",
+          image_detail_url: imageVersions.detail || "",
+          image_zoom_url: imageVersions.zoom || "",
+          image_lqip: imageVersions.lqip || "",
+        } : {}),
+        ...(image2Versions ? {
+          image_2_thumb_url: image2Versions.thumb || "",
+          image_2_card_url: image2Versions.card || "",
+          image_2_detail_url: image2Versions.detail || "",
+          image_2_zoom_url: image2Versions.zoom || "",
+          image_2_lqip: image2Versions.lqip || "",
+        } : {}),
       };
 
       const response = await fetch(`${env.supabaseUrl}/rest/v1/products?id=eq.${id}`, {
