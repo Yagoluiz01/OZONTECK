@@ -1,6 +1,38 @@
 import * as bannersService from "../services/banners.service.js";
 import { supabaseAdmin } from "../config/supabase.js";
 
+const ACTIVE_BANNERS_CACHE_TTL_MS = 60_000;
+let activeBannersCache = { banners: null, expiresAt: 0 };
+let activeBannersRequest = null;
+
+function invalidateActiveBannersCache() {
+  activeBannersCache = { banners: null, expiresAt: 0 };
+}
+
+async function getCachedActiveBanners() {
+  const now = Date.now();
+  if (activeBannersCache.banners && activeBannersCache.expiresAt > now) {
+    return activeBannersCache.banners;
+  }
+
+  // Reaproveita a mesma Promise quando várias visitas chegam juntas.
+  if (!activeBannersRequest) {
+    activeBannersRequest = bannersService.getActiveBanners()
+      .then((banners) => {
+        activeBannersCache = {
+          banners,
+          expiresAt: Date.now() + ACTIVE_BANNERS_CACHE_TTL_MS,
+        };
+        return banners;
+      })
+      .finally(() => {
+        activeBannersRequest = null;
+      });
+  }
+
+  return activeBannersRequest;
+}
+
 export async function listAllBanners(req, res) {
   try {
     const banners = await bannersService.getAllBanners();
@@ -16,7 +48,8 @@ export async function listAllBanners(req, res) {
 
 export async function listActiveBanners(req, res) {
   try {
-    const banners = await bannersService.getActiveBanners();
+    const banners = await getCachedActiveBanners();
+    res.set("Cache-Control", "public, max-age=60, s-maxage=60");
     return res.status(200).json({ success: true, banners });
   } catch (error) {
     console.error("ERRO LISTAR BANNERS ATIVOS:", error);
@@ -155,6 +188,7 @@ export async function createBanner(req, res) {
       status: status || "published",
     });
 
+    invalidateActiveBannersCache();
     return res.status(201).json({ success: true, banner });
   } catch (error) {
     console.error("ERRO CRIAR BANNER:", error);
@@ -172,6 +206,7 @@ export async function updateBanner(req, res) {
 
     const banner = await bannersService.updateBanner(id, payload);
 
+    invalidateActiveBannersCache();
     return res.status(200).json({ success: true, banner });
   } catch (error) {
     console.error("ERRO ATUALIZAR BANNER:", error);
@@ -202,6 +237,7 @@ export async function deleteBanner(req, res) {
       });
     }
 
+    invalidateActiveBannersCache();
     return res.status(200).json({ success: true, message: result.message });
   } catch (error) {
     console.error("ERRO EXCLUIR BANNER:", error);
@@ -224,6 +260,7 @@ export async function duplicateBanner(req, res) {
       });
     }
 
+    invalidateActiveBannersCache();
     return res.status(200).json({ success: true, banner: result.banner });
   } catch (error) {
     console.error("ERRO DUPLICAR BANNER:", error);
@@ -287,6 +324,7 @@ export async function reorderBanners(req, res) {
     }
 
     const result = await bannersService.reorderBanners(orders);
+    invalidateActiveBannersCache();
     return res.status(200).json({ success: true, message: result.message });
   } catch (error) {
     console.error("ERRO REORDENAR BANNERS:", error);

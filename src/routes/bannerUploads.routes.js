@@ -3,6 +3,7 @@ import { env } from "../config/env.js";
 import { upload, MAX_BANNER_IMAGE_BYTES, MAX_BANNER_VIDEO_BYTES } from "../middlewares/bannerUpload.middleware.js";
 import { requireAuth } from "./banners.routes.js";
 import { verifyBucketExists } from "../services/storage.service.js";
+import { supabaseAdmin } from "../config/supabase.js";
 
 const router = express.Router();
 
@@ -48,31 +49,22 @@ async function processImage(buffer, deviceType, quality = 0.85) {
 // Upload para Supabase Storage
 async function uploadToStorage(fileBuffer, fileName, mimeType, folder) {
   const uploadPath = `${folder}/${fileName}`;
-  const uploadUrl = `${env.supabaseUrl}/storage/v1/object/banner-images/${uploadPath}`;
-
-  const response = await fetch(uploadUrl, {
-    method: "POST",
-    headers: {
-      apikey: env.supabaseServiceRoleKey,
-      Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
-      "Content-Type": mimeType,
-      "Cache-Control": "public, max-age=31536000",
-    },
-    body: fileBuffer,
+  const { error } = await supabaseAdmin.storage.from(BUCKET_NAME).upload(uploadPath, fileBuffer, {
+    contentType: mimeType,
+    cacheControl: "31536000",
+    upsert: false,
   });
 
-  if (!response.ok) {
-    const errorText = await response.text();
+  if (error) {
     console.error("STORAGE UPLOAD ERROR:", {
-      status: response.status,
-      body: errorText,
-      url: uploadUrl,
+      message: error.message,
+      path: uploadPath,
     });
-    throw new Error(`Upload falhou: ${errorText || response.statusText}`);
+    throw new Error(`Upload falhou: ${error.message}`);
   }
 
-  const publicUrl = `${env.supabaseUrl}/storage/v1/object/public/banner-images/${uploadPath}`;
-  return { url: publicUrl, path: uploadPath };
+  const { data } = supabaseAdmin.storage.from(BUCKET_NAME).getPublicUrl(uploadPath);
+  return { url: data.publicUrl, path: uploadPath };
 }
 
 // Validação de tamanho antes do upload
