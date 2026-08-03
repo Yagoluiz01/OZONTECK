@@ -111,7 +111,7 @@ function getAdminPasswordResetRedirectUrl() {
   const adminUrl = String(
     process.env.ADMIN_FRONTEND_URL ||
       process.env.ADMIN_URL ||
-      "https://ozonteck-admin.onrender.com"
+      "https://ozonteck-admin-x6kz.onrender.com"
   )
     .trim()
     .replace(/\/+$/, "");

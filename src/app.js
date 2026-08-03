@@ -55,6 +55,12 @@ import { requireAffiliateAuth } from "./middlewares/affiliateAuth.middleware.js"
 import melhorEnvioWebhookRoutes from "./routes/melhorEnvioWebhook.routes.js";
 import { captureAdminMutationAudit } from "./middlewares/audit.middleware.js";
 
+// ============================================================
+// SMART LEAD ENGINE (SLE) — Nova Arquitetura Enterprise
+// ============================================================
+import sleRoutes from "./domains/sle/routes/sle.routes.js";
+import { bootstrapSle, getSleStatus } from "./domains/sle/bootstrap.js";
+
 const app = express();
 
 // A API roda atrás do proxy reverso do Render.
@@ -90,7 +96,7 @@ const allowedOrigins = [
   process.env.STORE_FRONTEND_URL,
 
   "https://ozonteck-loja.onrender.com",
-  "https://ozonteck-admin.onrender.com",
+  "https://ozonteck-admin-x6kz.onrender.com",
   "https://ozonteck-api-staging.onrender.com",
 
   "http://localhost:5173",
@@ -163,6 +169,12 @@ const corsMiddleware = cors({
     "X-Requested-With",
     "X-Signature",
     "X-Request-Id",
+    "X-Correlation-Id",
+    "X-Tenant-Id",
+    "X-Visitor-Id",
+    "X-Session-Id",
+    "X-Device-Type",
+    "X-Browser",
     "X-Order-Access-Token",
     "X-ME-Attempt",
     "X-ME-Topic",
@@ -336,6 +348,28 @@ app.patch("/api/affiliate/storefront/profile-photo", requireAffiliateAuth, updat
 app.post("/api/affiliate/storefront/profile-photo", requireAffiliateAuth, updateStorefrontProfilePhoto);
 
 app.use('/api/public/affiliates/password', affiliatePasswordRoutes);
+
+// ============================================================
+// SMART LEAD ENGINE (SLE)
+// Inicialização e Rotas
+// NOTA: SLE_ENABLED=false por padrão. Event Store off por padrão.
+// ============================================================
+if (process.env.SLE_ENABLED === "true") {
+  bootstrapSle();
+  app.use("/api/v2/sle", sleRoutes);
+  app.use("/sle/v1", sleRoutes);
+}
+
+// Health check do SLE (sempre disponível, mesmo desligado)
+app.get("/api/sle/health", (req, res) => {
+  const status = getSleStatus();
+  return res.json({
+    success: true,
+    sle: status,
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString(),
+  });
+});
 
 app.use((req, res) => {
   return res.status(404).json({
