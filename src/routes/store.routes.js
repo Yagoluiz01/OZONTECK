@@ -1901,18 +1901,9 @@ function getStoreBackUrls() {
 }
 
 function isPaymentSimulationEnabled() {
-  if (env.nodeEnv === "production") {
-    return false;
-  }
-
-  const value =
-    env.enablePaymentSimulation ||
-    process.env.ENABLE_PAYMENT_SIMULATION ||
-    "";
-
-  return ["1", "true", "yes", "on"].includes(
-    String(value).trim().toLowerCase()
-  );
+  // A simulação foi retirada do fluxo da loja. Manter este retorno fixo
+  // também protege ambientes de staging com variáveis antigas no Render.
+  return false;
 }
 
 function getFrenetConfig() {
@@ -3707,42 +3698,6 @@ router.post("/orders", async (req, res) => {
     }
 
 
-   if (isPaymentSimulationEnabled()) {
-  const simulatedPaymentUrl = new URL(
-    "https://ozonteck-loja.onrender.com/pages-html/pagamento-simulado.html"
-  );
-
-  simulatedPaymentUrl.searchParams.set(
-    "external_reference",
-    String(createdOrder.order_number || "")
-  );
-
-  simulatedPaymentUrl.searchParams.set(
-    "order_number",
-    String(createdOrder.order_number || "")
-  );
-
-  return res.status(201).json({
-    success: true,
-    message: "Pedido criado com sucesso. Aguardando pagamento simulado.",
-    order: {
-      id: createdOrder.id,
-      number: createdOrder.order_number,
-      total: totalAmount,
-      status: createdOrder.order_status,
-      paymentStatus: createdOrder.payment_status,
-      accessToken: orderAccessToken
-    },
-    payment: {
-      gateway: "simulation_page",
-      preferenceId: "",
-      paymentUrl: simulatedPaymentUrl.toString(),
-      sandboxPaymentUrl: simulatedPaymentUrl.toString(),
-      externalReference: createdOrder.order_number
-    }
-  });
-}
-
 const accessToken = getMercadoPagoAccessToken();
 
 if (!accessToken) {
@@ -3754,8 +3709,7 @@ if (!accessToken) {
 
   return res.status(500).json({
     success: false,
-    message:
-      "MERCADO_PAGO_ACCESS_TOKEN não configurado. Ative ENABLE_PAYMENT_SIMULATION=true apenas fora de produção."
+    message: "MERCADO_PAGO_ACCESS_TOKEN não configurado."
   });
 }
 
