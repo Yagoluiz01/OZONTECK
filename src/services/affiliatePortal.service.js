@@ -1210,7 +1210,26 @@ function isProductPublic(product = {}) {
 }
 
 function isAffiliateProgramProductEnabled(row = {}) {
-  return row?.affiliate_program_enabled === true;
+  const rawValue =
+    row?.affiliate_program_enabled ??
+    row?.affiliateProgramEnabled ??
+    row?.is_affiliate_product ??
+    row?.isAffiliateProduct;
+
+  // Compatibilidade com registros antigos: somente um valor explicitamente
+  // desativado retira o produto do programa. Nulo/ausente segue o padrão ativo
+  // definido pela migração e pelo painel administrativo.
+  if (rawValue === false || rawValue === 0) {
+    return false;
+  }
+
+  const normalized = String(rawValue ?? "").trim().toLowerCase();
+
+  if (["false", "0", "f", "no", "nao", "não", "off", "disabled", "inactive", "inativo"].includes(normalized)) {
+    return false;
+  }
+
+  return true;
 }
 
 function isCommissionEligibleAffiliateOrder(order = {}) {
