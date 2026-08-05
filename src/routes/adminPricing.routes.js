@@ -18,7 +18,10 @@ import {
 
 const router = express.Router();
 
-router.use(requireAdminAuth, requirePermission("pricing.read"));
+router.use(requireAdminAuth);
+
+const requirePricingView = requirePermission("pricing.view");
+const requirePricingEdit = requirePermission("pricing.edit");
 
 function toMoney(value) {
   const number = Number(value);
@@ -44,6 +47,7 @@ function buildPricingSnapshot(record = {}) {
     desired_margin_percent: toMoney(record.desired_margin_percent),
     affiliate_commission_percent: toMoney(record.affiliate_commission_percent),
     network_commission_percent: toMoney(record.network_commission_percent),
+    affiliate_program_enabled: record.affiliate_program_enabled !== false,
     safe_price: toMoney(record.safe_price),
     suggested_price: toMoney(record.suggested_price),
     status: record.status || null,
@@ -82,7 +86,7 @@ function fail(res, error, status = 500) {
   });
 }
 
-router.get("/products", async (req, res) => {
+router.get("/products", requirePricingView, async (req, res) => {
   try {
     const search = req.query.search || "";
     const products = await listProductsForPricing(search);
@@ -92,7 +96,7 @@ router.get("/products", async (req, res) => {
   }
 });
 
-router.get("/", async (req, res) => {
+router.get("/", requirePricingView, async (req, res) => {
   try {
     const records = await listPricingRecords();
     return ok(res, { records });
@@ -106,7 +110,7 @@ router.get("/", async (req, res) => {
  * Rota protegida:
  * GET /api/admin/pricing/payment-fees
  */
-router.get("/payment-fees", async (req, res) => {
+router.get("/payment-fees", requirePricingView, async (req, res) => {
   try {
     const fees = await listPaymentFeeRules();
     return ok(res, { fees }, "Taxas de pagamento carregadas com sucesso.");
@@ -120,7 +124,7 @@ router.get("/payment-fees", async (req, res) => {
  * Rota protegida:
  * POST /api/admin/pricing/simulate-payment-fee
  */
-router.post("/simulate-payment-fee", async (req, res) => {
+router.post("/simulate-payment-fee", requirePricingView, async (req, res) => {
   try {
     const simulation = await simulatePaymentFee(req.body || {});
     return ok(res, { simulation }, "Taxa simulada com sucesso.");
@@ -129,7 +133,7 @@ router.post("/simulate-payment-fee", async (req, res) => {
   }
 });
 
-router.get("/product/:productId", async (req, res) => {
+router.get("/product/:productId", requirePricingView, async (req, res) => {
   try {
     const record = await getPricingByProductId(req.params.productId);
     return ok(res, { record });
@@ -138,7 +142,7 @@ router.get("/product/:productId", async (req, res) => {
   }
 });
 
-router.get("/product/:productId/goal-targets", async (req, res) => {
+router.get("/product/:productId/goal-targets", requirePricingView, async (req, res) => {
   try {
     const targets = await getProductGoalTargets(req.params.productId);
     return ok(res, { targets }, "Metas específicas do produto carregadas com sucesso.");
@@ -151,7 +155,7 @@ router.get("/product/:productId/goal-targets", async (req, res) => {
  * Mantém compatibilidade com o frontend atual:
  * /api/admin/pricing/product/:productId/history
  */
-router.get("/product/:productId/history", async (req, res) => {
+router.get("/product/:productId/history", requirePricingView, async (req, res) => {
   try {
     const history = await getPricingHistoryByProductId(req.params.productId);
     return ok(res, { history });
@@ -164,7 +168,7 @@ router.get("/product/:productId/history", async (req, res) => {
  * Mantém compatibilidade com rota antiga:
  * /api/admin/pricing/history/:productId
  */
-router.get("/history/:productId", async (req, res) => {
+router.get("/history/:productId", requirePricingView, async (req, res) => {
   try {
     const history = await getPricingHistoryByProductId(req.params.productId);
     return ok(res, { history });
@@ -173,7 +177,7 @@ router.get("/history/:productId", async (req, res) => {
   }
 });
 
-router.post("/calculate", async (req, res) => {
+router.post("/calculate", requirePricingView, async (req, res) => {
   try {
     const pricing = await calculateProductPricing(req.body || {});
     return ok(res, { pricing }, "Precificação calculada com sucesso.");
@@ -182,7 +186,7 @@ router.post("/calculate", async (req, res) => {
   }
 });
 
-router.post("/save", async (req, res) => {
+router.post("/save", requirePricingEdit, async (req, res) => {
   try {
     const payload = req.body || {};
     const productId = payload.product_id || payload.productId;
@@ -223,7 +227,7 @@ router.post("/save", async (req, res) => {
   }
 });
 
-router.post("/product/:productId/goal-targets/apply", async (req, res) => {
+router.post("/product/:productId/goal-targets/apply", requirePricingEdit, async (req, res) => {
   try {
     const productId = req.params.productId;
     const previousTargets = await getProductGoalTargets(productId).catch(() => []);
@@ -272,7 +276,7 @@ router.post("/product/:productId/goal-targets/apply", async (req, res) => {
   }
 });
 
-router.post("/apply/:productId", async (req, res) => {
+router.post("/apply/:productId", requirePricingEdit, async (req, res) => {
   try {
     const productId = req.params.productId;
     const previousRecord = await getPricingByProductId(productId);

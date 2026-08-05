@@ -838,7 +838,7 @@ export async function listAffiliateCommissionProducts(filters = {}) {
   const params = new URLSearchParams();
   params.set(
     "select",
-    "id,product_id,affiliate_commission_percent,max_affiliate_commission_percent,special_affiliate_commission_percent,price_with_default_commission,price_with_max_commission,price_with_special_commission,profit_with_default_commission,profit_with_max_commission,profit_with_special_commission,margin_with_default_commission_percent,margin_with_max_commission_percent,margin_with_special_commission_percent,status,risk_message,updated_at,products(id,name,sku,price,category,status,image_url,image_url_2)"
+    "id,product_id,affiliate_program_enabled,affiliate_commission_percent,max_affiliate_commission_percent,special_affiliate_commission_percent,price_with_default_commission,price_with_max_commission,price_with_special_commission,profit_with_default_commission,profit_with_max_commission,profit_with_special_commission,margin_with_default_commission_percent,margin_with_max_commission_percent,margin_with_special_commission_percent,status,risk_message,updated_at,products(id,name,sku,price,category,status,image_url,image_url_2)"
   );
   params.set("order", "updated_at.desc");
   params.set("limit", "300");
@@ -859,7 +859,12 @@ export async function listAffiliateCommissionProducts(filters = {}) {
   }
 
   return safeRows
-    .filter((row) => row?.products && isProductVisibleForCommission(row.products))
+    .filter(
+      (row) =>
+        row?.affiliate_program_enabled !== false &&
+        row?.products &&
+        isProductVisibleForCommission(row.products)
+    )
     .map((row) => {
       const product = row.products || {};
       const currentPrice = getAdminProductPrice(product);
@@ -870,6 +875,7 @@ export async function listAffiliateCommissionProducts(filters = {}) {
 
       return {
         pricing_id: row.id,
+        affiliate_program_enabled: row.affiliate_program_enabled !== false,
         product_id: row.product_id || product.id,
         name: product.name || "Produto",
         sku: product.sku || null,

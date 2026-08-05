@@ -499,9 +499,9 @@ function calculateCommissionPolicyFromCartItems({
     items.reduce((sum, item) => sum + Number(item.totalPrice || item.total_price || 0), 0)
   );
   const safeDiscount = roundMoney(Math.max(Number(discountAmount || 0) || 0, 0));
-  const commissionBase = roundMoney(Math.max(subtotal - safeDiscount, 0));
   const discountRatio = subtotal > 0 ? Math.min(safeDiscount / subtotal, 1) : 0;
 
+  let commissionBase = 0;
   let sellerCommissionAmount = 0;
   let recruitmentCommissionAmount = 0;
 
@@ -510,6 +510,13 @@ function calculateCommissionPolicyFromCartItems({
     const pricing = pricingMap.get(productId) || {};
     const itemTotal = roundMoney(Number(item.totalPrice || item.total_price || 0) || 0);
     const itemBase = roundMoney(Math.max(itemTotal - itemTotal * discountRatio, 0));
+    const affiliateProgramEnabled = pricing?.affiliate_program_enabled === true;
+
+    if (!affiliateProgramEnabled) {
+      continue;
+    }
+
+    commissionBase += itemBase;
 
     const sellerRate = normalizePercentValue(
       pricing.affiliate_commission_percent ?? fallbackSellerRate,
@@ -526,14 +533,15 @@ function calculateCommissionPolicyFromCartItems({
 
   sellerCommissionAmount = roundMoney(sellerCommissionAmount);
   recruitmentCommissionAmount = roundMoney(recruitmentCommissionAmount);
+  commissionBase = roundMoney(commissionBase);
 
   const sellerRate = commissionBase > 0
     ? roundMoney((sellerCommissionAmount / commissionBase) * 100)
-    : normalizePercentValue(fallbackSellerRate);
+    : 0;
 
   const recruitmentRate = commissionBase > 0
     ? roundMoney((recruitmentCommissionAmount / commissionBase) * 100)
-    : normalizePercentValue(fallbackRecruitmentRate);
+    : 0;
 
   return {
     commissionBase,
@@ -541,6 +549,7 @@ function calculateCommissionPolicyFromCartItems({
     sellerCommissionAmount,
     recruitmentRate,
     recruitmentCommissionAmount,
+    hasEligibleAffiliateProducts: commissionBase > 0,
   };
 }
 
@@ -563,16 +572,20 @@ async function calculateCommissionPolicyForOrder(order = {}, sellerAffiliate = n
   }
 
   if (!items.length) {
-    const commissionBase = getCommissionBaseFromOrder(order);
-    const sellerCommissionAmount = roundMoney((commissionBase * fallbackSellerRate) / 100);
-    const recruitmentCommissionAmount = roundMoney((commissionBase * fallbackRecruitmentRate) / 100);
+    console.warn("COMISSÃO BLOQUEADA: itens do pedido não puderam ser verificados.", {
+      orderId: order?.id || null,
+      orderNumber: order?.order_number || null,
+      affiliateId: order?.affiliate_id || null,
+    });
 
     return {
-      commissionBase,
-      sellerRate: fallbackSellerRate,
-      sellerCommissionAmount,
-      recruitmentRate: fallbackRecruitmentRate,
-      recruitmentCommissionAmount,
+      commissionBase: 0,
+      sellerRate: 0,
+      sellerCommissionAmount: 0,
+      recruitmentRate: 0,
+      recruitmentCommissionAmount: 0,
+      hasEligibleAffiliateProducts: false,
+      blockedReason: "order_items_not_verified",
     };
   }
 
@@ -1338,6 +1351,14 @@ async function createAffiliateConversionForPaidOrder(order) {
   const commissionPolicy = await calculateCommissionPolicyForOrder(order, sellerAffiliate);
   const orderTotal = commissionPolicy.commissionBase;
 
+  if (!commissionPolicy.hasEligibleAffiliateProducts || orderTotal <= 0) {
+    return {
+      created: false,
+      skipped: true,
+      reason: commissionPolicy.blockedReason || "order_without_active_affiliate_products",
+    };
+  }
+
   const checkUrl = new URL(`${env.supabaseUrl}/rest/v1/affiliate_conversions`);
   checkUrl.searchParams.set("select", "id");
   checkUrl.searchParams.set("order_id", `eq.${order.id}`);
@@ -1405,6 +1426,7 @@ async function createAffiliateConversionForPaidOrder(order) {
       discount_amount: roundMoney(order.discount_amount || 0),
       payment_total: roundMoney(order.total_amount || 0),
       freight_excluded_from_commission: true,
+      active_affiliate_products_only: true,
     },
     notes: `Comissão criada automaticamente pelo pedido ${order.order_number || order.id}. Frete não incluído na base da comissão.`
   };
@@ -1901,18 +1923,9 @@ function getStoreBackUrls() {
 }
 
 function isPaymentSimulationEnabled() {
-  if (env.nodeEnv === "production") {
-    return false;
-  }
-
-  const value =
-    env.enablePaymentSimulation ||
-    process.env.ENABLE_PAYMENT_SIMULATION ||
-    "";
-
-  return ["1", "true", "yes", "on"].includes(
-    String(value).trim().toLowerCase()
-  );
+  // A simulação foi retirada do fluxo da loja. Manter este retorno fixo
+  // também protege ambientes de staging com variáveis antigas no Render.
+  return false;
 }
 
 function getFrenetConfig() {
@@ -3629,6 +3642,9 @@ router.post("/orders", async (req, res) => {
         network_commission_estimate: affiliate?.id
           ? orderCommissionPolicy.recruitmentCommissionAmount
           : 0,
+        affiliate_program_eligible:
+          Boolean(affiliate?.id) && orderCommissionPolicy.hasEligibleAffiliateProducts === true,
+        affiliate_program_policy: "explicit_product_opt_in",
       },
 
       payment_status: "pending",
@@ -3707,42 +3723,6 @@ router.post("/orders", async (req, res) => {
     }
 
 
-   if (isPaymentSimulationEnabled()) {
-  const simulatedPaymentUrl = new URL(
-    "https://ozonteck-loja.onrender.com/pages-html/pagamento-simulado.html"
-  );
-
-  simulatedPaymentUrl.searchParams.set(
-    "external_reference",
-    String(createdOrder.order_number || "")
-  );
-
-  simulatedPaymentUrl.searchParams.set(
-    "order_number",
-    String(createdOrder.order_number || "")
-  );
-
-  return res.status(201).json({
-    success: true,
-    message: "Pedido criado com sucesso. Aguardando pagamento simulado.",
-    order: {
-      id: createdOrder.id,
-      number: createdOrder.order_number,
-      total: totalAmount,
-      status: createdOrder.order_status,
-      paymentStatus: createdOrder.payment_status,
-      accessToken: orderAccessToken
-    },
-    payment: {
-      gateway: "simulation_page",
-      preferenceId: "",
-      paymentUrl: simulatedPaymentUrl.toString(),
-      sandboxPaymentUrl: simulatedPaymentUrl.toString(),
-      externalReference: createdOrder.order_number
-    }
-  });
-}
-
 const accessToken = getMercadoPagoAccessToken();
 
 if (!accessToken) {
@@ -3754,8 +3734,7 @@ if (!accessToken) {
 
   return res.status(500).json({
     success: false,
-    message:
-      "MERCADO_PAGO_ACCESS_TOKEN não configurado. Ative ENABLE_PAYMENT_SIMULATION=true apenas fora de produção."
+    message: "MERCADO_PAGO_ACCESS_TOKEN não configurado."
   });
 }
 
