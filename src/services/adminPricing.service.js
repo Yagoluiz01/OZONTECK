@@ -43,6 +43,38 @@ function roundMoney(value) {
   return Number(toNumber(value, 0).toFixed(2));
 }
 
+function roundMoneyUp(value) {
+  const number = toNumber(value, 0);
+  return Number((Math.ceil((number - Number.EPSILON) * 100) / 100).toFixed(2));
+}
+
+function normalizeBoolean(value, fallback = true) {
+  if (value === true || value === 1) return true;
+  if (value === false || value === 0) return false;
+
+  const normalized = String(value ?? "").trim().toLowerCase();
+
+  if (["true", "1", "yes", "sim", "on", "enabled", "ativo"].includes(normalized)) {
+    return true;
+  }
+
+  if (["false", "0", "no", "nao", "não", "off", "disabled", "inativo"].includes(normalized)) {
+    return false;
+  }
+
+  return fallback;
+}
+
+function requireNonNegativeMoney(value, fieldLabel) {
+  const number = toNumber(value, 0);
+
+  if (number < 0) {
+    throw new Error(`${fieldLabel} não pode ser negativo.`);
+  }
+
+  return roundMoney(number);
+}
+
 function normalizePercent(value) {
   const percent = toNumber(value, 0);
 
@@ -370,7 +402,31 @@ function calculatePriceForCommission({
     return 0;
   }
 
-  return roundMoney(fixedCost / (1 - variablePercent));
+  const targetMarginPercent = normalizePercent(marginPercent);
+  let candidatePrice = roundMoneyUp(fixedCost / (1 - variablePercent));
+
+  // O arredondamento individual de taxas e comissões pode tirar alguns
+  // centavos da margem. Ajusta para cima até a margem calculada atingir
+  // exatamente o percentual solicitado.
+  for (let attempt = 0; attempt < 1000; attempt += 1) {
+    const profitData = calculateProfitForPrice({
+      price: candidatePrice,
+      baseCost,
+      goalBonusPerSale,
+      gatewayFeePercent,
+      taxPercent,
+      commissionPercent,
+      networkCommissionPercent,
+    });
+
+    if (profitData.margin_percent + Number.EPSILON >= targetMarginPercent) {
+      return candidatePrice;
+    }
+
+    candidatePrice = roundMoney(candidatePrice + 0.01);
+  }
+
+  return candidatePrice;
 }
 
 function calculateProfitForPrice({
@@ -481,50 +537,102 @@ function buildRiskStatus({
 }
 
 function calculatePricing(input) {
-  const costPrice = roundMoney(input.cost_price);
-  const packagingCost = roundMoney(input.packaging_cost);
-  const trafficCost = roundMoney(input.traffic_cost);
-  const operationalCost = roundMoney(input.operational_cost);
+  const affiliateProgramEnabled = normalizeBoolean(
+    input.affiliate_program_enabled ?? input.affiliateProgramEnabled,
+    true
+  );
+
+  const costPrice = requireNonNegativeMoney(input.cost_price, "Custo do produto");
+  const packagingCost = requireNonNegativeMoney(
+    input.packaging_cost,
+    "Custo de embalagem"
+  );
+  const trafficCost = requireNonNegativeMoney(
+    input.traffic_cost,
+    "Custo de tráfego"
+  );
+  const operationalCost = requireNonNegativeMoney(
+    input.operational_cost,
+    "Custo operacional"
+  );
   const gatewayFeePercent = normalizePercent(input.gateway_fee_percent);
   const taxPercent = normalizePercent(input.tax_percent);
-  const otherCosts = roundMoney(input.other_costs);
+  const taxAutomationEnabled = normalizeBoolean(input.tax_automation_enabled, false);
+  const taxRegime = input.tax_regime || null;
+  const taxAnnex = input.tax_annex || null;
+  const taxRevenue12m = requireNonNegativeMoney(
+    input.tax_revenue_12m,
+    "Faturamento dos últimos 12 meses"
+  );
+
+  if (
+    taxAutomationEnabled &&
+    taxRegime === "simples_nacional" &&
+    taxRevenue12m > 4800000
+  ) {
+    throw new Error(
+      "O imposto automático não pode ser aplicado acima do limite anual de R$ 4,8 milhões do Simples Nacional. Informe a alíquota validada pelo contador."
+    );
+  }
+
+  const otherCosts = requireNonNegativeMoney(input.other_costs, "Outros custos");
   const desiredMarginPercent = normalizePercent(input.desired_margin_percent);
-  const averageShippingCost = roundMoney(input.average_shipping_cost);
+  const averageShippingCost = requireNonNegativeMoney(
+    input.average_shipping_cost,
+    "Frete médio"
+  );
   const shippingPolicy = input.shipping_policy || "customer_paid";
   const shippingCostInPrice = resolveShippingCostInPrice(
     averageShippingCost,
     shippingPolicy
   );
 
-  const goalAnalysis = getGoalBonusAnalysis(input);
+  const goalAnalysis = affiliateProgramEnabled
+    ? getGoalBonusAnalysis(input)
+    : {
+        levels: [],
+        worstGoalBonusPerSale: 0,
+        worstGoalLevelName: null,
+      };
   const goalBonusPerSale = goalAnalysis.worstGoalBonusPerSale;
 
-  const affiliateCommissionPercent = normalizePercent(
+  const configuredAffiliateCommissionPercent = normalizePercent(
     getConfiguredNumber(input.affiliate_commission_percent, 10)
   );
-
-  const maxAffiliateCommissionPercent = normalizePercent(
+  const configuredMaxAffiliateCommissionPercent = normalizePercent(
     getConfiguredNumber(input.max_affiliate_commission_percent, 50)
   );
-
-  const specialAffiliateCommissionPercent = normalizePercent(
+  const configuredSpecialAffiliateCommissionPercent = normalizePercent(
     getConfiguredNumber(input.special_affiliate_commission_percent, 50)
   );
+
+  const affiliateCommissionPercent = affiliateProgramEnabled
+    ? configuredAffiliateCommissionPercent
+    : 0;
+  const maxAffiliateCommissionPercent = affiliateProgramEnabled
+    ? configuredMaxAffiliateCommissionPercent
+    : 0;
+  const specialAffiliateCommissionPercent = affiliateProgramEnabled
+    ? configuredSpecialAffiliateCommissionPercent
+    : 0;
 
   const minimumCompanyMarginPercent = normalizePercent(
     getConfiguredNumber(input.minimum_company_margin_percent, 15)
   );
 
-  const commissionScenarioPercent = normalizePercent(
-    getConfiguredNumber(input.commission_scenario_percent, 50)
-  );
+  const commissionScenarioPercent = affiliateProgramEnabled
+    ? normalizePercent(getConfiguredNumber(input.commission_scenario_percent, 50))
+    : 0;
 
-  const networkCommissionPercent = normalizePercent(
+  const configuredNetworkCommissionPercent = normalizePercent(
     getConfiguredNumber(
       input.network_commission_percent ?? input.recruitment_commission_rate,
       0
     )
   );
+  const networkCommissionPercent = affiliateProgramEnabled
+    ? configuredNetworkCommissionPercent
+    : 0;
 
   const baseCost = roundMoney(
     costPrice +
@@ -540,7 +648,7 @@ function calculatePricing(input) {
   const minimumPrice =
     basicVariablePercent >= 1
       ? 0
-      : roundMoney(baseCost / (1 - basicVariablePercent));
+      : roundMoneyUp(baseCost / (1 - basicVariablePercent));
 
   const safeMarginPercent = Math.max(
     desiredMarginPercent,
@@ -576,10 +684,11 @@ function calculatePricing(input) {
       0
   );
 
-  const suggestedPrice =
-    manualSuggestedPrice > calculatedSuggestedPrice
-      ? manualSuggestedPrice
-      : calculatedSuggestedPrice;
+  const suggestedPrice = Math.max(
+    manualSuggestedPrice,
+    calculatedSuggestedPrice,
+    safePrice
+  );
 
   const priceWithMaxCommission = calculatePriceForCommission({
     baseCost,
@@ -648,32 +757,51 @@ function calculatePricing(input) {
     )
   );
 
-  const productSpecificGoalPlan = calculateProductSpecificGoalPlan({
-    price: currentProductPrice > 0 ? currentProductPrice : suggestedPrice,
-    baseCost,
-    gatewayFeePercent,
-    taxPercent,
-    affiliateCommissionPercent,
-    networkCommissionPercent,
-    protectedMarginPercent: safeMarginPercent,
-    safetyReservePercent: getConfiguredNumber(
-      input.goal_safety_reserve_percent,
-      15
-    ),
-    levels: goalAnalysis.levels,
-  });
+  const productSpecificGoalPlan = affiliateProgramEnabled
+    ? calculateProductSpecificGoalPlan({
+        price: currentProductPrice > 0 ? currentProductPrice : suggestedPrice,
+        baseCost,
+        gatewayFeePercent,
+        taxPercent,
+        affiliateCommissionPercent,
+        networkCommissionPercent,
+        protectedMarginPercent: safeMarginPercent,
+        safetyReservePercent: getConfiguredNumber(
+          input.goal_safety_reserve_percent,
+          15
+        ),
+        levels: goalAnalysis.levels,
+      })
+    : {
+        mode: "affiliate_program_disabled",
+        supported: false,
+        reference_price: currentProductPrice > 0 ? currentProductPrice : suggestedPrice,
+        safe_contribution_per_sale: 0,
+        levels: [],
+        message:
+          "Produto fora do programa de afiliados. Comissões, rede e bônus de metas não entram no cálculo.",
+      };
 
-  const risk = buildRiskStatus({
-    suggestedPrice,
-    priceWithMaxCommission,
-    profitWithMaxCommission: maxProfitData.profit,
-    marginWithMaxCommissionPercent: maxProfitData.margin_percent,
-    minimumCompanyMarginPercent,
-    maxAffiliateCommissionPercent,
-    specialAffiliateCommissionPercent,
-  });
+  const risk = affiliateProgramEnabled
+    ? buildRiskStatus({
+        suggestedPrice,
+        priceWithMaxCommission,
+        profitWithMaxCommission: maxProfitData.profit,
+        marginWithMaxCommissionPercent: maxProfitData.margin_percent,
+        minimumCompanyMarginPercent,
+        maxAffiliateCommissionPercent,
+        specialAffiliateCommissionPercent,
+      })
+    : {
+        status: suggestedPrice > 0 ? "healthy" : "invalid",
+        risk_message:
+          suggestedPrice > 0
+            ? "Precificação calculada sem custos do programa de afiliados."
+            : "Precificação inválida. Revise custos, taxas e margem.",
+      };
 
   return {
+    affiliate_program_enabled: affiliateProgramEnabled,
     cost_price: roundMoney(costPrice),
     packaging_cost: roundMoney(packagingCost),
     traffic_cost: roundMoney(trafficCost),
@@ -684,16 +812,34 @@ function calculatePricing(input) {
     average_shipping_cost: roundMoney(averageShippingCost),
     shipping_cost_in_price: roundMoney(shippingCostInPrice),
     shipping_policy: shippingPolicy,
+    installment_interest_policy:
+      input.installment_interest_policy ||
+      input.payment_interest_policy ||
+      "customer_pays",
+    payment_interest_policy:
+      input.payment_interest_policy ||
+      input.installment_interest_policy ||
+      "customer_pays",
+    tax_automation_enabled: taxAutomationEnabled,
+    tax_regime: taxRegime,
+    tax_annex: taxAnnex,
+    tax_revenue_12m: taxRevenue12m,
     desired_margin_percent: roundMoney(desiredMarginPercent),
 
-    affiliate_commission_percent: roundMoney(affiliateCommissionPercent),
-    max_affiliate_commission_percent: roundMoney(maxAffiliateCommissionPercent),
+    affiliate_commission_percent: roundMoney(
+      configuredAffiliateCommissionPercent
+    ),
+    max_affiliate_commission_percent: roundMoney(
+      configuredMaxAffiliateCommissionPercent
+    ),
     special_affiliate_commission_percent: roundMoney(
-      specialAffiliateCommissionPercent
+      configuredSpecialAffiliateCommissionPercent
     ),
     minimum_company_margin_percent: roundMoney(minimumCompanyMarginPercent),
     commission_scenario_percent: roundMoney(commissionScenarioPercent),
-    network_commission_percent: roundMoney(networkCommissionPercent),
+    network_commission_percent: roundMoney(
+      configuredNetworkCommissionPercent
+    ),
     goal_bonus_per_sale: roundMoney(goalBonusPerSale),
     worst_goal_bonus_per_sale: roundMoney(goalBonusPerSale),
     worst_goal_level_name: goalAnalysis.worstGoalLevelName,
@@ -812,6 +958,7 @@ async function createPricingHistory({
     pricing_id: pricingId,
     event_type: eventType,
     current_product_price: roundMoney(currentProductPrice),
+    affiliate_program_enabled: pricingData.affiliate_program_enabled !== false,
 
     cost_price: roundMoney(pricingData.cost_price),
     packaging_cost: roundMoney(pricingData.packaging_cost),
@@ -823,6 +970,18 @@ async function createPricingHistory({
     average_shipping_cost: roundMoney(pricingData.average_shipping_cost),
     shipping_cost_in_price: roundMoney(pricingData.shipping_cost_in_price),
     shipping_policy: pricingData.shipping_policy || "customer_paid",
+    installment_interest_policy:
+      pricingData.installment_interest_policy ||
+      pricingData.payment_interest_policy ||
+      "customer_pays",
+    payment_interest_policy:
+      pricingData.payment_interest_policy ||
+      pricingData.installment_interest_policy ||
+      "customer_pays",
+    tax_automation_enabled: pricingData.tax_automation_enabled === true,
+    tax_regime: pricingData.tax_regime || null,
+    tax_annex: pricingData.tax_annex || null,
+    tax_revenue_12m: roundMoney(pricingData.tax_revenue_12m),
     desired_margin_percent: roundMoney(pricingData.desired_margin_percent),
 
     affiliate_commission_percent: roundMoney(
@@ -1005,7 +1164,9 @@ export async function listPricingRecords() {
 
 export async function getPricingByProductId(productId) {
   const rows = await supabaseFetch(
-    `product_pricing?select=*,products(id,name,sku,price)&product_id=eq.${productId}&limit=1`,
+    `product_pricing?select=*,products(id,name,sku,price)&product_id=eq.${encodeURIComponent(
+      productId
+    )}&order=updated_at.desc&limit=1`,
     { method: "GET" }
   );
 
@@ -1026,13 +1187,152 @@ export async function calculateProductPricing(payload) {
     throw new Error("product_id é obrigatório.");
   }
 
-  const pricing = calculatePricing(payload);
+  const affiliateProgramEnabled = normalizeBoolean(
+    payload.affiliate_program_enabled ?? payload.affiliateProgramEnabled,
+    true
+  );
+
+  const latestAffiliateLevels = affiliateProgramEnabled
+    ? await listActiveAffiliateLevelsForProductGoals()
+    : [];
+
+  const pricing = calculatePricing({
+    ...payload,
+    affiliate_program_enabled: affiliateProgramEnabled,
+    affiliate_goal_levels: latestAffiliateLevels,
+    goal_levels: latestAffiliateLevels,
+  });
 
   return {
     product_id: productId,
     ...pricing,
     notes: payload.notes || null,
   };
+}
+
+async function disableAffiliateProgramForProduct(productId) {
+  const normalizedProductId = String(productId || "").trim();
+
+  if (!normalizedProductId) return;
+
+  const now = new Date().toISOString();
+
+  const cleanupResults = await Promise.allSettled([
+    supabaseFetch(
+      `affiliate_product_goal_targets?product_id=eq.${encodeURIComponent(
+        normalizedProductId
+      )}&is_active=eq.true`,
+      {
+        method: "PATCH",
+        headers: { Prefer: "return=minimal" },
+        body: JSON.stringify({
+          is_active: false,
+          updated_at: now,
+        }),
+      }
+    ),
+    supabaseFetch(
+      `affiliate_storefront_items?product_id=eq.${encodeURIComponent(
+        normalizedProductId
+      )}`,
+      {
+        method: "DELETE",
+        headers: { Prefer: "return=minimal" },
+      }
+    ),
+  ]);
+
+  cleanupResults.forEach((result, index) => {
+    if (result.status === "rejected") {
+      console.error("[PRICING_AFFILIATE_CLEANUP_ERROR]", {
+        productId: normalizedProductId,
+        operation: index === 0 ? "disable_goal_targets" : "remove_storefront_items",
+        message: result.reason?.message || String(result.reason),
+      });
+    }
+  });
+}
+
+
+export async function updateProductAffiliateProgramStatus(
+  productId,
+  enabled
+) {
+  const normalizedProductId = String(productId || "").trim();
+
+  if (!normalizedProductId) {
+    throw new Error("productId é obrigatório.");
+  }
+
+  const affiliateProgramEnabled = normalizeBoolean(enabled, true);
+  const [existing, product] = await Promise.all([
+    getPricingByProductId(normalizedProductId),
+    getProductById(normalizedProductId),
+  ]);
+
+  if (!existing?.id) {
+    throw new Error(
+      "Salve a precificação deste produto antes de alterar o programa de afiliados."
+    );
+  }
+
+  const recalculated = await calculateProductPricing({
+    ...existing,
+    product_id: normalizedProductId,
+    current_product_price: product?.price || existing.suggested_price || 0,
+    affiliate_program_enabled: affiliateProgramEnabled,
+  });
+
+  const updatedRows = await supabaseFetch(
+    `product_pricing?product_id=eq.${encodeURIComponent(normalizedProductId)}`,
+    {
+      method: "PATCH",
+      headers: {
+        Prefer: "return=representation",
+      },
+      body: JSON.stringify({
+        ...recalculated,
+        affiliate_program_enabled: affiliateProgramEnabled,
+        notes: existing.notes || null,
+        updated_at: new Date().toISOString(),
+      }),
+    }
+  );
+
+  const updated = Array.isArray(updatedRows)
+    ? updatedRows
+        .slice()
+        .sort(
+          (a, b) =>
+            new Date(b?.updated_at || 0).getTime() -
+            new Date(a?.updated_at || 0).getTime()
+        )[0] || null
+    : null;
+
+  if (!updated) {
+    throw new Error(
+      "Não foi possível persistir a participação do produto no programa de afiliados."
+    );
+  }
+
+  if (!affiliateProgramEnabled) {
+    await disableAffiliateProgramForProduct(normalizedProductId);
+  }
+
+  await createPricingHistory({
+    productId: normalizedProductId,
+    pricingId: updated.id,
+    pricingData: updated,
+    eventType: affiliateProgramEnabled
+      ? "affiliate_program_enabled"
+      : "affiliate_program_disabled",
+    currentProductPrice: product?.price || 0,
+    notes: affiliateProgramEnabled
+      ? "Produto incluído no programa de afiliados."
+      : "Produto removido do programa de afiliados.",
+  });
+
+  return updated;
 }
 
 export async function saveProductPricing(payload) {
@@ -1077,6 +1377,10 @@ export async function saveProductPricing(payload) {
   }
 
   if (saved) {
+    if (saved.affiliate_program_enabled === false) {
+      await disableAffiliateProgramForProduct(productId);
+    }
+
     await createPricingHistory({
       productId,
       pricingId: saved.id,
@@ -1148,6 +1452,12 @@ export async function applyProductGoalTargets(productId, { actorId = null } = {}
   if (!pricing?.id) {
     throw new Error(
       "Salve a precificação deste produto antes de aplicar a meta segura específica."
+    );
+  }
+
+  if (pricing.affiliate_program_enabled === false) {
+    throw new Error(
+      "Este produto está fora do programa de afiliados. Ative o programa antes de aplicar metas específicas."
     );
   }
 
@@ -1259,16 +1569,35 @@ export async function applyProductGoalTargets(productId, { actorId = null } = {}
   };
 }
 
-export async function applySuggestedPriceToProduct(productId) {
+export async function applySuggestedPriceToProduct(productId, payload = {}) {
   if (!productId) {
     throw new Error("productId é obrigatório.");
   }
 
-  const pricing = await getPricingByProductId(productId);
+  const savedPricing = await getPricingByProductId(productId);
 
-  if (!pricing) {
+  if (!savedPricing) {
     throw new Error("Precificação não encontrada para este produto.");
   }
+
+  const currentProduct = await getProductById(productId);
+  const requestedSuggestedOverride = roundMoney(
+    payload.suggested_price_override ||
+      payload.manual_suggested_price ||
+      payload.target_suggested_price ||
+      0
+  );
+  const recalculatedPricing = await calculateProductPricing({
+    ...savedPricing,
+    product_id: productId,
+    current_product_price: currentProduct?.price || 0,
+    suggested_price_override:
+      requestedSuggestedOverride > 0 ? requestedSuggestedOverride : 0,
+  });
+  const pricing = {
+    ...savedPricing,
+    ...recalculatedPricing,
+  };
 
   const suggestedPrice = roundMoney(pricing.suggested_price);
 
@@ -1278,40 +1607,49 @@ export async function applySuggestedPriceToProduct(productId) {
     );
   }
 
-  if (
-    pricing.status === "loss" ||
-    pricing.status === "danger" ||
-    pricing.status === "invalid"
-  ) {
+  if (pricing.status !== "healthy") {
     throw new Error(
       pricing.risk_message ||
         "Este produto está com risco financeiro. Ajuste a precificação antes de aplicar."
     );
   }
 
-  const updatedProduct = await supabaseFetch(`products?id=eq.${productId}`, {
-    method: "PATCH",
-    headers: {
-      Prefer: "return=representation",
-    },
-    body: JSON.stringify({
-      price: suggestedPrice,
+  const [updatedProduct, updatedPricingRows] = await Promise.all([
+    supabaseFetch(`products?id=eq.${productId}`, {
+      method: "PATCH",
+      headers: {
+        Prefer: "return=representation",
+      },
+      body: JSON.stringify({
+        price: suggestedPrice,
+      }),
     }),
-  });
+    supabaseFetch(`product_pricing?id=eq.${savedPricing.id}`, {
+      method: "PATCH",
+      headers: {
+        Prefer: "return=representation",
+      },
+      body: JSON.stringify({
+        ...recalculatedPricing,
+        notes: savedPricing.notes || null,
+      }),
+    }),
+  ]);
 
   const product = updatedProduct?.[0] || null;
+  const persistedPricing = updatedPricingRows?.[0] || pricing;
 
   await createPricingHistory({
     productId,
-    pricingId: pricing.id,
-    pricingData: pricing,
+    pricingId: savedPricing.id,
+    pricingData: persistedPricing,
     eventType: "apply_price",
     currentProductPrice: product?.price || suggestedPrice,
-    notes: pricing.notes || null,
+    notes: persistedPricing.notes || null,
   });
 
   return {
-    pricing,
+    pricing: persistedPricing,
     product,
   };
 }

@@ -806,6 +806,9 @@ export async function getAffiliateSummary(affiliateId) {
   const safeAffiliateOrdersTableRows = Array.isArray(affiliateOrdersTableRows)
     ? affiliateOrdersTableRows
     : [];
+  const commissionEligibleAffiliateOrders = safeAffiliateOrdersTableRows.filter(
+    isCommissionEligibleAffiliateOrder
+  );
   const safeActiveLevels = Array.isArray(activeLevelRows) ? activeLevelRows : [];
   const safeRewardClaims = Array.isArray(rewardClaimRows) ? rewardClaimRows : [];
   const goal = Array.isArray(goalRows) ? goalRows[0] : null;
@@ -816,7 +819,7 @@ export async function getAffiliateSummary(affiliateId) {
   );
 
   const allOrdersMap = buildOrderMap([
-    ...safeAffiliateOrdersTableRows,
+    ...commissionEligibleAffiliateOrders,
     ...conversionOrders,
   ]);
 
@@ -1063,13 +1066,16 @@ export async function getAffiliateOrders(affiliateId) {
   const safeAffiliateOrdersTableRows = Array.isArray(affiliateOrdersTableRows)
     ? affiliateOrdersTableRows
     : [];
+  const commissionEligibleAffiliateOrders = safeAffiliateOrdersTableRows.filter(
+    isCommissionEligibleAffiliateOrder
+  );
 
   const conversionOrders = await getOrdersByIds(
     safeConversions.map((conversion) => conversion.order_id)
   );
 
   const orderMap = buildOrderMap([
-    ...safeAffiliateOrdersTableRows,
+    ...commissionEligibleAffiliateOrders,
     ...conversionOrders,
   ]);
 
@@ -1105,7 +1111,7 @@ export async function getAffiliateOrders(affiliateId) {
     safeConversions.map((conversion) => String(conversion.order_id || "").trim())
   );
 
-  const tableOnlyRows = safeAffiliateOrdersTableRows
+  const tableOnlyRows = commissionEligibleAffiliateOrders
     .filter((order) => {
       const orderId = String(order.id || "").trim();
 
@@ -1203,6 +1209,28 @@ function isProductPublic(product = {}) {
   return ["active", "ativo", "published", "publicado", "available", "disponivel"].includes(status);
 }
 
+function isAffiliateProgramProductEnabled(row = {}) {
+  const rawValue =
+    row?.affiliate_program_enabled ??
+    row?.affiliateProgramEnabled ??
+    row?.is_affiliate_product ??
+    row?.isAffiliateProduct;
+
+  if (rawValue === true || rawValue === 1) {
+    return true;
+  }
+
+  const normalized = String(rawValue ?? "").trim().toLowerCase();
+
+  return ["true", "1", "t", "yes", "sim", "on", "enabled", "active", "ativo"].includes(
+    normalized
+  );
+}
+
+function isCommissionEligibleAffiliateOrder(order = {}) {
+  return normalizeMoney(order?.affiliate_commission_amount) > 0;
+}
+
 async function getOrderItemsByOrderIds(orderIds = []) {
   const ids = Array.from(
     new Set(
@@ -1265,6 +1293,42 @@ function getConfirmedProductUnits({ target, productId, orderItems = [], orderMap
   }, 0);
 }
 
+async function filterGoalTargetsByAffiliateProgram(targets = []) {
+  const rows = Array.isArray(targets) ? targets : [];
+  const productIds = Array.from(
+    new Set(
+      rows
+        .map((target) => String(target?.product_id || "").trim())
+        .filter(Boolean)
+    )
+  );
+
+  if (!productIds.length) {
+    return [];
+  }
+
+  const pricingRows = await supabaseRequest(
+    `/product_pricing?product_id=in.(${productIds.join(
+      ","
+    )})&affiliate_program_enabled=eq.true&select=product_id`
+  ).catch((error) => {
+    console.warn("AFFILIATE PRODUCT GOAL PRICING FILTER ERROR:", {
+      message: error?.message || String(error),
+    });
+    return [];
+  });
+
+  const enabledProductIds = new Set(
+    (Array.isArray(pricingRows) ? pricingRows : [])
+      .map((row) => String(row?.product_id || "").trim())
+      .filter(Boolean)
+  );
+
+  return rows.filter((target) =>
+    enabledProductIds.has(String(target?.product_id || "").trim())
+  );
+}
+
 async function getAffiliateProductGoalContext(affiliateId) {
   const [goalRows, activeLevels, conversions, directOrders, rewardClaimRows] = await Promise.all([
     supabaseRequest(
@@ -1322,7 +1386,7 @@ async function getAffiliateProductGoalContext(affiliateId) {
     )}&is_active=eq.true&select=id,product_id,affiliate_level_id,required_units,global_required_conversions_snapshot,accumulated_bonus_amount,safe_contribution_per_unit,reference_price,protected_margin_percent,safety_reserve_percent,applied_at,updated_at`
   );
 
-  const safeTargets = Array.isArray(targets) ? targets : [];
+  const safeTargets = await filterGoalTargetsByAffiliateProgram(targets);
   const targetIds = safeTargets
     .map((target) => String(target?.id || "").trim())
     .filter(Boolean);
@@ -1381,9 +1445,14 @@ async function getAffiliateProductGoalContext(affiliateId) {
 function normalizeAffiliateProduct(row = {}, affiliate = {}, goalContext = {}) {
   const product = row.products || {};
   const productId = String(row.product_id || product.id || "").trim();
+  const affiliateProgramEnabled = isAffiliateProgramProductEnabled(row);
   const price = getProductPrice(product);
-  const defaultPercent = roundMoney(row.affiliate_commission_percent ?? affiliate.commission_rate ?? 0);
-  const specialPercent = roundMoney(row.special_affiliate_commission_percent ?? 0);
+  const defaultPercent = affiliateProgramEnabled
+    ? roundMoney(row.affiliate_commission_percent ?? affiliate.commission_rate ?? 0)
+    : 0;
+  const specialPercent = affiliateProgramEnabled
+    ? roundMoney(row.special_affiliate_commission_percent ?? 0)
+    : 0;
   const hasSpecialCommission = Boolean(affiliate.special_product_commission_enabled);
   const commissionPercent = hasSpecialCommission && specialPercent > 0 ? specialPercent : defaultPercent;
   const estimatedCommission = roundMoney(price * (commissionPercent / 100));
@@ -1420,6 +1489,7 @@ function normalizeAffiliateProduct(row = {}, affiliate = {}, goalContext = {}) {
     short_description: product.short_description || "",
     price,
     current_price: price,
+    affiliate_program_enabled: affiliateProgramEnabled,
     commission_percent: commissionPercent,
     affiliate_commission_percent: commissionPercent,
     commission_type: hasSpecialCommission && specialPercent > 0 ? "special" : "default",
@@ -1428,7 +1498,8 @@ function normalizeAffiliateProduct(row = {}, affiliate = {}, goalContext = {}) {
     estimated_default_commission: estimatedCommission,
     pricing_status: row.status || "pending",
     risk_message: row.risk_message || null,
-    can_promote: isSafePricing && price > 0 && commissionPercent > 0,
+    can_promote:
+      affiliateProgramEnabled && isSafePricing && price > 0 && commissionPercent > 0,
     affiliate_link: buildProductAffiliateLink(affiliate.ref_code, productId),
     product_goal: target
       ? {
@@ -1502,13 +1573,18 @@ export async function getAffiliatePromotionalProducts(affiliateId) {
   const goalContext = await getAffiliateProductGoalContext(affiliateId);
 
   const rows = await supabaseRequest(
-    `/product_pricing?select=id,product_id,affiliate_commission_percent,special_affiliate_commission_percent,status,risk_message,updated_at,products(id,name,sku,price,category,status,image_url,image_url_2,short_description)&order=updated_at.desc&limit=200`
+    `/product_pricing?affiliate_program_enabled=eq.true&select=id,product_id,affiliate_program_enabled,affiliate_commission_percent,special_affiliate_commission_percent,status,risk_message,updated_at,products(id,name,sku,price,category,status,image_url,image_url_2,short_description)&order=updated_at.desc&limit=200`
   );
 
   const safeRows = Array.isArray(rows) ? rows : [];
 
   const products = safeRows
-    .filter((row) => row?.products && isProductPublic(row.products))
+    .filter(
+      (row) =>
+        isAffiliateProgramProductEnabled(row) &&
+        row?.products &&
+        isProductPublic(row.products)
+    )
     .map((row) => normalizeAffiliateProduct(row, affiliate, goalContext))
     .filter((product) => product.product_id && product.price > 0)
     .sort((a, b) => {
@@ -1757,10 +1833,25 @@ function sortStorefrontProductsByItems(products = [], items = []) {
 }
 
 function buildStorefrontPayload({ affiliate, storefront, items, products }) {
-  const selectedIds = new Set(items.map((item) => String(item.product_id || "")));
+  const eligibleProducts = (Array.isArray(products) ? products : []).filter(
+    (product) => isAffiliateProgramProductEnabled(product)
+  );
+  const eligibleProductIds = new Set(
+    eligibleProducts
+      .map((product) => String(product.product_id || product.id || "").trim())
+      .filter(Boolean)
+  );
+  const eligibleItems = (Array.isArray(items) ? items : []).filter((item) =>
+    eligibleProductIds.has(String(item.product_id || "").trim())
+  );
+  const selectedIds = new Set(
+    eligibleItems.map((item) => String(item.product_id || "").trim()).filter(Boolean)
+  );
   const selectedProducts = sortStorefrontProductsByItems(
-    products.filter((product) => selectedIds.has(String(product.product_id || product.id || ""))),
-    items
+    eligibleProducts.filter((product) =>
+      selectedIds.has(String(product.product_id || product.id || ""))
+    ),
+    eligibleItems
   );
 
   return {
@@ -1768,7 +1859,7 @@ function buildStorefrontPayload({ affiliate, storefront, items, products }) {
     storefront: normalizeStorefront(storefront, affiliate),
     selected_product_ids: Array.from(selectedIds),
     selected_products: selectedProducts,
-    available_products: products.map((product) => ({
+    available_products: eligibleProducts.map((product) => ({
       ...product,
       selected: selectedIds.has(String(product.product_id || product.id || "")),
     })),
@@ -1971,11 +2062,16 @@ export async function getPublicAffiliateStorefront(slug) {
   }
 
   const rows = await supabaseRequest(
-    `/product_pricing?product_id=in.(${selectedIds.join(",")})&select=id,product_id,affiliate_commission_percent,special_affiliate_commission_percent,status,risk_message,updated_at,products(id,name,sku,price,category,status,image_url,image_url_2,short_description)&limit=200`
+    `/product_pricing?product_id=in.(${selectedIds.join(",")})&affiliate_program_enabled=eq.true&select=id,product_id,affiliate_program_enabled,affiliate_commission_percent,special_affiliate_commission_percent,status,risk_message,updated_at,products(id,name,sku,price,category,status,image_url,image_url_2,short_description)&limit=200`
   );
 
   const products = (Array.isArray(rows) ? rows : [])
-    .filter((row) => row?.products && isProductPublic(row.products))
+    .filter(
+      (row) =>
+        isAffiliateProgramProductEnabled(row) &&
+        row?.products &&
+        isProductPublic(row.products)
+    )
     .map((row) => normalizeAffiliateProduct(row, affiliate))
     .filter((product) => product.product_id && product.price > 0 && product.can_promote);
 
