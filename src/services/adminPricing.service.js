@@ -1164,7 +1164,9 @@ export async function listPricingRecords() {
 
 export async function getPricingByProductId(productId) {
   const rows = await supabaseFetch(
-    `product_pricing?select=*,products(id,name,sku,price)&product_id=eq.${productId}&limit=1`,
+    `product_pricing?select=*,products(id,name,sku,price)&product_id=eq.${encodeURIComponent(
+      productId
+    )}&order=updated_at.desc&limit=1`,
     { method: "GET" }
   );
 
@@ -1249,6 +1251,88 @@ async function disableAffiliateProgramForProduct(productId) {
       });
     }
   });
+}
+
+
+export async function updateProductAffiliateProgramStatus(
+  productId,
+  enabled
+) {
+  const normalizedProductId = String(productId || "").trim();
+
+  if (!normalizedProductId) {
+    throw new Error("productId é obrigatório.");
+  }
+
+  const affiliateProgramEnabled = normalizeBoolean(enabled, true);
+  const [existing, product] = await Promise.all([
+    getPricingByProductId(normalizedProductId),
+    getProductById(normalizedProductId),
+  ]);
+
+  if (!existing?.id) {
+    throw new Error(
+      "Salve a precificação deste produto antes de alterar o programa de afiliados."
+    );
+  }
+
+  const recalculated = await calculateProductPricing({
+    ...existing,
+    product_id: normalizedProductId,
+    current_product_price: product?.price || existing.suggested_price || 0,
+    affiliate_program_enabled: affiliateProgramEnabled,
+  });
+
+  const updatedRows = await supabaseFetch(
+    `product_pricing?product_id=eq.${encodeURIComponent(normalizedProductId)}`,
+    {
+      method: "PATCH",
+      headers: {
+        Prefer: "return=representation",
+      },
+      body: JSON.stringify({
+        ...recalculated,
+        affiliate_program_enabled: affiliateProgramEnabled,
+        notes: existing.notes || null,
+        updated_at: new Date().toISOString(),
+      }),
+    }
+  );
+
+  const updated = Array.isArray(updatedRows)
+    ? updatedRows
+        .slice()
+        .sort(
+          (a, b) =>
+            new Date(b?.updated_at || 0).getTime() -
+            new Date(a?.updated_at || 0).getTime()
+        )[0] || null
+    : null;
+
+  if (!updated) {
+    throw new Error(
+      "Não foi possível persistir a participação do produto no programa de afiliados."
+    );
+  }
+
+  if (!affiliateProgramEnabled) {
+    await disableAffiliateProgramForProduct(normalizedProductId);
+  }
+
+  await createPricingHistory({
+    productId: normalizedProductId,
+    pricingId: updated.id,
+    pricingData: updated,
+    eventType: affiliateProgramEnabled
+      ? "affiliate_program_enabled"
+      : "affiliate_program_disabled",
+    currentProductPrice: product?.price || 0,
+    notes: affiliateProgramEnabled
+      ? "Produto incluído no programa de afiliados."
+      : "Produto removido do programa de afiliados.",
+  });
+
+  return updated;
 }
 
 export async function saveProductPricing(payload) {

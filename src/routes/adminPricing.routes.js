@@ -14,6 +14,7 @@ import {
   listProductsForPricing,
   saveProductPricing,
   simulatePaymentFee,
+  updateProductAffiliateProgramStatus,
 } from "../services/adminPricing.service.js";
 
 const router = express.Router();
@@ -226,6 +227,55 @@ router.post("/save", requirePricingEdit, async (req, res) => {
     return fail(res, error, 400);
   }
 });
+
+router.patch(
+  "/product/:productId/affiliate-program",
+  requirePricingEdit,
+  async (req, res) => {
+    try {
+      const productId = req.params.productId;
+      const previousRecord = await getPricingByProductId(productId);
+      const enabled =
+        req.body?.affiliate_program_enabled ??
+        req.body?.affiliateProgramEnabled;
+      const record = await updateProductAffiliateProgramStatus(
+        productId,
+        enabled
+      );
+
+      await recordAuditSafely({
+        req,
+        action:
+          record.affiliate_program_enabled === true
+            ? "affiliate_program_enabled"
+            : "affiliate_program_disabled",
+        module: "pricing",
+        entityType: "product",
+        entityId: productId,
+        description:
+          record.affiliate_program_enabled === true
+            ? "Produto incluído no programa de afiliados."
+            : "Produto removido do programa de afiliados.",
+        oldValues: buildPricingSnapshot(previousRecord),
+        newValues: buildPricingSnapshot(record),
+        metadata: {
+          source: "admin_pricing_affiliate_program_toggle",
+          pricing_id: record.id || null,
+        },
+      });
+
+      return ok(
+        res,
+        { record },
+        record.affiliate_program_enabled === true
+          ? "Produto incluído no programa de afiliados."
+          : "Produto removido do programa de afiliados."
+      );
+    } catch (error) {
+      return fail(res, error, 400);
+    }
+  }
+);
 
 router.post("/product/:productId/goal-targets/apply", requirePricingEdit, async (req, res) => {
   try {
