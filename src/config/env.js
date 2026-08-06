@@ -43,9 +43,20 @@ export const env = {
   deepseekApiKey: process.env.DEEPSEEK_API_KEY || "",
   apiBaseUrl: process.env.API_BASE_URL || "",
 
-  mercadoPagoAccessToken: process.env.MERCADO_PAGO_ACCESS_TOKEN || "",
-  mercadoPagoPublicKey: process.env.MERCADO_PAGO_PUBLIC_KEY || "",
-  mercadoPagoWebhookSecret: process.env.MERCADO_PAGO_WEBHOOK_SECRET || "",
+  // Nomes preferidos: MERCADO_PAGO_*. Os aliases MERCADOPAGO_*
+  // permanecem aceitos para compatibilidade com configurações antigas do Render.
+  mercadoPagoAccessToken:
+    process.env.MERCADO_PAGO_ACCESS_TOKEN ||
+    process.env.MERCADOPAGO_ACCESS_TOKEN ||
+    "",
+  mercadoPagoPublicKey:
+    process.env.MERCADO_PAGO_PUBLIC_KEY ||
+    process.env.MERCADOPAGO_PUBLIC_KEY ||
+    "",
+  mercadoPagoWebhookSecret:
+    process.env.MERCADO_PAGO_WEBHOOK_SECRET ||
+    process.env.MERCADOPAGO_WEBHOOK_SECRET ||
+    "",
   mercadoPagoAllowUnsignedWebhooks:
     process.env.MERCADO_PAGO_ALLOW_UNSIGNED_WEBHOOKS || "false",
   mercadoPagoWebhookMaxSkewSeconds: Number(

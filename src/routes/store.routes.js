@@ -2056,6 +2056,7 @@ function getMercadoPagoAccessToken() {
   return (
     env.mercadoPagoAccessToken ||
     process.env.MERCADO_PAGO_ACCESS_TOKEN ||
+    process.env.MERCADOPAGO_ACCESS_TOKEN ||
     ""
   ).trim();
 }
@@ -2064,6 +2065,7 @@ function getMercadoPagoPublicKey() {
   return String(
     env.mercadoPagoPublicKey ||
       process.env.MERCADO_PAGO_PUBLIC_KEY ||
+      process.env.MERCADOPAGO_PUBLIC_KEY ||
       ""
   ).trim();
 }
@@ -2072,6 +2074,7 @@ function getMercadoPagoWebhookSecret() {
   return (
     env.mercadoPagoWebhookSecret ||
     process.env.MERCADO_PAGO_WEBHOOK_SECRET ||
+    process.env.MERCADOPAGO_WEBHOOK_SECRET ||
     ""
   ).trim();
 }
@@ -4050,10 +4053,17 @@ router.post("/shipping/quote", async (req, res) => {
 
 router.get("/payments/config", (req, res) => {
   const publicKey = getMercadoPagoPublicKey();
+  const cardPaymentsEnabled = Boolean(publicKey && getMercadoPagoAccessToken());
+
+  res.set("Cache-Control", "no-store, max-age=0");
+
   return res.status(200).json({
     success: true,
-    cardPaymentsEnabled: Boolean(publicKey && getMercadoPagoAccessToken()),
-    publicKey,
+    cardPaymentsEnabled,
+    publicKey: cardPaymentsEnabled ? publicKey : "",
+    message: cardPaymentsEnabled
+      ? null
+      : "Pagamento transparente por cartão ainda não está configurado na API.",
   });
 });
 
