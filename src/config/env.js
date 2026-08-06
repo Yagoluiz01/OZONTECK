@@ -44,7 +44,13 @@ export const env = {
   apiBaseUrl: process.env.API_BASE_URL || "",
 
   mercadoPagoAccessToken: process.env.MERCADO_PAGO_ACCESS_TOKEN || "",
+  mercadoPagoPublicKey: process.env.MERCADO_PAGO_PUBLIC_KEY || "",
   mercadoPagoWebhookSecret: process.env.MERCADO_PAGO_WEBHOOK_SECRET || "",
+  mercadoPagoAllowUnsignedWebhooks:
+    process.env.MERCADO_PAGO_ALLOW_UNSIGNED_WEBHOOKS || "false",
+  mercadoPagoWebhookMaxSkewSeconds: Number(
+    process.env.MERCADO_PAGO_WEBHOOK_MAX_SKEW_SECONDS || 600
+  ),
 
   storeSuccessUrl: process.env.STORE_SUCCESS_URL || "",
   storePendingUrl: process.env.STORE_PENDING_URL || "",

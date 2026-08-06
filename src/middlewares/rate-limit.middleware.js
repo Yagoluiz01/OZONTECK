@@ -80,3 +80,33 @@ export const storeCheckoutLimiter = createSecurityLimiter({
   envMaxKey: "STORE_CHECKOUT_RATE_LIMIT_MAX",
   message: "Muitas tentativas de checkout. Aguarde alguns minutos e tente novamente.",
 });
+
+
+export const storePaymentLimiter = createSecurityLimiter({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  envMaxKey: "STORE_PAYMENT_RATE_LIMIT_MAX",
+  message: "Muitas tentativas de pagamento. Aguarde alguns minutos e tente novamente.",
+});
+
+export const storeInstallmentsLimiter = createSecurityLimiter({
+  windowMs: 5 * 60 * 1000,
+  max: 120,
+  envMaxKey: "STORE_INSTALLMENTS_RATE_LIMIT_MAX",
+  message: "Muitas consultas de parcelamento. Aguarde alguns instantes e tente novamente.",
+});
+
+
+export const storeOrderAccessLimiter = createSecurityLimiter({
+  windowMs: 5 * 60 * 1000,
+  max: 180,
+  envMaxKey: "STORE_ORDER_ACCESS_RATE_LIMIT_MAX",
+  message: "Muitas consultas ao pedido. Aguarde alguns instantes e tente novamente.",
+});
+
+export const storePaymentWebhookLimiter = createSecurityLimiter({
+  windowMs: 60 * 1000,
+  max: 240,
+  envMaxKey: "STORE_PAYMENT_WEBHOOK_RATE_LIMIT_MAX",
+  message: "Muitas notificações de pagamento.",
+});

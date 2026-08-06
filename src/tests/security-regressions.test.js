@@ -130,3 +130,39 @@ test("produção recusa simulação de pagamento ativa", () => {
   assert.match(source, /nodeEnv === "production"/);
   assert.match(source, /ENABLE_PAYMENT_SIMULATION não pode permanecer ativo/);
 });
+
+
+test("checkout transparente usa token de acesso do pedido e não confia no pagador do cliente", () => {
+  const source = read("routes/store.routes.js");
+  assert.match(source, /router\.post\("\/payments"/);
+  assert.match(source, /isValidOrderAccessToken\(req, order\)/);
+  assert.match(source, /customer_email/);
+  assert.match(source, /customer_cpf/);
+  assert.match(source, /X-Idempotency-Key/);
+  assert.match(source, /applyMercadoPagoPaymentTransition\(/);
+});
+
+test("webhook Mercado Pago falha fechado por padrão e valida tempo da assinatura", () => {
+  const source = read("routes/store.routes.js");
+  assert.match(source, /isFreshMercadoPagoWebhookSignature/);
+  assert.match(source, /return res\.status\(401\)/);
+  assert.match(source, /MERCADO_PAGO_ALLOW_UNSIGNED_WEBHOOKS/);
+});
+
+test("pagamento, parcelas, webhook e consulta de pedido possuem limites específicos", () => {
+  const source = read("app.js");
+  assert.match(source, /storePaymentLimiter/);
+  assert.match(source, /storeInstallmentsLimiter/);
+  assert.match(source, /storePaymentWebhookLimiter/);
+  assert.match(source, /storeOrderAccessLimiter/);
+});
+
+test("status do pedido exige prova de acesso e retorna resposta sanitizada", () => {
+  const source = read("routes/store.routes.js");
+  assert.match(source, /router\.get\("\/orders\/:orderNumber\/status"/);
+  assert.match(source, /hasVerifiedOrderAccess\(req, order\)/);
+  assert.doesNotMatch(
+    source.match(/router\.get\("\/orders\/:orderNumber\/status"[\s\S]*?router\.post\("\/orders\/:id\/process-paid"/)?.[0] || "",
+    /customer_email|customer_cpf/
+  );
+});

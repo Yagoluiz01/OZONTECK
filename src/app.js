@@ -19,6 +19,10 @@ import {
   affiliateAuthLimiter,
   storeCheckoutLimiter,
   storeCustomerAuthLimiter,
+  storeInstallmentsLimiter,
+  storeOrderAccessLimiter,
+  storePaymentLimiter,
+  storePaymentWebhookLimiter,
   storeQuoteLimiter,
 } from "./middlewares/rate-limit.middleware.js";
 import adminNotificationsRoutes from "./routes/adminNotifications.routes.js";
@@ -56,6 +60,7 @@ import melhorEnvioWebhookRoutes from "./routes/melhorEnvioWebhook.routes.js";
 import { captureAdminMutationAudit } from "./middlewares/audit.middleware.js";
 
 const app = express();
+app.disable("x-powered-by");
 
 // A API roda atrás do proxy reverso do Render.
 // Confiar em exatamente um salto permite que req.ip e o express-rate-limit
@@ -164,6 +169,7 @@ const corsMiddleware = cors({
     "X-Signature",
     "X-Request-Id",
     "X-Order-Access-Token",
+    "X-CSRF-Token",
     "X-ME-Attempt",
     "X-ME-Topic",
     "X-ME-Event-ID",
@@ -225,11 +231,26 @@ app.post("/api/store/customer/login", storeCustomerAuthLimiter);
 app.post("/api/store/customer/register", storeCustomerAuthLimiter);
 app.post("/api/store/shipping/quote", storeQuoteLimiter);
 app.post("/api/store/orders", storeCheckoutLimiter);
+app.post("/api/store/payments", storePaymentLimiter);
+app.get("/api/store/payments/installments", storeInstallmentsLimiter);
+app.get("/api/store/orders/:orderNumber/status", storeOrderAccessLimiter);
+app.post("/api/store/orders/:orderNumber/notifications/subscribe", storeOrderAccessLimiter);
+app.post(
+  "/api/store/payments/mercado-pago/webhook",
+  storePaymentWebhookLimiter
+);
 
 
 app.use((req, res, next) => {
-  if (req.path.startsWith("/api/auth") || req.path.startsWith("/api/admin")) {
-    res.setHeader("Cache-Control", "no-store");
+  const sensitiveApiPath =
+    req.path.startsWith("/api/auth") ||
+    req.path.startsWith("/api/admin") ||
+    req.path.startsWith("/api/store/orders") ||
+    req.path.startsWith("/api/store/payments");
+
+  if (sensitiveApiPath) {
+    res.setHeader("Cache-Control", "no-store, max-age=0");
+    res.setHeader("Pragma", "no-cache");
   }
   return next();
 });
@@ -277,8 +298,9 @@ app.use(
   express.json({ limit: "70mb" })
 );
 
-// Aumentar limite para permitir uploads de ícone de categoria (até 15MB)
-app.use(express.json({ limit: "15mb" }));
+// Demais endpoints recebem JSON pequeno. Limite reduzido evita consumo excessivo
+// de memória por payloads públicos; uploads grandes permanecem isolados acima.
+app.use(express.json({ limit: "2mb" }));
 
 // Registra automaticamente alterações administrativas após a resposta terminar.
 // A falha da auditoria nunca bloqueia a operação principal.

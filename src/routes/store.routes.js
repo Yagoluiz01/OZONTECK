@@ -2060,12 +2060,32 @@ function getMercadoPagoAccessToken() {
   ).trim();
 }
 
+function getMercadoPagoPublicKey() {
+  return String(
+    env.mercadoPagoPublicKey ||
+      process.env.MERCADO_PAGO_PUBLIC_KEY ||
+      ""
+  ).trim();
+}
+
 function getMercadoPagoWebhookSecret() {
   return (
     env.mercadoPagoWebhookSecret ||
     process.env.MERCADO_PAGO_WEBHOOK_SECRET ||
     ""
   ).trim();
+}
+
+function allowUnsignedMercadoPagoWebhooks() {
+  return ["1", "true", "yes", "on"].includes(
+    String(
+      env.mercadoPagoAllowUnsignedWebhooks ||
+        process.env.MERCADO_PAGO_ALLOW_UNSIGNED_WEBHOOKS ||
+        "false"
+    )
+      .trim()
+      .toLowerCase()
+  );
 }
 
 function getMetaPixelId() {
@@ -2628,7 +2648,6 @@ function hashOrderAccessToken(value) {
 function isValidOrderAccessToken(req, order = {}) {
   const provided = String(
     req.headers["x-order-access-token"] ||
-      req.query?.access_token ||
       req.body?.access_token ||
       req.body?.accessToken ||
       ""
@@ -2784,7 +2803,7 @@ function validateMercadoPagoWebhookSignature({
 
   const { ts, v1 } = parseMercadoPagoSignature(xSignature);
 
-  if (!ts || !v1) {
+  if (!ts || !v1 || !/^[a-f0-9]{64}$/i.test(v1)) {
     return false;
   }
 
@@ -2796,13 +2815,221 @@ function validateMercadoPagoWebhookSignature({
     .digest("hex");
 
   const generatedBuffer = Buffer.from(generated, "hex");
-  const receivedBuffer = Buffer.from(String(v1 || ""), "hex");
+  const receivedBuffer = Buffer.from(v1, "hex");
 
   return (
     generatedBuffer.length === receivedBuffer.length &&
     generatedBuffer.length > 0 &&
     crypto.timingSafeEqual(generatedBuffer, receivedBuffer)
   );
+}
+
+function isFreshMercadoPagoWebhookSignature(xSignature) {
+  const { ts } = parseMercadoPagoSignature(xSignature);
+  const timestampSeconds = Number(ts);
+  const maxSkewSeconds = Math.max(
+    60,
+    Number(env.mercadoPagoWebhookMaxSkewSeconds || 600) || 600
+  );
+
+  if (!Number.isFinite(timestampSeconds) || timestampSeconds <= 0) {
+    return false;
+  }
+
+  return Math.abs(Date.now() / 1000 - timestampSeconds) <= maxSkewSeconds;
+}
+
+function normalizeClientIdempotencyKey(value, scope = "payment") {
+  const raw = String(value || "").trim();
+  if (!raw || raw.length < 16 || raw.length > 150) {
+    const error = new Error("Chave de idempotência inválida.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (!/^[A-Za-z0-9._:-]+$/.test(raw)) {
+    const error = new Error("Chave de idempotência contém caracteres inválidos.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return `${scope}-${crypto.createHash("sha256").update(raw).digest("hex")}`.slice(0, 64);
+}
+
+async function fetchMercadoPagoJson(url, options = {}, timeoutMs = 15000) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+    const data = await response.json().catch(() => ({}));
+    return { response, data };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function getMercadoPagoInstallments({ amount, bin, paymentMethodId }) {
+  const accessToken = getMercadoPagoAccessToken();
+  if (!accessToken) {
+    const error = new Error("Pagamento com cartão não configurado.");
+    error.statusCode = 503;
+    throw error;
+  }
+
+  const normalizedAmount = roundMoney(amount);
+  if (!Number.isFinite(normalizedAmount) || normalizedAmount <= 0 || normalizedAmount > 1000000) {
+    const error = new Error("Valor inválido para consultar parcelamento.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const normalizedBin = onlyDigits(bin || "").slice(0, 8);
+  if (normalizedBin && normalizedBin.length < 6) {
+    const error = new Error("BIN do cartão inválido.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const normalizedPaymentMethod = String(paymentMethodId || "").trim().toLowerCase();
+  if (normalizedPaymentMethod && !/^[a-z0-9_-]{2,40}$/.test(normalizedPaymentMethod)) {
+    const error = new Error("Método de pagamento inválido.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const url = new URL("https://api.mercadopago.com/v1/payment_methods/installments");
+  url.searchParams.set("amount", normalizedAmount.toFixed(2));
+  if (normalizedBin) url.searchParams.set("bin", normalizedBin);
+  if (normalizedPaymentMethod) {
+    url.searchParams.set("payment_method_id", normalizedPaymentMethod);
+  }
+
+  const { response, data } = await fetchMercadoPagoJson(url.toString(), {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      Accept: "application/json",
+    },
+  });
+
+  if (!response.ok || !Array.isArray(data)) {
+    const error = new Error("Não foi possível consultar as parcelas agora.");
+    error.statusCode = response.status >= 400 && response.status < 500 ? 400 : 502;
+    throw error;
+  }
+
+  return data;
+}
+
+async function createMercadoPagoCardPayment({
+  req,
+  order,
+  token,
+  installments,
+  issuerId,
+  paymentMethodId,
+  clientIdempotencyKey,
+}) {
+  const accessToken = getMercadoPagoAccessToken();
+  if (!accessToken) {
+    const error = new Error("Pagamento com cartão não configurado.");
+    error.statusCode = 503;
+    throw error;
+  }
+
+  const normalizedToken = String(token || "").trim();
+  const normalizedPaymentMethod = String(paymentMethodId || "").trim().toLowerCase();
+  const normalizedIssuerId = String(issuerId || "").trim();
+  const normalizedInstallments = Math.trunc(Number(installments || 1));
+  const transactionAmount = roundMoney(order?.total_amount || 0);
+
+  if (!normalizedToken || normalizedToken.length > 512) {
+    const error = new Error("Token do cartão inválido ou expirado.");
+    error.statusCode = 400;
+    throw error;
+  }
+  if (!/^[a-z0-9_-]{2,40}$/.test(normalizedPaymentMethod)) {
+    const error = new Error("Método de pagamento do cartão inválido.");
+    error.statusCode = 400;
+    throw error;
+  }
+  if (normalizedIssuerId && !/^\d{1,20}$/.test(normalizedIssuerId)) {
+    const error = new Error("Emissor do cartão inválido.");
+    error.statusCode = 400;
+    throw error;
+  }
+  if (!Number.isInteger(normalizedInstallments) || normalizedInstallments < 1 || normalizedInstallments > 12) {
+    const error = new Error("Quantidade de parcelas inválida.");
+    error.statusCode = 400;
+    throw error;
+  }
+  if (!transactionAmount || transactionAmount <= 0) {
+    const error = new Error("Valor do pedido inválido para pagamento.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const cpfDigits = onlyDigits(order?.customer_cpf || "");
+  const payer = {
+    email: String(order?.customer_email || "").trim().toLowerCase(),
+  };
+  if (cpfDigits.length === 11) {
+    payer.identification = { type: "CPF", number: cpfDigits };
+  }
+
+  const apiBaseUrl = getApiBaseUrl(req);
+  const body = {
+    transaction_amount: transactionAmount,
+    token: normalizedToken,
+    description: `Pedido OZONTECK ${String(order.order_number || "")}`.trim(),
+    installments: normalizedInstallments,
+    payment_method_id: normalizedPaymentMethod,
+    issuer_id: normalizedIssuerId || undefined,
+    payer,
+    external_reference: String(order.order_number || ""),
+    notification_url: `${apiBaseUrl}/api/store/payments/mercado-pago/webhook`,
+    binary_mode: false,
+    capture: true,
+    metadata: {
+      order_number: String(order.order_number || ""),
+      order_id: String(order.id || ""),
+      source: "store_card_transparent",
+    },
+  };
+
+  const { response, data } = await fetchMercadoPagoJson(
+    "https://api.mercadopago.com/v1/payments",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        "X-Idempotency-Key": clientIdempotencyKey,
+      },
+      body: JSON.stringify(body),
+    },
+    20000
+  );
+
+  if (!response.ok || !data?.id) {
+    const publicMessage =
+      response.status === 422 || response.status === 400
+        ? "Pagamento recusado ou dados do cartão inválidos. Confira os dados e tente novamente."
+        : response.status === 429
+          ? "Muitas tentativas de pagamento. Aguarde e tente novamente."
+          : "O gateway de pagamento está indisponível no momento. Tente novamente.";
+    const error = new Error(publicMessage);
+    error.statusCode = response.status >= 400 && response.status < 500 ? 400 : 502;
+    error.gatewayStatus = response.status;
+    throw error;
+  }
+
+  return data;
 }
 
 async function createMercadoPagoPreference({ req, order, items, customer }) {
@@ -3821,6 +4048,146 @@ router.post("/shipping/quote", async (req, res) => {
   }
 });
 
+router.get("/payments/config", (req, res) => {
+  const publicKey = getMercadoPagoPublicKey();
+  return res.status(200).json({
+    success: true,
+    cardPaymentsEnabled: Boolean(publicKey && getMercadoPagoAccessToken()),
+    publicKey,
+  });
+});
+
+router.get("/payments/installments", async (req, res) => {
+  try {
+    const installments = await getMercadoPagoInstallments({
+      amount: req.query?.amount,
+      bin: req.query?.bin,
+      paymentMethodId: req.query?.payment_method_id,
+    });
+    return res.status(200).json({ success: true, installments });
+  } catch (error) {
+    return res.status(Number(error?.statusCode) || 502).json({
+      success: false,
+      message: error.message || "Não foi possível consultar as parcelas.",
+    });
+  }
+});
+
+router.post("/payments", async (req, res) => {
+  try {
+    const orderNumber = String(req.body?.orderNumber || req.body?.order_number || "").trim();
+    if (!orderNumber) {
+      return res.status(400).json({ success: false, message: "Número do pedido é obrigatório." });
+    }
+
+    const order = await findOrderByExternalReference(orderNumber);
+    if (!isValidOrderAccessToken(req, order)) {
+      return res.status(403).json({ success: false, message: "Acesso ao pedido não autorizado." });
+    }
+
+    const currentPaymentStatus = String(order.payment_status || "").trim().toLowerCase();
+    if (["paid", "approved"].includes(currentPaymentStatus)) {
+      return res.status(409).json({
+        success: false,
+        message: "Este pedido já está pago.",
+        order: { number: order.order_number, paymentStatus: currentPaymentStatus },
+      });
+    }
+
+    const idempotencyKey = normalizeClientIdempotencyKey(
+      req.headers["x-idempotency-key"],
+      "card"
+    );
+    const payment = await createMercadoPagoCardPayment({
+      req,
+      order,
+      token: req.body?.token,
+      installments: req.body?.installments,
+      issuerId: req.body?.issuer || req.body?.issuerId,
+      paymentMethodId: req.body?.paymentMethodId || req.body?.payment_method_id,
+      clientIdempotencyKey: idempotencyKey,
+    });
+
+    const paymentStatus = String(payment.status || "").trim().toLowerCase();
+    const receivedAmount = roundMoney(payment.transaction_amount || 0);
+    const expectedAmount = roundMoney(order.total_amount || 0);
+    const externalReference = String(payment.external_reference || "").trim();
+    const metadataOrderId = String(payment?.metadata?.order_id || "").trim();
+    const currencyId = String(payment.currency_id || "BRL").trim().toUpperCase();
+
+    if (
+      Math.abs(receivedAmount - expectedAmount) > 0.01 ||
+      externalReference !== String(order.order_number || "") ||
+      (metadataOrderId && metadataOrderId !== String(order.id || "")) ||
+      currencyId !== "BRL"
+    ) {
+      await updateOrderById(order.id, {
+        payment_status: "review_required",
+        payment_raw_status: "card_validation_failed",
+        webhook_last_event: "card_payment_validation_failed",
+      });
+      return res.status(502).json({
+        success: false,
+        message: "O pagamento exige revisão de segurança. Nenhuma confirmação foi liberada.",
+      });
+    }
+
+    const financialData = getMercadoPagoFinancialData(payment);
+    await updateOrderById(order.id, {
+      payment_gateway: "mercado_pago_card",
+      payment_reference: String(payment.id || ""),
+      payment_external_reference: String(order.order_number || ""),
+      payment_raw_status: paymentStatus || "pending",
+    });
+
+    const transition = await applyMercadoPagoPaymentTransition({
+      externalReference: order.order_number,
+      paymentId: payment.id,
+      rawStatus: paymentStatus,
+      gatewayFee: financialData.gatewayFee,
+      netAmount: financialData.netAmount,
+      paymentMethodId: financialData.paymentMethodId,
+      paymentTypeId: financialData.paymentTypeId,
+      installments: financialData.installments,
+    });
+
+    const secureActionUrl = String(
+      payment?.three_ds_info?.external_resource_url ||
+        payment?.point_of_interaction?.transaction_data?.ticket_url ||
+        ""
+    ).trim();
+
+    return res.status(200).json({
+      success: true,
+      order: {
+        id: order.id,
+        number: order.order_number,
+        total: expectedAmount,
+        paymentStatus: transition?.order?.payment_status || paymentStatus,
+      },
+      payment: {
+        id: String(payment.id || ""),
+        gateway: "mercado_pago_card",
+        status: paymentStatus,
+        statusDetail: String(payment.status_detail || ""),
+        paymentMethodId: financialData.paymentMethodId,
+        installments: financialData.installments,
+        secureActionUrl,
+      },
+    });
+  } catch (error) {
+    console.error("ERRO AO PROCESSAR PAGAMENTO COM CARTÃO:", {
+      message: error?.message,
+      statusCode: error?.statusCode,
+      gatewayStatus: error?.gatewayStatus,
+    });
+    return res.status(Number(error?.statusCode) || 500).json({
+      success: false,
+      message: error.message || "Não foi possível processar o pagamento.",
+    });
+  }
+});
+
 router.post("/orders", async (req, res) => {
   try {
     const body = req.body || {};
@@ -4097,6 +4464,41 @@ const requestedPaymentMethod = String(
   .trim()
   .toLowerCase();
 
+if (requestedPaymentMethod === "card_transparent") {
+  const paymentUpdate = await updateOrderById(createdOrder.id, {
+    payment_gateway: "mercado_pago_card",
+    payment_external_reference: String(createdOrder.order_number || ""),
+    payment_raw_status: "awaiting_card_token",
+    payment_status: "pending",
+  });
+
+  if (!paymentUpdate.ok) {
+    return res.status(500).json({
+      success: false,
+      message: "Pedido criado, mas não foi possível preparar o pagamento com cartão.",
+    });
+  }
+
+  return res.status(201).json({
+    success: true,
+    message: "Pedido criado. Envie o token seguro do cartão para concluir o pagamento.",
+    order: {
+      id: createdOrder.id,
+      number: createdOrder.order_number,
+      total: totalAmount,
+      status: createdOrder.order_status,
+      paymentStatus: "pending",
+      accessToken: orderAccessToken,
+    },
+    payment: {
+      gateway: "mercado_pago_card",
+      method: "card",
+      externalReference: createdOrder.order_number,
+      requiresToken: true,
+    },
+  });
+}
+
 if (requestedPaymentMethod === "pix_transparent") {
   const pixPayment = await createMercadoPagoPixPayment({
     req,
@@ -4117,8 +4519,7 @@ if (requestedPaymentMethod === "pix_transparent") {
   if (!paymentUpdate.ok) {
     return res.status(500).json({
       success: false,
-      message: "Pedido criado, mas houve erro ao salvar a referência do Pix",
-      details: paymentUpdate.raw
+      message: "Pedido criado, mas houve erro ao salvar a referência do Pix"
     });
   }
 
@@ -4168,8 +4569,7 @@ if (requestedPaymentMethod === "boleto_transparent") {
   if (!paymentUpdate.ok) {
     return res.status(500).json({
       success: false,
-      message: "Pedido criado, mas houve erro ao salvar a referência do boleto",
-      details: paymentUpdate.raw
+      message: "Pedido criado, mas houve erro ao salvar a referência do boleto"
     });
   }
 
@@ -4219,8 +4619,7 @@ if (requestedPaymentMethod === "boleto_transparent") {
       return res.status(500).json({
         success: false,
         message:
-          "Pedido criado, mas houve erro ao salvar a referÃªncia de pagamento",
-        details: paymentUpdate.raw
+          "Pedido criado, mas houve erro ao salvar a referência de pagamento"
       });
     }
 
@@ -4294,26 +4693,33 @@ router.post("/payments/mercado-pago/webhook", async (req, res) => {
 
     if (secret) {
       const hasSignatureHeaders = Boolean(xSignature && xRequestId);
-
-      if (hasSignatureHeaders) {
-        const isValid = validateMercadoPagoWebhookSignature({
+      const isValid =
+        hasSignatureHeaders &&
+        validateMercadoPagoWebhookSignature({
           xSignature,
           xRequestId,
           dataId,
-          secret
+          secret,
+        });
+      const isFresh = hasSignatureHeaders && isFreshMercadoPagoWebhookSignature(xSignature);
+
+      if (!isValid || !isFresh) {
+        const mayAcceptLegacy = allowUnsignedMercadoPagoWebhooks();
+        console.warn("WEBHOOK MERCADO PAGO rejeitado por assinatura ausente, inválida ou expirada.", {
+          dataId,
+          topic,
+          hasSignatureHeaders,
+          isValid,
+          isFresh,
+          legacyOverride: mayAcceptLegacy,
         });
 
-        if (!isValid) {
-          console.warn(
-            "WEBHOOK MERCADO PAGO: assinatura inválida; continuando com validação do pagamento diretamente na API do Mercado Pago.",
-            { dataId, topic }
-          );
+        if (!mayAcceptLegacy) {
+          return res.status(401).json({
+            success: false,
+            message: "Assinatura do webhook inválida.",
+          });
         }
-      } else {
-        console.warn(
-          "WEBHOOK MERCADO PAGO: assinatura ausente (possível IPN legado); continuando com validação do pagamento diretamente na API do Mercado Pago.",
-          { dataId, topic }
-        );
       }
     }
 
@@ -4989,54 +5395,45 @@ router.get("/orders/:orderNumber/status", async (req, res) => {
     if (!orderNumber) {
       return res.status(400).json({
         success: false,
-        message: "NÃºmero do pedido Ã© obrigatÃ³rio"
+        message: "Número do pedido é obrigatório",
       });
     }
 
-    const url = new URL(`${env.supabaseUrl}/rest/v1/orders`);
-    url.searchParams.set("order_number", `eq.${orderNumber}`);
-    url.searchParams.set(
-      "select",
-      "order_number,payment_status,order_status,tracking_code,shipping_tracking_code,paid_at,shipping_label_status,shipping_label_generated_at,shipping_service_name"
-    );
-    url.searchParams.set("limit", "1");
+    const order = await findOrderByExternalReference(orderNumber).catch(() => null);
 
-    const response = await fetch(url.toString(), {
-      method: "GET",
-      headers: {
-        apikey: env.supabaseServiceRoleKey,
-        Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
-        "Content-Type": "application/json",
-        Accept: "application/json"
-      }
-    });
-
-    const data = await response.json().catch(() => []);
-
-    if (!response.ok) {
-      return res.status(500).json({
-        success: false,
-        message: "Erro ao consultar status do pedido"
-      });
-    }
-
-    if (!Array.isArray(data) || !data[0]) {
+    if (!order?.id) {
       return res.status(404).json({
         success: false,
-        message: "Pedido nÃ£o encontrado"
+        message: "Pedido não encontrado",
+      });
+    }
+
+    if (!(await hasVerifiedOrderAccess(req, order))) {
+      return res.status(403).json({
+        success: false,
+        message: "Não foi possível confirmar que este pedido pertence a você.",
       });
     }
 
     return res.status(200).json({
       success: true,
-      order: data[0]
+      order: {
+        order_number: order.order_number,
+        payment_status: order.payment_status,
+        order_status: order.order_status,
+        tracking_code: order.tracking_code || order.shipping_tracking_code || null,
+        paid_at: order.paid_at || null,
+        shipping_label_status: order.shipping_label_status || null,
+        shipping_label_generated_at: order.shipping_label_generated_at || null,
+        shipping_service_name: order.shipping_service_name || null,
+      },
     });
   } catch (error) {
-    console.error("ERRO AO CONSULTAR STATUS DO PEDIDO:", error);
+    console.error("ERRO AO CONSULTAR STATUS DO PEDIDO:", error?.message || error);
 
     return res.status(500).json({
       success: false,
-      message: error.message || "Erro interno ao consultar status do pedido"
+      message: "Erro interno ao consultar status do pedido",
     });
   }
 });
