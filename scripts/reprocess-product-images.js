@@ -32,11 +32,21 @@ const BUCKET_NAME = "product-images";
 
 // Tamanhos a gerar
 const SIZES = {
-  thumb: { width: 320, quality: 75, suffix: "th" },
-  card: { width: 480, quality: 80, suffix: "cd" },
-  detail: { width: 800, quality: 82, suffix: "dt" },
-  zoom: { width: 1200, quality: 85, suffix: "zm" },
+  thumb: { width: 320, quality: 78, suffix: "th" },
+  card: { width: 480, quality: 83, suffix: "cd" },
+  detail: { width: 800, quality: 86, suffix: "dt" },
+  zoom: { width: 1200, quality: 88, suffix: "zm" },
 };
+
+function getWebpOptions(quality) {
+  return {
+    quality,
+    alphaQuality: 92,
+    effort: 5,
+    smartSubsample: true,
+    preset: "picture",
+  };
+}
 
 const LQIP_SIZE = 20;
 const LQIP_QUALITY = 20;
@@ -142,7 +152,7 @@ async function generateLqip(buffer) {
     const lqipBuffer = await sharp(buffer)
       .rotate()
       .resize(LQIP_SIZE, null, { fit: "inside" })
-      .webp({ quality: LQIP_QUALITY })
+      .webp({ quality: LQIP_QUALITY, effort: 4 })
       .toBuffer();
     return `data:image/webp;base64,${lqipBuffer.toString("base64")}`;
   } catch {
@@ -151,33 +161,28 @@ async function generateLqip(buffer) {
 }
 
 async function generateVersions(buffer) {
-  const metadata = await sharp(buffer).metadata();
-  const originalWidth = metadata.width || 0;
-  const originalHeight = metadata.height || 0;
-  const versions = {};
+  await sharp(buffer, { failOn: "warning" }).metadata();
 
+  const versions = {};
   versions.lqip = await generateLqip(buffer);
 
   for (const [name, config] of Object.entries(SIZES)) {
-    const targetWidth = Math.min(config.width, originalWidth);
+    const { data, info } = await sharp(buffer, { failOn: "warning" })
+      .rotate()
+      .resize({
+        width: config.width,
+        fit: "inside",
+        withoutEnlargement: true,
+      })
+      .webp(getWebpOptions(config.quality))
+      .toBuffer({ resolveWithObject: true });
 
-    if (targetWidth < 50) {
-      versions[name] = {
-        buffer: await sharp(buffer).rotate().webp({ quality: config.quality }).toBuffer(),
-        width: originalWidth,
-        height: originalHeight,
-      };
-    } else {
-      versions[name] = {
-        buffer: await sharp(buffer)
-          .rotate()
-          .resize(targetWidth, null, { fit: "inside", withoutEnlargement: true })
-          .webp({ quality: config.quality })
-          .toBuffer(),
-        width: targetWidth,
-        height: Math.round((originalHeight / originalWidth) * targetWidth),
-      };
-    }
+    versions[name] = {
+      buffer: data,
+      width: info.width,
+      height: info.height,
+      size: data.length,
+    };
   }
 
   return versions;
@@ -233,11 +238,8 @@ async function processSingleImage(imageUrl, prefix, args) {
   stats.totalOriginalBytes += originalBuffer.length;
   log(`Original: ${(originalBuffer.length / 1024).toFixed(1)} KB`);
 
-  // Remove EXIF e corrige orientação
-  const cleanBuffer = await sharp(originalBuffer).rotate().withMetadata({}).toBuffer();
-
-  // Gera versões
-  const versions = await generateVersions(cleanBuffer);
+  // Gera as versões diretamente do arquivo baixado para evitar dupla compressão.
+  const versions = await generateVersions(originalBuffer);
 
   const urls = {};
 

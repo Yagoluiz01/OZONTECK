@@ -496,20 +496,52 @@ function calculateCommissionPolicyFromCartItems({
   pricingMap = new Map(),
 } = {}) {
   const subtotal = roundMoney(
-    items.reduce((sum, item) => sum + Number(item.totalPrice || item.total_price || 0), 0)
+    items.reduce(
+      (sum, item) =>
+        sum + Number(item.totalPrice || item.total_price || 0),
+      0
+    )
   );
-  const safeDiscount = roundMoney(Math.max(Number(discountAmount || 0) || 0, 0));
-  const commissionBase = roundMoney(Math.max(subtotal - safeDiscount, 0));
-  const discountRatio = subtotal > 0 ? Math.min(safeDiscount / subtotal, 1) : 0;
+  const safeDiscount = roundMoney(
+    Math.max(Number(discountAmount || 0) || 0, 0)
+  );
+  const discountRatio =
+    subtotal > 0 ? Math.min(safeDiscount / subtotal, 1) : 0;
 
+  let commissionBase = 0;
   let sellerCommissionAmount = 0;
   let recruitmentCommissionAmount = 0;
+  let goalFundReserveAmount = 0;
+  let estimatedBaseCost = 0;
+  let estimatedGatewayCost = 0;
+  let estimatedTaxCost = 0;
+  let minimumCompanyMarginValue = 0;
+  let protectedByValueFloor = false;
+  const eligibleItems = [];
 
   for (const item of items) {
-    const productId = String(item?.product?.id || item?.product_id || "").trim();
+    const productId = String(
+      item?.product?.id || item?.product_id || ""
+    ).trim();
     const pricing = pricingMap.get(productId) || {};
-    const itemTotal = roundMoney(Number(item.totalPrice || item.total_price || 0) || 0);
-    const itemBase = roundMoney(Math.max(itemTotal - itemTotal * discountRatio, 0));
+    const itemTotal = roundMoney(
+      Number(item.totalPrice || item.total_price || 0) || 0
+    );
+    const itemBase = roundMoney(
+      Math.max(itemTotal - itemTotal * discountRatio, 0)
+    );
+    const quantity = Math.max(
+      1,
+      Math.trunc(Number(item.quantity || item.quantidade || 1) || 1)
+    );
+    const affiliateProgramEnabled =
+      pricing?.affiliate_program_enabled === true;
+
+    if (!affiliateProgramEnabled || itemBase <= 0) {
+      continue;
+    }
+
+    commissionBase += itemBase;
 
     const sellerRate = normalizePercentValue(
       pricing.affiliate_commission_percent ?? fallbackSellerRate,
@@ -519,21 +551,139 @@ function calculateCommissionPolicyFromCartItems({
       pricing.network_commission_percent ?? fallbackRecruitmentRate,
       fallbackRecruitmentRate
     );
+    const protectionMode = String(
+      pricing.commission_protection_mode || "value_floor"
+    )
+      .trim()
+      .toLowerCase();
+    const useValueFloor = protectionMode !== "percentage_only";
+    const sellerFloorPerUnit = useValueFloor
+      ? roundMoney(
+          pricing.affiliate_commission_floor_value ??
+            pricing.direct_commission_value ??
+            0
+        )
+      : 0;
+    const networkFloorPerUnit = useValueFloor
+      ? roundMoney(
+          pricing.network_commission_floor_value ??
+            pricing.network_commission_value ??
+            0
+        )
+      : 0;
+    const sellerPercentAmount = roundMoney((itemBase * sellerRate) / 100);
+    const networkPercentAmount = roundMoney(
+      (itemBase * recruitmentRate) / 100
+    );
+    const sellerFloorAmount = roundMoney(sellerFloorPerUnit * quantity);
+    const networkFloorAmount = roundMoney(networkFloorPerUnit * quantity);
+    const sellerItemCommission = roundMoney(
+      Math.max(sellerPercentAmount, sellerFloorAmount)
+    );
+    const networkItemCommission = roundMoney(
+      Math.max(networkPercentAmount, networkFloorAmount)
+    );
 
-    sellerCommissionAmount += roundMoney((itemBase * sellerRate) / 100);
-    recruitmentCommissionAmount += roundMoney((itemBase * recruitmentRate) / 100);
+    if (
+      sellerItemCommission > sellerPercentAmount ||
+      networkItemCommission > networkPercentAmount
+    ) {
+      protectedByValueFloor = true;
+    }
+
+    const goalFundingMode = String(
+      pricing.goal_funding_mode || "collective_fund"
+    )
+      .trim()
+      .toLowerCase();
+    const reservePercent =
+      goalFundingMode === "legacy_unit_provision"
+        ? 0
+        : normalizePercentValue(pricing.goal_fund_reserve_percent ?? 3, 3);
+    const reserveAmount = roundMoney((itemBase * reservePercent) / 100);
+    const itemBaseCost = roundMoney(
+      Number(pricing.cost_total || 0) * quantity
+    );
+    const itemGatewayCost = roundMoney(
+      itemBase *
+        (normalizePercentValue(pricing.gateway_fee_percent || 0) / 100)
+    );
+    const itemTaxCost = roundMoney(
+      itemBase * (normalizePercentValue(pricing.tax_percent || 0) / 100)
+    );
+    const minimumMarginPercent = normalizePercentValue(
+      pricing.minimum_company_margin_percent || 0
+    );
+    const itemMinimumMargin = roundMoney(
+      itemBase * (minimumMarginPercent / 100)
+    );
+
+    sellerCommissionAmount += sellerItemCommission;
+    recruitmentCommissionAmount += networkItemCommission;
+    goalFundReserveAmount += reserveAmount;
+    estimatedBaseCost += itemBaseCost;
+    estimatedGatewayCost += itemGatewayCost;
+    estimatedTaxCost += itemTaxCost;
+    minimumCompanyMarginValue += itemMinimumMargin;
+
+    eligibleItems.push({
+      product_id: productId,
+      quantity,
+      commission_base: itemBase,
+      seller_rate: sellerRate,
+      seller_percent_amount: sellerPercentAmount,
+      seller_floor_amount: sellerFloorAmount,
+      seller_commission_amount: sellerItemCommission,
+      network_rate: recruitmentRate,
+      network_percent_amount: networkPercentAmount,
+      network_floor_amount: networkFloorAmount,
+      network_commission_amount: networkItemCommission,
+      goal_funding_mode: goalFundingMode,
+      goal_fund_reserve_percent: reservePercent,
+      goal_fund_reserve_amount: reserveAmount,
+      estimated_base_cost: itemBaseCost,
+      estimated_gateway_cost: itemGatewayCost,
+      estimated_tax_cost: itemTaxCost,
+      minimum_company_margin_percent: minimumMarginPercent,
+      minimum_company_margin_value: itemMinimumMargin,
+    });
   }
 
   sellerCommissionAmount = roundMoney(sellerCommissionAmount);
   recruitmentCommissionAmount = roundMoney(recruitmentCommissionAmount);
+  goalFundReserveAmount = roundMoney(goalFundReserveAmount);
+  commissionBase = roundMoney(commissionBase);
+  estimatedBaseCost = roundMoney(estimatedBaseCost);
+  estimatedGatewayCost = roundMoney(estimatedGatewayCost);
+  estimatedTaxCost = roundMoney(estimatedTaxCost);
+  minimumCompanyMarginValue = roundMoney(minimumCompanyMarginValue);
 
-  const sellerRate = commissionBase > 0
-    ? roundMoney((sellerCommissionAmount / commissionBase) * 100)
-    : normalizePercentValue(fallbackSellerRate);
+  const sellerRate =
+    commissionBase > 0
+      ? roundMoney((sellerCommissionAmount / commissionBase) * 100)
+      : 0;
 
-  const recruitmentRate = commissionBase > 0
-    ? roundMoney((recruitmentCommissionAmount / commissionBase) * 100)
-    : normalizePercentValue(fallbackRecruitmentRate);
+  const recruitmentRate =
+    commissionBase > 0
+      ? roundMoney((recruitmentCommissionAmount / commissionBase) * 100)
+      : 0;
+
+  const estimatedProfit = roundMoney(
+    commissionBase -
+      estimatedBaseCost -
+      estimatedGatewayCost -
+      estimatedTaxCost -
+      sellerCommissionAmount -
+      recruitmentCommissionAmount -
+      goalFundReserveAmount
+  );
+  const estimatedMarginPercent =
+    commissionBase > 0
+      ? roundMoney((estimatedProfit / commissionBase) * 100)
+      : 0;
+  const marginSubsidyRequired = roundMoney(
+    Math.max(minimumCompanyMarginValue - estimatedProfit, 0)
+  );
 
   return {
     commissionBase,
@@ -541,7 +691,119 @@ function calculateCommissionPolicyFromCartItems({
     sellerCommissionAmount,
     recruitmentRate,
     recruitmentCommissionAmount,
+    goalFundReserveAmount,
+    estimatedBaseCost,
+    estimatedGatewayCost,
+    estimatedTaxCost,
+    estimatedProfit,
+    estimatedMarginPercent,
+    minimumCompanyMarginValue,
+    marginSubsidyRequired,
+    commissionProtectedByValueFloor: protectedByValueFloor,
+    eligibleItems,
+    hasEligibleAffiliateProducts: commissionBase > 0,
   };
+}
+
+async function recordAffiliateGoalFundReserveForPaidOrder(
+  order = {},
+  commissionPolicy = {}
+) {
+  const amount = roundMoney(commissionPolicy.goalFundReserveAmount || 0);
+
+  if (!order?.id || amount <= 0) {
+    return {
+      recorded: false,
+      skipped: true,
+      reason: "no_goal_fund_reserve",
+      amount: 0,
+    };
+  }
+
+  const idempotencyKey = `order-reserve:${order.id}`;
+  const payload = {
+    entry_type: "order_reserve",
+    direction: "credit",
+    amount,
+    order_id: order.id,
+    affiliate_id: order.affiliate_id || null,
+    idempotency_key: idempotencyKey,
+    metadata: {
+      source: "paid_affiliate_order",
+      order_number: order.order_number || null,
+      commission_base: roundMoney(commissionPolicy.commissionBase || 0),
+      seller_commission_amount: roundMoney(
+        commissionPolicy.sellerCommissionAmount || 0
+      ),
+      network_commission_amount: roundMoney(
+        commissionPolicy.recruitmentCommissionAmount || 0
+      ),
+      estimated_profit: roundMoney(
+        commissionPolicy.estimatedProfit || 0
+      ),
+      estimated_margin_percent: roundMoney(
+        commissionPolicy.estimatedMarginPercent || 0
+      ),
+      minimum_company_margin_value: roundMoney(
+        commissionPolicy.minimumCompanyMarginValue || 0
+      ),
+      margin_subsidy_required: roundMoney(
+        commissionPolicy.marginSubsidyRequired || 0
+      ),
+      commission_protected_by_value_floor:
+        commissionPolicy.commissionProtectedByValueFloor === true,
+      eligible_items: Array.isArray(commissionPolicy.eligibleItems)
+        ? commissionPolicy.eligibleItems
+        : [],
+    },
+  };
+
+  try {
+    const response = await fetch(
+      `${env.supabaseUrl}/rest/v1/affiliate_goal_fund_ledger?on_conflict=idempotency_key`,
+      {
+        method: "POST",
+        headers: {
+          apikey: env.supabaseServiceRoleKey,
+          Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
+          "Content-Type": "application/json",
+          Prefer: "resolution=ignore-duplicates,return=representation",
+        },
+        body: JSON.stringify(payload),
+      }
+    );
+
+    const data = await response.json().catch(() => []);
+
+    if (!response.ok) {
+      console.error("ERRO AO REGISTRAR RESERVA DO FUNDO DE METAS:", data);
+      return {
+        recorded: false,
+        skipped: false,
+        amount,
+        error: data,
+      };
+    }
+
+    return {
+      recorded: Array.isArray(data) && data.length > 0,
+      skipped: Array.isArray(data) && data.length === 0,
+      reason:
+        Array.isArray(data) && data.length === 0
+          ? "already_recorded"
+          : null,
+      amount,
+      entry: Array.isArray(data) ? data[0] || null : null,
+    };
+  } catch (error) {
+    console.error("ERRO AO REGISTRAR RESERVA DO FUNDO DE METAS:", error);
+    return {
+      recorded: false,
+      skipped: false,
+      amount,
+      error: error?.message || String(error),
+    };
+  }
 }
 
 async function calculateCommissionPolicyForOrder(order = {}, sellerAffiliate = null) {
@@ -563,16 +825,20 @@ async function calculateCommissionPolicyForOrder(order = {}, sellerAffiliate = n
   }
 
   if (!items.length) {
-    const commissionBase = getCommissionBaseFromOrder(order);
-    const sellerCommissionAmount = roundMoney((commissionBase * fallbackSellerRate) / 100);
-    const recruitmentCommissionAmount = roundMoney((commissionBase * fallbackRecruitmentRate) / 100);
+    console.warn("COMISSÃO BLOQUEADA: itens do pedido não puderam ser verificados.", {
+      orderId: order?.id || null,
+      orderNumber: order?.order_number || null,
+      affiliateId: order?.affiliate_id || null,
+    });
 
     return {
-      commissionBase,
-      sellerRate: fallbackSellerRate,
-      sellerCommissionAmount,
-      recruitmentRate: fallbackRecruitmentRate,
-      recruitmentCommissionAmount,
+      commissionBase: 0,
+      sellerRate: 0,
+      sellerCommissionAmount: 0,
+      recruitmentRate: 0,
+      recruitmentCommissionAmount: 0,
+      hasEligibleAffiliateProducts: false,
+      blockedReason: "order_items_not_verified",
     };
   }
 
@@ -1338,6 +1604,20 @@ async function createAffiliateConversionForPaidOrder(order) {
   const commissionPolicy = await calculateCommissionPolicyForOrder(order, sellerAffiliate);
   const orderTotal = commissionPolicy.commissionBase;
 
+  if (!commissionPolicy.hasEligibleAffiliateProducts || orderTotal <= 0) {
+    return {
+      created: false,
+      skipped: true,
+      reason: commissionPolicy.blockedReason || "order_without_active_affiliate_products",
+    };
+  }
+
+  const goalFundReserveResult =
+    await recordAffiliateGoalFundReserveForPaidOrder(
+      order,
+      commissionPolicy
+    );
+
   const checkUrl = new URL(`${env.supabaseUrl}/rest/v1/affiliate_conversions`);
   checkUrl.searchParams.set("select", "id");
   checkUrl.searchParams.set("order_id", `eq.${order.id}`);
@@ -1368,7 +1648,9 @@ async function createAffiliateConversionForPaidOrder(order) {
       skipped: true,
       reason: "sale_commission_already_exists",
       conversionId: checkData[0].id,
-      recruitmentBonus: recruitmentBonusResult
+      recruitmentBonus: recruitmentBonusResult,
+      goalFundReserve: goalFundReserveResult,
+      commissionPolicy,
     };
   }
 
@@ -1379,7 +1661,9 @@ async function createAffiliateConversionForPaidOrder(order) {
     return {
       created: false,
       skipped: true,
-      reason: "invalid_commission"
+      reason: "invalid_commission",
+      goalFundReserve: goalFundReserveResult,
+      commissionPolicy,
     };
   }
 
@@ -1405,6 +1689,21 @@ async function createAffiliateConversionForPaidOrder(order) {
       discount_amount: roundMoney(order.discount_amount || 0),
       payment_total: roundMoney(order.total_amount || 0),
       freight_excluded_from_commission: true,
+      active_affiliate_products_only: true,
+      commission_protected_by_value_floor:
+        commissionPolicy.commissionProtectedByValueFloor === true,
+      goal_fund_reserve_amount: roundMoney(
+        commissionPolicy.goalFundReserveAmount || 0
+      ),
+      estimated_order_profit: roundMoney(
+        commissionPolicy.estimatedProfit || 0
+      ),
+      estimated_order_margin_percent: roundMoney(
+        commissionPolicy.estimatedMarginPercent || 0
+      ),
+      margin_subsidy_required: roundMoney(
+        commissionPolicy.marginSubsidyRequired || 0
+      ),
     },
     notes: `Comissão criada automaticamente pelo pedido ${order.order_number || order.id}. Frete não incluído na base da comissão.`
   };
@@ -1472,7 +1771,9 @@ async function createAffiliateConversionForPaidOrder(order) {
     created: true,
     skipped: false,
     conversion,
-    recruitmentBonus: recruitmentBonusResult
+    recruitmentBonus: recruitmentBonusResult,
+    goalFundReserve: goalFundReserveResult,
+    commissionPolicy,
   };
 }
 
@@ -1555,13 +1856,66 @@ function filterKitChildrenForStorefront(products = []) {
   });
 }
 
+function buildProductImageSrcset(entries = []) {
+  const seenUrls = new Set();
+  const candidates = [];
+
+  for (const entry of entries) {
+    const url = String(entry?.url || "").trim();
+    const width = Number(entry?.width || 0);
+
+    if (!url || width <= 0 || seenUrls.has(url)) {
+      continue;
+    }
+
+    seenUrls.add(url);
+    candidates.push(`${url} ${width}w`);
+  }
+
+  // Um srcset com apenas uma URL não traz benefício e pode descrever
+  // incorretamente produtos antigos que não possuem versões otimizadas.
+  return candidates.length >= 2 ? candidates.join(", ") : "";
+}
+
 function normalizeProduct(product) {
   const id = String(product?.id || "").trim();
   const name = String(product?.name || "").trim();
   const sku = String(product?.sku || "").trim();
   const slug = String(product?.slug || sku || slugify(name || id)).trim();
 
-    return {
+  const imageUrl = String(product?.image_url || product?.image || "").trim();
+  const imageUrl2 = String(
+    product?.image_url_2 || product?.image2 || product?.image_url || product?.image || ""
+  ).trim();
+  const imageThumbUrl = String(product?.image_thumb_url || "").trim();
+  const imageCardUrl = String(product?.image_card_url || "").trim();
+  const imageDetailUrl = String(product?.image_detail_url || imageUrl).trim();
+  const imageZoomUrl = String(product?.image_zoom_url || imageUrl).trim();
+  const image2ThumbUrl = String(product?.image_2_thumb_url || "").trim();
+  const image2CardUrl = String(product?.image_2_card_url || "").trim();
+  const image2DetailUrl = String(product?.image_2_detail_url || imageUrl2).trim();
+  const image2ZoomUrl = String(product?.image_2_zoom_url || imageUrl2).trim();
+
+  const imageSrcsetThumb = buildProductImageSrcset([
+    { url: imageThumbUrl, width: 320 },
+    { url: imageCardUrl, width: 480 },
+    { url: imageDetailUrl, width: 800 },
+  ]);
+  const imageSrcsetDetail = buildProductImageSrcset([
+    { url: imageDetailUrl, width: 800 },
+    { url: imageZoomUrl, width: 1200 },
+  ]);
+  const image2SrcsetThumb = buildProductImageSrcset([
+    { url: image2ThumbUrl, width: 320 },
+    { url: image2CardUrl, width: 480 },
+    { url: image2DetailUrl, width: 800 },
+  ]);
+  const image2SrcsetDetail = buildProductImageSrcset([
+    { url: image2DetailUrl, width: 800 },
+    { url: image2ZoomUrl, width: 1200 },
+  ]);
+
+  return {
     id,
     sku,
     slug,
@@ -1578,32 +1932,35 @@ function normalizeProduct(product) {
     description: String(
       product?.description || product?.short_description || ""
     ).trim(),
-    imageUrl: String(product?.image_url || product?.image || "").trim(),
-    imageUrl2: String(
-      product?.image_url_2 ||
-        product?.image2 ||
-        product?.image_url ||
-        product?.image ||
-        ""
-    ).trim(),
+    imageUrl,
+    imageUrl2,
 
     // Versões otimizadas de imagem (geradas automaticamente no upload)
-    image_thumb_url: String(product?.image_thumb_url || "").trim(),
-    imageCardUrl: String(product?.image_card_url || product?.image_thumb_url || "").trim(),
-    image_card_url: String(product?.image_card_url || "").trim(),
-    imageDetailUrl: String(product?.image_detail_url || product?.image_url || "").trim(),
+    imageThumbUrl: imageThumbUrl || imageCardUrl || imageUrl,
+    image_thumb_url: imageThumbUrl || imageCardUrl || imageUrl,
+    imageCardUrl: imageCardUrl || imageThumbUrl || imageUrl,
+    image_card_url: imageCardUrl,
+    imageDetailUrl,
     image_detail_url: String(product?.image_detail_url || "").trim(),
-    imageZoomUrl: String(product?.image_zoom_url || product?.image_url || "").trim(),
+    imageZoomUrl,
     image_zoom_url: String(product?.image_zoom_url || "").trim(),
     imageLqip: String(product?.image_lqip || "").trim(),
     image_lqip: String(product?.image_lqip || "").trim(),
+    imageSrcsetThumb: imageSrcsetThumb,
+    image_srcset_thumb: imageSrcsetThumb,
+    imageSrcsetDetail: imageSrcsetDetail,
+    image_srcset_detail: imageSrcsetDetail,
 
     // Versões otimizadas para imagem 2
-    image_2_thumb_url: String(product?.image_2_thumb_url || "").trim(),
-    image_2_card_url: String(product?.image_2_card_url || "").trim(),
+    image_2_thumb_url: image2ThumbUrl,
+    image_2_card_url: image2CardUrl,
     image_2_detail_url: String(product?.image_2_detail_url || "").trim(),
     image_2_zoom_url: String(product?.image_2_zoom_url || "").trim(),
     image_2_lqip: String(product?.image_2_lqip || "").trim(),
+    image2SrcsetThumb: image2SrcsetThumb,
+    image_2_srcset_thumb: image2SrcsetThumb,
+    image2SrcsetDetail: image2SrcsetDetail,
+    image_2_srcset_detail: image2SrcsetDetail,
 
     // Vídeo do produto usado na página de detalhes.
     // Mantemos snake_case e camelCase para compatibilidade com o frontend.
@@ -3620,6 +3977,27 @@ router.post("/orders", async (req, res) => {
         network_commission_estimate: affiliate?.id
           ? orderCommissionPolicy.recruitmentCommissionAmount
           : 0,
+        goal_fund_reserve_amount: affiliate?.id
+          ? orderCommissionPolicy.goalFundReserveAmount
+          : 0,
+        affiliate_order_estimated_profit: affiliate?.id
+          ? orderCommissionPolicy.estimatedProfit
+          : 0,
+        affiliate_order_estimated_margin_percent: affiliate?.id
+          ? orderCommissionPolicy.estimatedMarginPercent
+          : 0,
+        affiliate_order_minimum_margin_value: affiliate?.id
+          ? orderCommissionPolicy.minimumCompanyMarginValue
+          : 0,
+        affiliate_order_margin_subsidy_required: affiliate?.id
+          ? orderCommissionPolicy.marginSubsidyRequired
+          : 0,
+        affiliate_commission_protected_by_value_floor:
+          Boolean(affiliate?.id) &&
+          orderCommissionPolicy.commissionProtectedByValueFloor === true,
+        affiliate_program_eligible:
+          Boolean(affiliate?.id) && orderCommissionPolicy.hasEligibleAffiliateProducts === true,
+        affiliate_program_policy: "explicit_product_opt_in",
       },
 
       payment_status: "pending",

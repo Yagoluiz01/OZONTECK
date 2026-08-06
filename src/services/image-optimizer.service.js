@@ -4,7 +4,7 @@
  * Gera múltiplas versões otimizadas de imagens durante o upload:
  * - thumb (320px) - para listagens e catálogo
  * - card (480px) - para cards de produto
- * - detail (800px) - para página de detalhe
+ * - detail (800px) - para página de detalhe e telas de alta densidade
  * - zoom (1200px) - para zoom/lightbox
  * - lqip (20px) - placeholder de baixa qualidade (base64 blur)
  * 
@@ -17,11 +17,24 @@ import crypto from "crypto";
 import { env } from "../config/env.js";
 
 const SIZES = {
-  thumb: { width: 320, quality: 75, suffix: "th" },
-  card: { width: 480, quality: 80, suffix: "cd" },
-  detail: { width: 800, quality: 82, suffix: "dt" },
-  zoom: { width: 1200, quality: 85, suffix: "zm" },
+  // Thumb continua pequeno para listagens compactas.
+  thumb: { width: 320, quality: 78, suffix: "th" },
+  card: { width: 480, quality: 83, suffix: "cd" },
+  // A versão de 800 px também atende cards em telas mobile de alta densidade.
+  detail: { width: 800, quality: 86, suffix: "dt" },
+  // Mantém o limite anterior para não aumentar excessivamente o peso da loja.
+  zoom: { width: 1200, quality: 88, suffix: "zm" },
 };
+
+function getWebpOptions(quality) {
+  return {
+    quality,
+    alphaQuality: 92,
+    effort: 5,
+    smartSubsample: true,
+    preset: "picture",
+  };
+}
 
 const LQIP_SIZE = 20;
 const LQIP_QUALITY = 20;
@@ -36,44 +49,32 @@ export async function generateOptimizedVersions(buffer) {
     throw new Error("Buffer de imagem inválido");
   }
 
-  const metadata = await sharp(buffer).metadata();
-  const originalWidth = metadata.width || 0;
-  const originalHeight = metadata.height || 0;
+  // Valida a imagem antes de iniciar os encodes. Cada versão é gerada
+  // diretamente do arquivo recebido para evitar uma recompressão intermediária.
+  await sharp(buffer, { failOn: "warning" }).metadata();
 
   const versions = {};
 
-  // Gera LQIP (placeholder blur)
+  // Gera LQIP (placeholder blur). Ele nunca deve ser usado como imagem final.
   versions.lqip = await generateLqip(buffer);
 
-  // Gera cada tamanho
   for (const [name, config] of Object.entries(SIZES)) {
-    // Só redimensiona se a imagem original for maior que o tamanho alvo
-    const targetWidth = Math.min(config.width, originalWidth);
-    
-    if (targetWidth < 50) {
-      // Imagem muito pequena, usa o tamanho original
-      versions[name] = {
-        buffer: await sharp(buffer)
-          .rotate()
-          .webp({ quality: config.quality })
-          .toBuffer(),
-        width: originalWidth,
-        height: originalHeight,
-      };
-    } else {
-      versions[name] = {
-        buffer: await sharp(buffer)
-          .rotate()
-          .resize(targetWidth, null, {
-            fit: "inside",
-            withoutEnlargement: true,
-          })
-          .webp({ quality: config.quality })
-          .toBuffer(),
-        width: targetWidth,
-        height: Math.round((originalHeight / originalWidth) * targetWidth),
-      };
-    }
+    const { data, info } = await sharp(buffer, { failOn: "warning" })
+      .rotate()
+      .resize({
+        width: config.width,
+        fit: "inside",
+        withoutEnlargement: true,
+      })
+      .webp(getWebpOptions(config.quality))
+      .toBuffer({ resolveWithObject: true });
+
+    versions[name] = {
+      buffer: data,
+      width: info.width,
+      height: info.height,
+      size: data.length,
+    };
   }
 
   return versions;
@@ -87,7 +88,7 @@ async function generateLqip(buffer) {
     const lqipBuffer = await sharp(buffer)
       .rotate()
       .resize(LQIP_SIZE, null, { fit: "inside" })
-      .webp({ quality: LQIP_QUALITY })
+      .webp({ quality: LQIP_QUALITY, effort: 4 })
       .toBuffer();
 
     return `data:image/webp;base64,${lqipBuffer.toString("base64")}`;
@@ -149,14 +150,10 @@ export async function processAndUploadProductImage(buffer, originalName = "image
     throw new Error("Imagem vazia ou inválida");
   }
 
-  // Remove EXIF e corrige orientação
-  const cleanBuffer = await sharp(buffer)
-    .rotate()
-    .withMetadata({}) // objeto vazio = remove todos os metadados EXIF
-    .toBuffer();
-
-  // Gera todas as versões
-  const versions = await generateOptimizedVersions(cleanBuffer);
+  // Gera todas as versões diretamente do arquivo original.
+  // O Sharp remove metadados na saída WebP por padrão e a rotação é aplicada
+  // em cada versão. Isso evita dupla compressão e preserva mais detalhes.
+  const versions = await generateOptimizedVersions(buffer);
 
   // Nome base para os arquivos
   const sanitizedName = sanitizeFileName(originalName)
