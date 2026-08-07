@@ -2875,6 +2875,63 @@ async function fetchMercadoPagoJson(url, options = {}, timeoutMs = 15000) {
   }
 }
 
+function sanitizeMercadoPagoGatewayError(data) {
+  const source = data && typeof data === "object" ? data : {};
+  const causes = Array.isArray(source.cause)
+    ? source.cause.slice(0, 5).map((cause) => ({
+        code: String(cause?.code || "").slice(0, 80) || null,
+        description: String(cause?.description || "").slice(0, 300) || null,
+      }))
+    : [];
+
+  return {
+    message: String(source.message || "").slice(0, 400) || null,
+    error: String(source.error || "").slice(0, 160) || null,
+    code: String(source.code || source.status || "").slice(0, 120) || null,
+    status: Number(source.status || 0) || null,
+    causes,
+  };
+}
+
+async function getMercadoPagoAuthDiagnostic(accessToken) {
+  const normalized = String(accessToken || "").trim();
+  const diagnostic = {
+    configured: Boolean(normalized),
+    tokenLength: normalized.length,
+    tokenFingerprint: normalized
+      ? crypto.createHash("sha256").update(normalized).digest("hex").slice(0, 12)
+      : null,
+    usersMeStatus: null,
+    usersMeError: null,
+  };
+
+  if (!normalized) return diagnostic;
+
+  try {
+    const { response, data } = await fetchMercadoPagoJson(
+      "https://api.mercadopago.com/users/me",
+      {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${normalized}`,
+          Accept: "application/json",
+        },
+      },
+      10000
+    );
+
+    diagnostic.usersMeStatus = response.status;
+    if (!response.ok) {
+      const safe = sanitizeMercadoPagoGatewayError(data);
+      diagnostic.usersMeError = safe.message || safe.error || safe.code || "auth_check_failed";
+    }
+  } catch (error) {
+    diagnostic.usersMeError = String(error?.name || error?.message || "auth_check_failed").slice(0, 160);
+  }
+
+  return diagnostic;
+}
+
 async function getMercadoPagoInstallments({ amount, bin, paymentMethodId }) {
   const accessToken = getMercadoPagoAccessToken();
   if (!accessToken) {
@@ -3029,6 +3086,21 @@ async function createMercadoPagoCardPayment({
     const error = new Error(publicMessage);
     error.statusCode = response.status >= 400 && response.status < 500 ? 400 : 502;
     error.gatewayStatus = response.status;
+    error.gatewayDetails = sanitizeMercadoPagoGatewayError(data);
+    error.authDiagnostic = await getMercadoPagoAuthDiagnostic(accessToken);
+    error.paymentDiagnostic = {
+      endpoint: "/v1/payments",
+      paymentMethodId: normalizedPaymentMethod || null,
+      installments: normalizedInstallments,
+      amount: transactionAmount,
+      hasIssuerId: Boolean(normalizedIssuerId),
+      hasPayerEmail: Boolean(payer.email),
+      hasPayerCpf: Boolean(payer.identification?.number),
+      hasCardToken: Boolean(normalizedToken),
+      cardTokenLength: normalizedToken.length,
+      hasNotificationUrl: Boolean(body.notification_url),
+      hasExternalReference: Boolean(body.external_reference),
+    };
     throw error;
   }
 
@@ -3205,12 +3277,33 @@ async function createMercadoPagoPixPayment({ req, order, customer }) {
   const data = await response.json().catch(() => ({}));
 
   if (!response.ok || !data?.id) {
-    throw new Error(
-      data?.message ||
-        data?.error ||
-        data?.cause?.[0]?.description ||
+    const gatewayDetails = sanitizeMercadoPagoGatewayError(data);
+    const authDiagnostic = await getMercadoPagoAuthDiagnostic(accessToken);
+
+    console.error("MERCADO PAGO PIX DIAGNOSTIC:", {
+      gatewayStatus: response.status,
+      gatewayDetails,
+      authDiagnostic,
+      request: {
+        endpoint: "/v1/payments",
+        paymentMethodId: "pix",
+        amount: transactionAmount,
+        hasPayerEmail: Boolean(payer.email),
+        hasPayerCpf: Boolean(payer.identification?.number),
+        hasExternalReference: Boolean(body.external_reference),
+        hasNotificationUrl: Boolean(body.notification_url),
+      },
+    });
+
+    const error = new Error(
+      gatewayDetails.message ||
+        gatewayDetails.error ||
+        gatewayDetails.causes?.[0]?.description ||
         "Erro ao gerar Pix no Mercado Pago"
     );
+    error.gatewayStatus = response.status;
+    error.statusCode = response.status >= 400 && response.status < 500 ? 400 : 502;
+    throw error;
   }
 
   return data;
@@ -4190,6 +4283,9 @@ router.post("/payments", async (req, res) => {
       message: error?.message,
       statusCode: error?.statusCode,
       gatewayStatus: error?.gatewayStatus,
+      gatewayDetails: error?.gatewayDetails || null,
+      authDiagnostic: error?.authDiagnostic || null,
+      paymentDiagnostic: error?.paymentDiagnostic || null,
     });
     return res.status(Number(error?.statusCode) || 500).json({
       success: false,
