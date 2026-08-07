@@ -62,6 +62,14 @@ export const env = {
   mercadoPagoWebhookMaxSkewSeconds: Number(
     process.env.MERCADO_PAGO_WEBHOOK_MAX_SKEW_SECONDS || 600
   ),
+  mercadoPagoReconcileEnabled:
+    process.env.MERCADO_PAGO_RECONCILE_ENABLED || "true",
+  mercadoPagoReconcileIntervalSeconds: Number(
+    process.env.MERCADO_PAGO_RECONCILE_INTERVAL_SECONDS || 120
+  ),
+  mercadoPagoReconcileBatchLimit: Number(
+    process.env.MERCADO_PAGO_RECONCILE_BATCH_LIMIT || 30
+  ),
 
   storeSuccessUrl: process.env.STORE_SUCCESS_URL || "",
   storePendingUrl: process.env.STORE_PENDING_URL || "",

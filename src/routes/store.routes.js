@@ -4692,45 +4692,65 @@ router.post("/payments/mercado-pago/webhook", async (req, res) => {
     const secret = getMercadoPagoWebhookSecret();
     const xSignature = String(req.headers["x-signature"] || "").trim();
     const xRequestId = String(req.headers["x-request-id"] || "").trim();
+    const signedDataId = String(
+      req.query?.["data.id"] || req.body?.data?.id || ""
+    ).trim();
+    const legacyIpnId = String(
+      !signedDataId ? (req.query?.id || req.body?.id || "") : ""
+    ).trim();
+    const isLegacyPaymentIpn = Boolean(
+      legacyIpnId && topic === "payment" && !signedDataId
+    );
 
-    if (env.nodeEnv === "production" && !secret) {
-      console.error("WEBHOOK MERCADO PAGO: MERCADO_PAGO_WEBHOOK_SECRET ausente em produção.");
-      return res.status(503).json({
-        success: false,
-        message: "Webhook de pagamento temporariamente indisponível.",
-      });
-    }
-
-    if (secret) {
-      const hasSignatureHeaders = Boolean(xSignature && xRequestId);
-      const isValid =
-        hasSignatureHeaders &&
-        validateMercadoPagoWebhookSignature({
-          xSignature,
-          xRequestId,
-          dataId,
-          secret,
+    // Webhooks modernos do Mercado Pago devem usar a assinatura HMAC.
+    // O formato legado IPN (?id=...&topic=payment) não possui o mesmo
+    // contrato de assinatura; ele é aceito somente porque, logo abaixo,
+    // o pagamento é buscado novamente na API oficial e validado por
+    // referência externa, valor, moeda e vínculo com o pedido.
+    if (!isLegacyPaymentIpn) {
+      if (env.nodeEnv === "production" && !secret) {
+        console.error("WEBHOOK MERCADO PAGO: MERCADO_PAGO_WEBHOOK_SECRET ausente em produção.");
+        return res.status(503).json({
+          success: false,
+          message: "Webhook de pagamento temporariamente indisponível.",
         });
-      const isFresh = hasSignatureHeaders && isFreshMercadoPagoWebhookSignature(xSignature);
+      }
 
-      if (!isValid || !isFresh) {
-        const mayAcceptLegacy = allowUnsignedMercadoPagoWebhooks();
-        console.warn("WEBHOOK MERCADO PAGO rejeitado por assinatura ausente, inválida ou expirada.", {
-          dataId,
-          topic,
-          hasSignatureHeaders,
-          isValid,
-          isFresh,
-          legacyOverride: mayAcceptLegacy,
-        });
-
-        if (!mayAcceptLegacy) {
-          return res.status(401).json({
-            success: false,
-            message: "Assinatura do webhook inválida.",
+      if (secret) {
+        const hasSignatureHeaders = Boolean(xSignature && xRequestId && signedDataId);
+        const isValid =
+          hasSignatureHeaders &&
+          validateMercadoPagoWebhookSignature({
+            xSignature,
+            xRequestId,
+            dataId: signedDataId,
+            secret,
           });
+        const isFresh = hasSignatureHeaders && isFreshMercadoPagoWebhookSignature(xSignature);
+
+        if (!isValid || !isFresh) {
+          const mayAcceptLegacy = allowUnsignedMercadoPagoWebhooks();
+          console.warn("WEBHOOK MERCADO PAGO rejeitado por assinatura ausente, inválida ou expirada.", {
+            dataId: signedDataId || dataId,
+            topic,
+            hasSignatureHeaders,
+            isValid,
+            isFresh,
+            legacyOverride: mayAcceptLegacy,
+          });
+
+          if (!mayAcceptLegacy) {
+            return res.status(401).json({
+              success: false,
+              message: "Assinatura do webhook inválida.",
+            });
+          }
         }
       }
+    } else {
+      console.info("MERCADO PAGO IPN legado recebido; confirmação será feita pela API oficial.", {
+        paymentId: legacyIpnId,
+      });
     }
 
     if (topic !== "payment") {
@@ -5394,6 +5414,158 @@ if (!alreadyPaidBeforeSimulation) {
     return res.status(500).json({
       success: false,
       message: error.message || "Erro interno ao simular pagamento"
+    });
+  }
+});
+
+router.post("/orders/:orderNumber/reconcile-payment", async (req, res) => {
+  try {
+    const orderNumber = String(req.params.orderNumber || "").trim();
+    let paymentId = String(
+      req.body?.paymentId || req.body?.payment_id || ""
+    ).trim();
+
+    if (!orderNumber) {
+      return res.status(400).json({
+        success: false,
+        message: "Pedido inválido.",
+      });
+    }
+
+    const order = await findOrderByExternalReference(orderNumber).catch(() => null);
+
+    if (!order?.id) {
+      return res.status(404).json({
+        success: false,
+        message: "Pedido não encontrado.",
+      });
+    }
+
+    if (!(await hasVerifiedOrderAccess(req, order))) {
+      return res.status(403).json({
+        success: false,
+        message: "Não foi possível confirmar que este pedido pertence a você.",
+      });
+    }
+
+    if (!paymentId) {
+      paymentId = String(order.payment_reference || "").trim();
+    }
+
+    if (!/^\d{1,32}$/.test(paymentId)) {
+      return res.status(409).json({
+        success: false,
+        message: "Este pedido ainda não possui um pagamento conciliável.",
+      });
+    }
+
+    const payment = await getMercadoPagoPayment(paymentId);
+    const externalReference = String(payment?.external_reference || "").trim();
+    const paymentStatus = String(payment?.status || "").trim().toLowerCase();
+    const receivedAmount = Number(payment?.transaction_amount || 0);
+    const expectedAmount = Number(order.total_amount || 0);
+    const currencyId = String(payment?.currency_id || "BRL").trim().toUpperCase();
+    const metadataOrderId = String(payment?.metadata?.order_id || "").trim();
+    const amountMatches =
+      Number.isFinite(receivedAmount) &&
+      Number.isFinite(expectedAmount) &&
+      Math.abs(receivedAmount - expectedAmount) <= 0.01;
+    const referenceMatches = externalReference === String(order.order_number || "").trim();
+    const identityMatches = !metadataOrderId || metadataOrderId === String(order.id);
+
+    if (!amountMatches || !referenceMatches || currencyId !== "BRL" || !identityMatches) {
+      console.error("RECONCILIAÇÃO MERCADO PAGO BLOQUEADA POR DIVERGÊNCIA.", {
+        orderId: order.id,
+        orderNumber: order.order_number,
+        paymentId,
+        externalReference,
+        expectedAmount,
+        receivedAmount,
+        currencyId,
+      });
+
+      return res.status(409).json({
+        success: false,
+        message: "O pagamento não corresponde aos dados oficiais deste pedido.",
+      });
+    }
+
+    if (paymentStatus === "approved") {
+      const stockReservation = await ensureOrderStockReserved(order.id);
+      if (!stockReservation?.reserved) {
+        await updateOrderById(order.id, {
+          payment_reference: paymentId,
+          payment_external_reference: order.order_number,
+          payment_raw_status: "approved_stock_review",
+          payment_status: "review_required",
+          order_status: "stock_review",
+          webhook_last_event: "payment_reconcile_stock_unavailable",
+        });
+
+        return res.status(200).json({
+          success: true,
+          reconciled: true,
+          reviewRequired: true,
+          order: {
+            order_number: order.order_number,
+            payment_status: "review_required",
+            order_status: "stock_review",
+          },
+        });
+      }
+    }
+
+    const paymentFinancialData = getMercadoPagoFinancialData(payment);
+    const transition = await applyMercadoPagoPaymentTransition({
+      externalReference: order.order_number,
+      paymentId,
+      rawStatus: paymentStatus,
+      gatewayFee: paymentFinancialData.gatewayFee,
+      netAmount: paymentFinancialData.netAmount,
+      paymentMethodId: paymentFinancialData.paymentMethodId || null,
+      paymentTypeId: paymentFinancialData.paymentTypeId || null,
+      installments: paymentFinancialData.installments,
+    });
+
+    if (!transition?.success) {
+      return res.status(409).json({
+        success: false,
+        message: "Não foi possível reconciliar o pagamento com este pedido.",
+        reason: transition?.reason || "payment_transition_not_applied",
+      });
+    }
+
+    // A conciliação é um mecanismo de recuperação. Os efeitos pós-pagamento
+    // continuam idempotentes e podem ser concluídos pelo webhook/IPN ou pelo job.
+    if (paymentStatus === "approved" && transition?.claimed && transition?.order?.id) {
+      processPaidOrder({ orderId: transition.order.id }).catch((error) => {
+        console.error("ERRO NO PROCESSAMENTO PÓS-PAGAMENTO APÓS RECONCILIAÇÃO:", error?.message || error);
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      reconciled: true,
+      payment: {
+        id: paymentId,
+        status: paymentStatus,
+      },
+      order: {
+        order_number: transition?.order?.order_number || order.order_number,
+        payment_status: transition?.order?.payment_status || order.payment_status,
+        order_status: transition?.order?.order_status || order.order_status,
+        paid_at: transition?.order?.paid_at || order.paid_at || null,
+      },
+    });
+  } catch (error) {
+    console.error("ERRO AO RECONCILIAR PAGAMENTO DO PEDIDO:", {
+      message: error?.message,
+      statusCode: error?.statusCode,
+    });
+
+    return res.status(Number(error?.statusCode) || 502).json({
+      success: false,
+      message: "Não foi possível confirmar o pagamento diretamente com o Mercado Pago.",
     });
   }
 });

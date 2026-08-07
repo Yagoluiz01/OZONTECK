@@ -3,6 +3,7 @@ import 'module-alias/register';
 import aiRoutes from "./services/AI/router/ai.route.js";
 import { syncPendingMelhorEnvioLabels } from "./services/shipping.service.js";
 import { runExpiredStockReservationCleanup } from "./jobs/releaseExpiredStockReservations.js";
+import { reconcilePendingMercadoPagoPayments } from "./jobs/reconcilePendingMercadoPagoPayments.js";
 
 // Rede de segurança: um erro não tratado em qualquer parte do código não pode
 // mais derrubar o processo inteiro. Apenas loga o erro e mantém a API no ar.
@@ -52,11 +53,48 @@ const syncBatchLimit = Math.max(
   Number(process.env.MELHOR_ENVIO_AUTO_SYNC_BATCH_LIMIT || 20)
 );
 
+const paymentReconcileEnabled = !["0", "false", "off", "no"].includes(
+  String(process.env.MERCADO_PAGO_RECONCILE_ENABLED || "true").trim().toLowerCase()
+);
+
+const paymentReconcileIntervalSeconds = Math.max(
+  30,
+  Number(process.env.MERCADO_PAGO_RECONCILE_INTERVAL_SECONDS || 120)
+);
+
+const paymentReconcileBatchLimit = Math.max(
+  1,
+  Number(process.env.MERCADO_PAGO_RECONCILE_BATCH_LIMIT || 30)
+);
+
 let syncRunning = false;
 let syncTimer = null;
 let stockCleanupTimer = null;
 let startupSyncTimer = null;
 let startupStockCleanupTimer = null;
+let paymentReconcileTimer = null;
+let startupPaymentReconcileTimer = null;
+let paymentReconcileRunning = false;
+
+async function runPaymentReconciliation(trigger = "interval") {
+  if (!paymentReconcileEnabled || paymentReconcileRunning) return;
+  paymentReconcileRunning = true;
+
+  try {
+    const result = await reconcilePendingMercadoPagoPayments({
+      trigger,
+      limit: paymentReconcileBatchLimit,
+    });
+    console.log("MERCADO PAGO AUTO RECONCILE RESULT: " + JSON.stringify(result));
+  } catch (error) {
+    console.error("MERCADO PAGO AUTO RECONCILE FATAL ERROR:", {
+      trigger,
+      message: error?.message || String(error),
+    });
+  } finally {
+    paymentReconcileRunning = false;
+  }
+}
 
 async function runMelhorEnvioAutoSync(trigger = "interval") {
   if (!syncEnabled) {
@@ -122,6 +160,22 @@ const server = app.listen(PORT, () => {
     console.log("MELHOR ENVIO AUTO SYNC: desativado por configuração");
   }
 
+  if (paymentReconcileEnabled) {
+    console.log(
+      `MERCADO PAGO AUTO RECONCILE: ativado a cada ${paymentReconcileIntervalSeconds} segundo(s)`
+    );
+
+    startupPaymentReconcileTimer = setTimeout(() => {
+      runPaymentReconciliation("startup");
+    }, 20000);
+
+    paymentReconcileTimer = setInterval(() => {
+      runPaymentReconciliation("interval");
+    }, paymentReconcileIntervalSeconds * 1000);
+  } else {
+    console.log("MERCADO PAGO AUTO RECONCILE: desativado por configuração");
+  }
+
   if (stockCleanupEnabled) {
     console.log(
       `ORDER STOCK CLEANUP: ativado para rodar a cada ${stockCleanupIntervalMinutes} minuto(s)`
@@ -154,6 +208,8 @@ function clearBackgroundTimers() {
   if (stockCleanupTimer) clearInterval(stockCleanupTimer);
   if (startupSyncTimer) clearTimeout(startupSyncTimer);
   if (startupStockCleanupTimer) clearTimeout(startupStockCleanupTimer);
+  if (paymentReconcileTimer) clearInterval(paymentReconcileTimer);
+  if (startupPaymentReconcileTimer) clearTimeout(startupPaymentReconcileTimer);
 }
 
 let shuttingDown = false;
