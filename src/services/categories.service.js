@@ -128,14 +128,19 @@ export async function uploadCategoryIcon(categoryId, file) {
 
   const rawBuffer = file.buffer || file;
 
-  let optimizedBuffer = rawBuffer;
+  let optimizedBuffer;
   try {
     optimizedBuffer = await sharp(rawBuffer)
       .resize(120, 120, { fit: "inside", withoutEnlargement: true })
       .webp({ quality: 85 })
       .toBuffer();
-  } catch (e) {
-    console.warn("Falha ao otimizar imagem, usando original:", e);
+  } catch (error) {
+    console.error("FALHA AO PROCESSAR ÍCONE DE CATEGORIA:", error);
+    const invalidImageError = new Error(
+      "Não foi possível processar o ícone. Envie uma imagem JPG, PNG, WEBP ou GIF válida."
+    );
+    invalidImageError.statusCode = 400;
+    throw invalidImageError;
   }
 
   const fileName = `category-${categoryId}-${Date.now()}.webp`;
