@@ -1,6 +1,6 @@
 import express from "express";
 import rateLimit from "express-rate-limit";
-import supabase from "../config/supabase.js";
+import { supabaseAdmin } from "../config/supabase.js";
 
 import { requireAdminAuth } from "../middlewares/auth.middleware.js";
 import { requireMasterAdmin } from "../middlewares/masterAdmin.middleware.js";
@@ -292,7 +292,7 @@ function buildCheckoutLeadRecord(row = {}) {
 }
 
 async function findSession(sessionId) {
-  const { data, error } = await supabase
+  const { data, error } = await supabaseAdmin
     .from("lead_sessions")
     .select("id, session_id, visitor_id, started_at, ended_at, last_page, last_section, duration_seconds, created_at")
     .eq("session_id", sessionId)
@@ -342,7 +342,7 @@ async function ensureSessionExists({
     duration_seconds: 0,
   };
 
-  const { data, error } = await supabase
+  const { data, error } = await supabaseAdmin
     .from("lead_sessions")
     .insert([payload])
     .select("*")
@@ -424,7 +424,7 @@ router.post("/checkout-contact", publicTrackingLimiter, async (req, res) => {
       duration_ms: 0,
     };
 
-    const { data, error } = await supabase
+    const { data, error } = await supabaseAdmin
       .from("lead_events")
       .insert([eventPayload])
       .select("*")
@@ -499,7 +499,7 @@ router.post("/event", publicTrackingLimiter, async (req, res) => {
       duration_ms: Math.max(0, Math.min(Number(duration_ms) || 0, 24 * 60 * 60 * 1000)),
     };
 
-    const { error } = await supabase.from("lead_events").insert([payload]);
+    const { error } = await supabaseAdmin.from("lead_events").insert([payload]);
 
     if (error) {
       console.error("TRACKING EVENT ERROR:", error);
@@ -557,7 +557,7 @@ router.post("/session/end", publicTrackingLimiter, async (req, res) => {
     }
 
     if (existingSession.data?.id) {
-      const { error: updateError } = await supabase
+      const { error: updateError } = await supabaseAdmin
         .from("lead_sessions")
         .update({
           visitor_id: visitorId,
@@ -577,7 +577,7 @@ router.post("/session/end", publicTrackingLimiter, async (req, res) => {
         });
       }
     } else {
-      const { error: insertError } = await supabase.from("lead_sessions").insert([
+      const { error: insertError } = await supabaseAdmin.from("lead_sessions").insert([
         {
           session_id: sessionId,
           visitor_id: visitorId,
@@ -621,7 +621,7 @@ router.get("/sessions", requireAdminAuth, requireMasterAdmin, async (req, res) =
     const minDuration = toPositiveInt(req.query.min_duration, 0);
     const limit = Math.min(toPositiveInt(req.query.limit, 200), 500);
 
-    let query = supabase
+    let query = supabaseAdmin
       .from("lead_sessions")
       .select("*")
       .order("created_at", { ascending: false })
@@ -667,7 +667,7 @@ router.get("/events", requireAdminAuth, requireMasterAdmin, async (req, res) => 
     const dateTo = normalizeText(req.query.date_to);
     const limit = Math.min(toPositiveInt(req.query.limit, 500), 1000);
 
-    let query = supabase
+    let query = supabaseAdmin
       .from("lead_events")
       .select("*")
       .order("created_at", { ascending: false })
@@ -719,7 +719,7 @@ router.get("/checkout-leads", requireAdminAuth, requireMasterAdmin, async (req, 
       ORDER_RECOVERY_DELAY_MINUTES
     );
 
-    let query = supabase
+    let query = supabaseAdmin
       .from("lead_events")
       .select("*")
       .eq("event_type", "checkout_contact")
@@ -759,7 +759,7 @@ router.get("/checkout-leads", requireAdminAuth, requireMasterAdmin, async (req, 
     const latestOrderEventBySession = new Map();
 
     if (sessionIds.length) {
-      const { data: orderEvents, error: orderEventsError } = await supabase
+      const { data: orderEvents, error: orderEventsError } = await supabaseAdmin
         .from("lead_events")
         .select("id, session_id, event_type, section, created_at")
         .in("session_id", sessionIds)
@@ -786,7 +786,7 @@ router.get("/checkout-leads", requireAdminAuth, requireMasterAdmin, async (req, 
     const orderByNumber = new Map();
 
     if (orderNumbers.length) {
-      const { data: orders, error: ordersError } = await supabase
+      const { data: orders, error: ordersError } = await supabaseAdmin
         .from("orders")
         .select("id, order_number, payment_status, order_status, payment_gateway, total_amount, created_at")
         .in("order_number", orderNumbers)
