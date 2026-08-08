@@ -22,6 +22,21 @@ function isManagedGateway(value) {
   return normalize(value).toLowerCase().startsWith("mercado_pago");
 }
 
+const missingPaymentWarnings = new Set();
+
+function isMissingMercadoPagoPaymentError(error) {
+  const status = Number(
+    error?.status ??
+      error?.statusCode ??
+      error?.response?.status ??
+      error?.cause?.status ??
+      0
+  );
+  const message = normalize(error?.message).toLowerCase();
+
+  return status === 404 || message === "payment not found" || message.includes("payment not found");
+}
+
 function getFinancialData(payment) {
   const feeDetails = Array.isArray(payment?.fee_details) ? payment.fee_details : [];
   const gatewayFee = feeDetails.reduce((sum, item) => {
@@ -175,6 +190,24 @@ export async function reconcilePendingMercadoPagoPayments({ limit = 30, trigger 
         result.pending += 1;
       }
     } catch (error) {
+      if (isMissingMercadoPagoPaymentError(error)) {
+        result.skipped += 1;
+
+        if (!missingPaymentWarnings.has(paymentId)) {
+          missingPaymentWarnings.add(paymentId);
+          console.warn(
+            "MERCADO PAGO AUTO RECONCILE: pagamento não encontrado na conta atual; ignorado.",
+            {
+              orderId: order.id,
+              orderNumber: order.order_number,
+              paymentId,
+            }
+          );
+        }
+
+        continue;
+      }
+
       result.errors += 1;
       console.error("MERCADO PAGO AUTO RECONCILE ERROR:", {
         orderId: order.id,
