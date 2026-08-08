@@ -1,4 +1,5 @@
 import { env } from "../config/env.js";
+import { supabaseAdmin } from "../config/supabase.js";
 import { sendPushToAffiliate } from "./affiliatePush.service.js";
 
 import {
@@ -11,6 +12,7 @@ import {
 const SUPABASE_URL = String(env.supabaseUrl || "").replace(/\/+$/, "");
 const SERVICE_ROLE_KEY = env.supabaseServiceRoleKey;
 const AFFILIATE_RECEIPTS_BUCKET = "affiliate-receipts";
+const AFFILIATE_RECEIPT_SIGNED_URL_TTL_SECONDS = 15 * 60;
 
 function getHeaders(extra = {}) {
   return {
@@ -30,6 +32,86 @@ function assertSupabaseConfig() {
   if (!SERVICE_ROLE_KEY) {
     throw new Error("SUPABASE_SERVICE_ROLE_KEY não configurado.");
   }
+}
+
+function resolveAffiliateReceiptPath(payout = {}) {
+  const directPath = cleanText(payout.receipt_path);
+
+  if (directPath) {
+    return directPath;
+  }
+
+  const receiptUrl = cleanText(payout.receipt_url);
+  const marker = `/storage/v1/object/public/${AFFILIATE_RECEIPTS_BUCKET}/`;
+
+  if (!receiptUrl || !receiptUrl.includes(marker)) {
+    return "";
+  }
+
+  try {
+    const url = new URL(receiptUrl);
+    const index = url.pathname.indexOf(marker);
+
+    if (index < 0) {
+      return "";
+    }
+
+    return decodeURIComponent(url.pathname.slice(index + marker.length));
+  } catch {
+    const index = receiptUrl.indexOf(marker);
+
+    if (index < 0) {
+      return "";
+    }
+
+    return decodeURIComponent(
+      receiptUrl.slice(index + marker.length).split("?")[0].split("#")[0]
+    );
+  }
+}
+
+async function createAffiliateReceiptSignedUrl(path) {
+  const cleanPath = cleanText(path);
+
+  if (!cleanPath) {
+    return null;
+  }
+
+  const { data, error } = await supabaseAdmin.storage
+    .from(AFFILIATE_RECEIPTS_BUCKET)
+    .createSignedUrl(cleanPath, AFFILIATE_RECEIPT_SIGNED_URL_TTL_SECONDS);
+
+  if (error) {
+    console.error("AFFILIATE RECEIPT SIGNED URL ERROR:", {
+      path: cleanPath,
+      message: error.message,
+    });
+    return null;
+  }
+
+  return data?.signedUrl || null;
+}
+
+async function attachAffiliateReceiptSignedUrl(payout) {
+  if (!payout || typeof payout !== "object") {
+    return payout;
+  }
+
+  const receiptPath = resolveAffiliateReceiptPath(payout);
+
+  if (!receiptPath) {
+    return {
+      ...payout,
+      receipt_url: null,
+      receipt_path: null,
+    };
+  }
+
+  return {
+    ...payout,
+    receipt_url: await createAffiliateReceiptSignedUrl(receiptPath),
+    receipt_path: receiptPath,
+  };
 }
 
 async function supabaseRequest(path, options = {}) {
@@ -633,7 +715,7 @@ async function uploadAffiliateReceipt(file, affiliateId) {
   });
 
   return {
-    receipt_url: uploaded.publicUrl,
+    receipt_url: null,
     receipt_path: path,
     receipt_file_name: file.originalname || safeOriginalName,
     receipt_mime_type: file.mimetype || null,
@@ -838,7 +920,7 @@ export async function listAffiliateCommissionProducts(filters = {}) {
   const params = new URLSearchParams();
   params.set(
     "select",
-    "id,product_id,affiliate_commission_percent,max_affiliate_commission_percent,special_affiliate_commission_percent,price_with_default_commission,price_with_max_commission,price_with_special_commission,profit_with_default_commission,profit_with_max_commission,profit_with_special_commission,margin_with_default_commission_percent,margin_with_max_commission_percent,margin_with_special_commission_percent,status,risk_message,updated_at,products(id,name,sku,price,category,status,image_url,image_url_2)"
+    "id,product_id,affiliate_program_enabled,affiliate_commission_percent,max_affiliate_commission_percent,special_affiliate_commission_percent,commission_protection_mode,affiliate_commission_floor_value,network_commission_floor_value,goal_funding_mode,goal_fund_reserve_percent,price_with_default_commission,price_with_max_commission,price_with_special_commission,profit_with_default_commission,profit_with_max_commission,profit_with_special_commission,margin_with_default_commission_percent,margin_with_max_commission_percent,margin_with_special_commission_percent,status,risk_message,updated_at,products(id,name,sku,price,category,status,image_url,image_url_2)"
   );
   params.set("order", "updated_at.desc");
   params.set("limit", "300");
@@ -859,7 +941,12 @@ export async function listAffiliateCommissionProducts(filters = {}) {
   }
 
   return safeRows
-    .filter((row) => row?.products && isProductVisibleForCommission(row.products))
+    .filter(
+      (row) =>
+        row?.affiliate_program_enabled !== false &&
+        row?.products &&
+        isProductVisibleForCommission(row.products)
+    )
     .map((row) => {
       const product = row.products || {};
       const currentPrice = getAdminProductPrice(product);
@@ -870,6 +957,7 @@ export async function listAffiliateCommissionProducts(filters = {}) {
 
       return {
         pricing_id: row.id,
+        affiliate_program_enabled: row.affiliate_program_enabled !== false,
         product_id: row.product_id || product.id,
         name: product.name || "Produto",
         sku: product.sku || null,
@@ -880,9 +968,39 @@ export async function listAffiliateCommissionProducts(filters = {}) {
         affiliate_commission_percent: defaultPercent,
         special_affiliate_commission_percent: specialPercent,
         max_affiliate_commission_percent: maxPercent,
-        estimated_default_commission: roundAffiliateMoney(currentPrice * (defaultPercent / 100)),
-        estimated_special_commission: roundAffiliateMoney(currentPrice * (specialPercent / 100)),
-        estimated_max_commission: roundAffiliateMoney(currentPrice * (maxPercent / 100)),
+        commission_protection_mode:
+          row.commission_protection_mode || "value_floor",
+        affiliate_commission_floor_value: roundAffiliateMoney(
+          row.affiliate_commission_floor_value || 0
+        ),
+        goal_funding_mode: row.goal_funding_mode || "collective_fund",
+        goal_fund_reserve_percent: roundAffiliateMoney(
+          row.goal_fund_reserve_percent ?? 3
+        ),
+        estimated_default_commission: roundAffiliateMoney(
+          Math.max(
+            currentPrice * (defaultPercent / 100),
+            row.commission_protection_mode === "percentage_only"
+              ? 0
+              : Number(row.affiliate_commission_floor_value || 0)
+          )
+        ),
+        estimated_special_commission: roundAffiliateMoney(
+          Math.max(
+            currentPrice * (specialPercent / 100),
+            row.commission_protection_mode === "percentage_only"
+              ? 0
+              : Number(row.affiliate_commission_floor_value || 0)
+          )
+        ),
+        estimated_max_commission: roundAffiliateMoney(
+          Math.max(
+            currentPrice * (maxPercent / 100),
+            row.commission_protection_mode === "percentage_only"
+              ? 0
+              : Number(row.affiliate_commission_floor_value || 0)
+          )
+        ),
         price_with_default_commission: roundAffiliateMoney(row.price_with_default_commission),
         price_with_special_commission: roundAffiliateMoney(row.price_with_special_commission),
         price_with_max_commission: roundAffiliateMoney(row.price_with_max_commission),
@@ -1134,7 +1252,10 @@ export async function listAffiliatePayouts(filters = {}) {
     params.set("status", `eq.${status}`);
   }
 
-  return supabaseRequest(`/affiliate_payouts?${params.toString()}`);
+  const payouts = await supabaseRequest(`/affiliate_payouts?${params.toString()}`);
+  const safePayouts = Array.isArray(payouts) ? payouts : [];
+
+  return Promise.all(safePayouts.map(attachAffiliateReceiptSignedUrl));
 }
 
 export async function createAffiliatePayout(input = {}) {
@@ -1223,7 +1344,7 @@ export async function createAffiliatePayout(input = {}) {
     });
   }
 
-  return payout;
+  return payout ? attachAffiliateReceiptSignedUrl(payout) : payout;
 }
 
 export async function listAffiliateApplications(filters = {}) {
