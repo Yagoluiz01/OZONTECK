@@ -164,6 +164,7 @@ const corsMiddleware = cors({
     "Content-Type",
     "Authorization",
     "Accept",
+    "Cache-Control",
     "Origin",
     "X-Requested-With",
     "X-Signature",
