@@ -888,6 +888,41 @@ function mapOrder(order = {}) {
     trackingCode: order.shipping_tracking_code || order.tracking_code || "",
     createdAt: order.created_at || null,
     paidAt: order.paid_at || null,
+
+    customerName: order.customer_name || "",
+    customerEmail: order.customer_email || "",
+    customerPhone: order.customer_phone || "",
+    customerCpf: order.customer_cpf || "",
+
+    shippingZipCode: order.shipping_cep || "",
+    shippingAddress: order.shipping_address || "",
+    shippingNumber: order.shipping_number || "",
+    shippingComplement: order.shipping_complement || "",
+    shippingNeighborhood: order.shipping_neighborhood || "",
+    shippingCity: order.shipping_city || "",
+    shippingState: order.shipping_state || "",
+    shippingCarrier: order.shipping_carrier || "",
+    shippingServiceName: order.shipping_service_name || "",
+    shippingDeliveryTime: Number(order.shipping_delivery_time || 0),
+  };
+}
+
+function buildCheckoutProfile(customer = {}, orders = []) {
+  const latestOrder = Array.isArray(orders) ? orders[0] || {} : {};
+
+  return {
+    nome: cleanText(customer.full_name || latestOrder.customerName),
+    email: normalizeEmail(customer.email || latestOrder.customerEmail),
+    telefone: cleanText(latestOrder.customerPhone || customer.phone),
+    cpf: onlyDigits(latestOrder.customerCpf || customer.cpf),
+    nascimento: customer.birth_date || "",
+    cep: cleanText(latestOrder.shippingZipCode),
+    endereco: cleanText(latestOrder.shippingAddress),
+    numero: cleanText(latestOrder.shippingNumber),
+    complemento: cleanText(latestOrder.shippingComplement),
+    bairro: cleanText(latestOrder.shippingNeighborhood),
+    cidade: cleanText(latestOrder.shippingCity || customer.city),
+    estado: cleanText(latestOrder.shippingState || customer.state),
   };
 }
 
@@ -901,7 +936,31 @@ async function fetchCustomerOrders(customer) {
   const url = new URL(`${env.supabaseUrl}/rest/v1/orders`);
   url.searchParams.set(
     "select",
-    "id,order_number,total_amount,payment_status,order_status,shipping_tracking_code,tracking_code,created_at,paid_at"
+    [
+      "id",
+      "order_number",
+      "total_amount",
+      "payment_status",
+      "order_status",
+      "shipping_tracking_code",
+      "tracking_code",
+      "created_at",
+      "paid_at",
+      "customer_name",
+      "customer_email",
+      "customer_phone",
+      "customer_cpf",
+      "shipping_cep",
+      "shipping_address",
+      "shipping_number",
+      "shipping_complement",
+      "shipping_neighborhood",
+      "shipping_city",
+      "shipping_state",
+      "shipping_carrier",
+      "shipping_service_name",
+      "shipping_delivery_time",
+    ].join(",")
   );
   url.searchParams.set("customer_email", `eq.${email}`);
   url.searchParams.set("order", "created_at.desc");
@@ -1156,6 +1215,7 @@ router.get("/me", requireCustomerAuth, async (req, res) => {
     return res.status(200).json({
       success: true,
       customer: mapCustomer(customer),
+      checkoutProfile: buildCheckoutProfile(customer, orders),
       orders,
       summary: buildAccountSummary(customer, orders),
     });
