@@ -4,6 +4,10 @@ import jwt from "jsonwebtoken";
 import crypto from "crypto";
 
 import { env } from "../config/env.js";
+import {
+  createCustomerCpfBlindIndex,
+  encryptCustomerCpf,
+} from "../security/customer-data.crypto.js";
 
 const router = express.Router();
 const CUSTOMER_TOKEN_EXPIRES_IN = "30d";
@@ -20,6 +24,36 @@ function cleanText(value) {
 
 function onlyDigits(value) {
   return String(value || "").replace(/\D/g, "");
+}
+
+function isCustomerDataCryptoEnabled() {
+  return ["1", "true", "yes", "on"].includes(
+    String(process.env.CUSTOMER_DATA_CRYPTO_ENABLED || "")
+      .trim()
+      .toLowerCase()
+  );
+}
+
+function buildCustomerCpfProtection(value) {
+  if (!isCustomerDataCryptoEnabled()) {
+    return {};
+  }
+
+  const cpf = onlyDigits(value);
+
+  if (!cpf) {
+    return {
+      cpf_enc: null,
+      cpf_idx: null,
+      cpf_crypto_version: null,
+    };
+  }
+
+  return {
+    cpf_enc: encryptCustomerCpf(cpf),
+    cpf_idx: createCustomerCpfBlindIndex(cpf),
+    cpf_crypto_version: "v1",
+  };
 }
 
 function normalizeEmail(value) {
@@ -708,6 +742,7 @@ async function createCustomerAccount(data, passwordHash) {
     email: data.email,
     phone: data.phone,
     cpf: data.cpf || null,
+    ...buildCustomerCpfProtection(data.cpf),
     birth_date: data.birthDate,
     origin: "Site",
     status: "lead",
@@ -738,6 +773,7 @@ async function updateCustomerAccount(customerId, data, passwordHash) {
     email: data.email,
     phone: data.phone,
     cpf: data.cpf || null,
+    ...buildCustomerCpfProtection(data.cpf),
     birth_date: data.birthDate,
     status: "lead",
     password_hash: passwordHash,

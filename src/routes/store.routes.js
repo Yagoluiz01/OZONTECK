@@ -34,6 +34,10 @@ import { syncAffiliateCommissionLifecycleForOrder } from "../services/affiliateC
 import { createIntegrationOAuthState } from "../services/oauthState.service.js";
 import { createActivationOfferForPaidOrder } from "../services/customerActivation.service.js";
 import {
+  createCustomerCpfBlindIndex,
+  encryptCustomerCpf,
+} from "../security/customer-data.crypto.js";
+import {
   getCustomerOrderPushPublicKey,
   saveCustomerOrderPushSubscription,
   sendCustomerOrderPushForPaymentApproved,
@@ -889,6 +893,36 @@ function toBoolean(value, fallback = false) {
 
 function onlyDigits(value) {
   return String(value || "").replace(/\D/g, "");
+}
+
+function isCustomerDataCryptoEnabled() {
+  return ["1", "true", "yes", "on"].includes(
+    String(process.env.CUSTOMER_DATA_CRYPTO_ENABLED || "")
+      .trim()
+      .toLowerCase()
+  );
+}
+
+function buildCustomerCpfProtection(value) {
+  if (!isCustomerDataCryptoEnabled()) {
+    return {};
+  }
+
+  const cpf = onlyDigits(value);
+
+  if (!cpf) {
+    return {
+      customer_cpf_enc: null,
+      customer_cpf_idx: null,
+      customer_cpf_crypto_version: null,
+    };
+  }
+
+  return {
+    customer_cpf_enc: encryptCustomerCpf(cpf),
+    customer_cpf_idx: createCustomerCpfBlindIndex(cpf),
+    customer_cpf_crypto_version: "v1",
+  };
 }
 
 
@@ -4321,12 +4355,15 @@ router.post("/orders", async (req, res) => {
     const orderNumber = generateOrderNumber();
     const orderAccessToken = createOrderAccessToken();
 
+    const customerCpfProtection = buildCustomerCpfProtection(customer.cpf);
+
     const orderPayload = {
       order_number: orderNumber,
       customer_name: String(customer.nome || "").trim(),
       customer_email: String(customer.email || "").trim().toLowerCase(),
       customer_phone: String(customer.telefone || "").trim(),
       customer_cpf: String(customer.cpf || "").trim(),
+      ...customerCpfProtection,
       shipping_cep: String(customer.cep || "").trim(),
       shipping_address: String(customer.endereco || "").trim(),
       shipping_number: String(customer.numero || "").trim(),
