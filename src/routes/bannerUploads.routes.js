@@ -1,4 +1,6 @@
 import express from "express";
+import { createReadStream } from "fs";
+import { rm } from "fs/promises";
 import { env } from "../config/env.js";
 import {
   upload,
@@ -10,7 +12,7 @@ import { requireAuth } from "./banners.routes.js";
 import { verifyBucketExists } from "../services/storage.service.js";
 import { supabaseAdmin } from "../config/supabase.js";
 import { renderBannerVideo, transcribeBannerVideo } from "../services/banner-video-editor.service.js";
-import { optimizeBannerMedia } from "../services/banner-media-optimizer.service.js";
+import { optimizeBannerMediaFile } from "../services/banner-media-optimizer.service.js";
 
 const router = express.Router();
 const BUCKET_NAME = "banner-images";
@@ -42,17 +44,39 @@ function validateDirectFileSize(file, type) {
   }
 }
 
-async function uploadToStorage(fileBuffer, fileName, mimeType, folder) {
+async function removeTempFile(filePath) {
+  if (!filePath) return;
+  await rm(filePath, { force: true }).catch(() => {});
+}
+
+async function uploadFileToStorage(filePath, fileName, mimeType, folder) {
   const uploadPath = `${folder}/${fileName}`;
-  const { error } = await supabaseAdmin.storage.from(BUCKET_NAME).upload(uploadPath, fileBuffer, {
-    contentType: mimeType,
-    cacheControl: "31536000",
-    upsert: false,
+  const uploadUrl = `${env.supabaseUrl}/storage/v1/object/${BUCKET_NAME}/${uploadPath
+    .split("/")
+    .map(encodeURIComponent)
+    .join("/")}`;
+
+  const response = await fetch(uploadUrl, {
+    method: "POST",
+    headers: {
+      apikey: env.supabaseServiceRoleKey,
+      Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
+      "Content-Type": mimeType,
+      "Cache-Control": "max-age=31536000",
+      "x-upsert": "false",
+    },
+    body: createReadStream(filePath),
+    duplex: "half",
   });
 
-  if (error) {
-    console.error("STORAGE UPLOAD ERROR:", { message: error.message, path: uploadPath });
-    throw new Error(`Upload falhou: ${error.message}`);
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    console.error("STORAGE STREAM UPLOAD ERROR:", {
+      status: response.status,
+      body: detail,
+      path: uploadPath,
+    });
+    throw new Error(`Upload falhou (${response.status})${detail ? `: ${detail}` : ""}`);
   }
 
   const { data } = supabaseAdmin.storage.from(BUCKET_NAME).getPublicUrl(uploadPath);
@@ -60,27 +84,37 @@ async function uploadToStorage(fileBuffer, fileName, mimeType, folder) {
 }
 
 async function optimizeAndStore(file, type, bannerId, preset = "balanced") {
-  const optimized = await optimizeBannerMedia(file.buffer, type, preset);
-  const filename = `${bannerId}-${type}-${generateUUID()}.${optimized.extension}`;
-  const stored = await uploadToStorage(
-    optimized.buffer,
-    filename,
-    optimized.mimeType,
-    getFolder(type)
-  );
+  let optimized = null;
 
-  return {
-    ...stored,
-    originalName: file.originalname || filename,
-    originalSize: optimized.originalSize,
-    optimizedSize: optimized.optimizedSize,
-    savingsPercent: optimized.savingsPercent,
-    width: optimized.width,
-    height: optimized.height,
-    duration: optimized.duration || null,
-    preset: optimized.preset,
-    optimized: true,
-  };
+  try {
+    optimized = await optimizeBannerMediaFile(file.path, file.size, type, preset);
+    const filename = `${bannerId}-${type}-${generateUUID()}.${optimized.extension}`;
+
+    const stored = await uploadFileToStorage(
+      optimized.outputPath,
+      filename,
+      optimized.mimeType,
+      getFolder(type)
+    );
+
+    return {
+      ...stored,
+      originalName: file.originalname || filename,
+      originalSize: optimized.originalSize,
+      optimizedSize: optimized.optimizedSize,
+      savingsPercent: optimized.savingsPercent,
+      width: optimized.width,
+      height: optimized.height,
+      duration: optimized.duration || null,
+      preset: optimized.preset,
+      optimized: true,
+    };
+  } finally {
+    if (optimized?.cleanupDir) {
+      await rm(optimized.cleanupDir, { recursive: true, force: true }).catch(() => {});
+    }
+    await removeTempFile(file?.path);
+  }
 }
 
 async function checkBucketExists(req, res, next) {
@@ -106,7 +140,20 @@ async function checkBucketExists(req, res, next) {
   }
 }
 
-// Upload padrão. Toda mídia é otimizada antes de chegar ao Storage.
+async function cleanupRequestFiles(req) {
+  const files = [];
+  if (req.file?.path) files.push(req.file.path);
+
+  for (const list of Object.values(req.files || {})) {
+    if (!Array.isArray(list)) continue;
+    for (const file of list) {
+      if (file?.path) files.push(file.path);
+    }
+  }
+
+  await Promise.all(files.map(removeTempFile));
+}
+
 router.post("/upload", requireAuth, checkBucketExists, upload.fields([
   { name: "desktop_image", maxCount: 1 },
   { name: "desktop_video", maxCount: 1 },
@@ -136,6 +183,7 @@ router.post("/upload", requireAuth, checkBucketExists, upload.fields([
       data: results,
     });
   } catch (error) {
+    await cleanupRequestFiles(req);
     console.error("ERRO UPLOAD BANNER:", error);
     return res.status(error.statusCode || 500).json({
       success: false,
@@ -145,11 +193,11 @@ router.post("/upload", requireAuth, checkBucketExists, upload.fields([
   }
 });
 
-// Upload individual. Também otimiza automaticamente antes de salvar.
 router.post("/upload/:type", requireAuth, checkBucketExists, upload.single("file"), async (req, res) => {
   try {
     const { type } = req.params;
     if (!ALLOWED_MEDIA_TYPES.includes(type)) {
+      await removeTempFile(req.file?.path);
       return res.status(400).json({
         success: false,
         message: "Tipo inválido. Use desktop_image, desktop_video, mobile_image ou mobile_video",
@@ -170,6 +218,7 @@ router.post("/upload/:type", requireAuth, checkBucketExists, upload.single("file
       data: { [type]: result },
     });
   } catch (error) {
+    await removeTempFile(req.file?.path);
     console.error("ERRO UPLOAD INDIVIDUAL:", error);
     return res.status(error.statusCode || 500).json({
       success: false,
@@ -179,8 +228,6 @@ router.post("/upload/:type", requireAuth, checkBucketExists, upload.single("file
   }
 });
 
-// Arquivos acima de 15MB entram neste fluxo. O endpoint aceita até 120MB,
-// comprime e só então envia o resultado leve ao Storage.
 router.post(
   "/media-optimizer/:type",
   requireAuth,
@@ -194,6 +241,7 @@ router.post(
         : "compact";
 
       if (!ALLOWED_MEDIA_TYPES.includes(type)) {
+        await removeTempFile(req.file?.path);
         return res.status(400).json({ success: false, message: "Tipo de mídia inválido" });
       }
 
@@ -210,6 +258,7 @@ router.post(
         data: { [type]: result },
       });
     } catch (error) {
+      await removeTempFile(req.file?.path);
       console.error("ERRO OTIMIZADOR DE MÍDIA:", error);
       return res.status(error.statusCode || 500).json({
         success: false,
@@ -220,8 +269,6 @@ router.post(
   }
 );
 
-// Legendas automáticas do Studio. O recurso é opcional e só é ativado quando
-// OPENAI_API_KEY estiver configurada no ambiente da API.
 router.post("/video-editor/captions", requireAuth, async (req, res) => {
   try {
     const { source_url, language = "auto" } = req.body || {};
@@ -250,7 +297,6 @@ router.post("/video-editor/captions", requireAuth, async (req, res) => {
   }
 });
 
-// Editor profissional de vídeo: renderiza cortes, ajustes, áudio e transformações com FFmpeg.
 router.post("/video-editor/render", requireAuth, checkBucketExists, async (req, res) => {
   try {
     const { source_url, media_type = "desktop_video", settings = {} } = req.body || {};

@@ -1,7 +1,8 @@
 import multer from "multer";
+import os from "os";
+import path from "path";
+import crypto from "crypto";
 
-// Upload direto: até 15MB para qualquer mídia. Arquivos maiores são enviados
-// pelo endpoint de otimização, que aceita até 120MB e comprime antes de salvar.
 const MAX_BANNER_IMAGE_BYTES = 15 * 1024 * 1024;
 const MAX_BANNER_VIDEO_BYTES = 15 * 1024 * 1024;
 const MAX_BANNER_OPTIMIZER_BYTES = 120 * 1024 * 1024;
@@ -44,7 +45,7 @@ function validateBannerMime(file, callback, allowGenericField = false) {
 
   if (isVideoField || (allowGenericField && ALLOWED_VIDEO_MIME_TYPES.has(mimeType))) {
     if (!ALLOWED_VIDEO_MIME_TYPES.has(mimeType)) {
-      const error = new Error("Formato de vídeo não permitido. Use MP4 (H.264)." );
+      const error = new Error("Formato de vídeo não permitido. Use MP4 (H.264).");
       error.statusCode = 400;
       return callback(error);
     }
@@ -56,8 +57,20 @@ function validateBannerMime(file, callback, allowGenericField = false) {
   return callback(error);
 }
 
+// IMPORTANTE: arquivos de banner são gravados em disco temporário.
+// memoryStorage fazia vídeos grandes ocuparem RAM antes mesmo do FFmpeg iniciar.
+const diskStorage = multer.diskStorage({
+  destination(req, file, callback) {
+    callback(null, os.tmpdir());
+  },
+  filename(req, file, callback) {
+    const ext = path.extname(file.originalname || "").toLowerCase().replace(/[^a-z0-9.]/g, "");
+    callback(null, `ozonteck-banner-${Date.now()}-${crypto.randomUUID()}${ext || ".bin"}`);
+  },
+});
+
 const upload = multer({
-  storage: multer.memoryStorage(),
+  storage: diskStorage,
   limits: {
     fileSize: MAX_BANNER_VIDEO_BYTES,
     files: 4,
@@ -68,7 +81,7 @@ const upload = multer({
 });
 
 const mediaOptimizerUpload = multer({
-  storage: multer.memoryStorage(),
+  storage: diskStorage,
   limits: {
     fileSize: MAX_BANNER_OPTIMIZER_BYTES,
     files: 1,
