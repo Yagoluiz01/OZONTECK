@@ -151,22 +151,32 @@ export async function getBannerStats(bannerId, period) {
       default: startDate.setDate(now.getDate() - 30);
     }
 
-    // Filtrar por período
-    const filteredData = (trackingData || []).filter(t => 
-      new Date(t.created_at) >= startDate
-    );
+    // Filtrar por período. A tabela original usa `timestamp`; versões mais
+    // novas podem expor `created_at`, por isso aceitamos ambos.
+    const filteredData = (trackingData || []).filter((t) => {
+      const rawDate = t.created_at || t.timestamp;
+      if (!rawDate) return false;
+      const eventDate = new Date(rawDate);
+      return !Number.isNaN(eventDate.getTime()) && eventDate >= startDate;
+    });
 
     // Calcular métricas
-    const impressions = filteredData.filter(t => t.event_type === 'impression').length;
-    const clicks = filteredData.filter(t => t.event_type === 'click').length;
-    const clicksByType = aggregateBy(filteredData.filter(t => t.event_type === 'click'), 'click_type');
-    const devices = aggregateBy(filteredData, 'device_type');
-    const browsers = aggregateBy(filteredData, 'browser');
-    
-    // Calcular tempo médio de visualização
+    const impressionEvents = filteredData.filter(t => t.event_type === 'impression');
+    const clickEvents = filteredData.filter(t => t.event_type === 'click');
+    const impressions = impressionEvents.length;
+    const clicks = clickEvents.length;
+    const clicksByType = aggregateBy(clickEvents, 'click_type');
+
+    // Distribuição por dispositivo/navegador deve refletir visualizações,
+    // não triplicar usuários por causa de click + view_duration.
+    const devices = aggregateBy(impressionEvents, 'device_type');
+    const browsers = aggregateBy(impressionEvents, 'browser');
+
+    // Calcular tempo médio de visualização. O evento gravado pela loja é
+    // `view_duration`; o nome antigo `view_time` nunca correspondia ao payload.
     const viewTimes = filteredData
-      .filter(t => t.event_type === 'view_time' && t.view_duration_ms)
-      .map(t => t.view_duration_ms);
+      .filter(t => t.event_type === 'view_duration' && Number(t.view_duration_ms) > 0)
+      .map(t => Number(t.view_duration_ms));
     const avgViewDurationMs = viewTimes.length > 0
       ? Math.round(viewTimes.reduce((a, b) => a + b, 0) / viewTimes.length)
       : 0;

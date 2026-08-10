@@ -1,11 +1,11 @@
 import multer from "multer";
-import { env } from "../config/env.js";
 
-// Limites de tamanho conforme especificado
-const MAX_BANNER_IMAGE_BYTES = 3 * 1024 * 1024; // 3MB
-const MAX_BANNER_VIDEO_BYTES = 15 * 1024 * 1024; // 15MB
+// Upload direto: até 15MB para qualquer mídia. Arquivos maiores são enviados
+// pelo endpoint de otimização, que aceita até 120MB e comprime antes de salvar.
+const MAX_BANNER_IMAGE_BYTES = 15 * 1024 * 1024;
+const MAX_BANNER_VIDEO_BYTES = 15 * 1024 * 1024;
+const MAX_BANNER_OPTIMIZER_BYTES = 120 * 1024 * 1024;
 
-// Tipos permitidos conforme requisitos
 const ALLOWED_IMAGE_MIME_TYPES = new Set([
   "image/jpeg",
   "image/png",
@@ -16,7 +16,6 @@ const ALLOWED_VIDEO_MIME_TYPES = new Set([
   "video/mp4",
 ]);
 
-// Resoluções recomendadas
 const IMAGE_SPECS = {
   desktop: { width: 1920, height: 700, aspectRatio: "16:7" },
   mobile: { width: 1080, height: 1920, aspectRatio: "9:16" },
@@ -27,47 +26,64 @@ const VIDEO_SPECS = {
   mobile: { width: 1080, height: 1920, maxDuration: 15 },
 };
 
-// Configuração do multer para múltiplos arquivos
+function validateBannerMime(file, callback, allowGenericField = false) {
+  const mimeType = String(file.mimetype || "").toLowerCase();
+  const fieldName = String(file.fieldname || "");
+
+  const isImageField = fieldName === "desktop_image" || fieldName === "mobile_image";
+  const isVideoField = fieldName === "desktop_video" || fieldName === "mobile_video";
+
+  if (isImageField || (allowGenericField && ALLOWED_IMAGE_MIME_TYPES.has(mimeType))) {
+    if (!ALLOWED_IMAGE_MIME_TYPES.has(mimeType)) {
+      const error = new Error("Formato de imagem não permitido. Use JPG, PNG ou WEBP.");
+      error.statusCode = 400;
+      return callback(error);
+    }
+    return callback(null, true);
+  }
+
+  if (isVideoField || (allowGenericField && ALLOWED_VIDEO_MIME_TYPES.has(mimeType))) {
+    if (!ALLOWED_VIDEO_MIME_TYPES.has(mimeType)) {
+      const error = new Error("Formato de vídeo não permitido. Use MP4 (H.264)." );
+      error.statusCode = 400;
+      return callback(error);
+    }
+    return callback(null, true);
+  }
+
+  const error = new Error("Tipo de arquivo não permitido para banners.");
+  error.statusCode = 400;
+  return callback(error);
+}
+
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
     fileSize: MAX_BANNER_VIDEO_BYTES,
-    files: 4, // desktop_image, desktop_video, mobile_image, mobile_video
+    files: 4,
   },
   fileFilter(req, file, callback) {
-    const mimeType = String(file.mimetype || "").toLowerCase();
-    const fieldName = file.fieldname; // desktop_image, desktop_video, mobile_image, mobile_video
+    return validateBannerMime(file, callback, false);
+  },
+});
 
-    // Verificar se é imagem
-    if (fieldName === "desktop_image" || fieldName === "mobile_image") {
-      if (!ALLOWED_IMAGE_MIME_TYPES.has(mimeType)) {
-        const error = new Error(
-          "Formato de imagem não permitido. Use JPG, PNG ou WEBP."
-        );
-        error.statusCode = 400;
-        return callback(error);
-      }
-    }
-
-    // Verificar se é vídeo (apenas MP4 H264)
-    if (fieldName === "desktop_video" || fieldName === "mobile_video") {
-      if (!ALLOWED_VIDEO_MIME_TYPES.has(mimeType)) {
-        const error = new Error(
-          "Formato de vídeo não permitido. Use MP4 (H.264)."
-        );
-        error.statusCode = 400;
-        return callback(error);
-      }
-    }
-
-    return callback(null, true);
+const mediaOptimizerUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: MAX_BANNER_OPTIMIZER_BYTES,
+    files: 1,
+  },
+  fileFilter(req, file, callback) {
+    return validateBannerMime(file, callback, true);
   },
 });
 
 export {
   upload,
+  mediaOptimizerUpload,
   MAX_BANNER_IMAGE_BYTES,
   MAX_BANNER_VIDEO_BYTES,
+  MAX_BANNER_OPTIMIZER_BYTES,
   ALLOWED_IMAGE_MIME_TYPES,
   ALLOWED_VIDEO_MIME_TYPES,
   IMAGE_SPECS,

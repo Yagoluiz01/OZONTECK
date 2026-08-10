@@ -1,0 +1,16 @@
+OZONTECK - Fase 1 Auth Central v2
+
+1. Copie aplicar-auth-central-v2.mjs para:
+   C:\ozonteck-estrutura\ozonteck-api-git
+
+2. Execute:
+   cd C:\ozonteck-estrutura\ozonteck-api-git
+   node .\aplicar-auth-central-v2.mjs
+
+O script valida todos os arquivos antes de gravar e possui rollback automático.
+Ele NÃO altera /api/auth/login e NÃO remove tokens nesta etapa.
+
+Após sucesso:
+   git diff
+
+Não faça commit/push antes da revisão.

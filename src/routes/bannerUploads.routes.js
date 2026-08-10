@@ -1,52 +1,47 @@
 import express from "express";
 import { env } from "../config/env.js";
-import { upload, MAX_BANNER_IMAGE_BYTES, MAX_BANNER_VIDEO_BYTES } from "../middlewares/bannerUpload.middleware.js";
+import {
+  upload,
+  mediaOptimizerUpload,
+  MAX_BANNER_IMAGE_BYTES,
+  MAX_BANNER_VIDEO_BYTES,
+} from "../middlewares/bannerUpload.middleware.js";
 import { requireAuth } from "./banners.routes.js";
 import { verifyBucketExists } from "../services/storage.service.js";
 import { supabaseAdmin } from "../config/supabase.js";
+import { renderBannerVideo, transcribeBannerVideo } from "../services/banner-video-editor.service.js";
+import { optimizeBannerMedia } from "../services/banner-media-optimizer.service.js";
 
 const router = express.Router();
-
 const BUCKET_NAME = "banner-images";
+const ALLOWED_MEDIA_TYPES = ["desktop_image", "desktop_video", "mobile_image", "mobile_video"];
 
-// Gerar UUID simples para cache busting
 function generateUUID() {
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
     const r = Math.random() * 16 | 0;
-    const v = c === 'x' ? r : (r & 0x3 | 0x8);
+    const v = c === "x" ? r : (r & 0x3 | 0x8);
     return v.toString(16);
   });
 }
 
-// Processar imagem com Sharp (conversão para WEBP 80-85%)
-async function processImage(buffer, deviceType, quality = 0.85) {
-  try {
-    const sharp = await import("sharp");
-    
-    const specs = deviceType === "mobile" 
-      ? { width: 1080, height: 1920 } 
-      : { width: 1920, height: 700 };
+function getFolder(type) {
+  if (type.includes("video")) return "videos";
+  return type.includes("mobile") ? "mobile" : "desktop";
+}
 
-    const processed = await sharp
-      .default(buffer)
-      .resize(specs.width, specs.height, {
-        fit: "cover",
-        position: "center",
-      })
-      .toFormat("webp", { quality: Math.round(quality * 100) })
-      .toBuffer();
+function getDirectLimit(type) {
+  return type.includes("image") ? MAX_BANNER_IMAGE_BYTES : MAX_BANNER_VIDEO_BYTES;
+}
 
-    return {
-      buffer: processed,
-      mimeType: "image/webp",
-    };
-  } catch (error) {
-    console.warn("Sharp error, using original:", error.message);
-    return { buffer, mimeType: "image/jpeg" };
+function validateDirectFileSize(file, type) {
+  const maxSize = getDirectLimit(type);
+  if (file.size > maxSize) {
+    const error = new Error(`Arquivo acima de ${Math.round(maxSize / 1024 / 1024)}MB. Use o otimizador automático.`);
+    error.statusCode = 413;
+    throw error;
   }
 }
 
-// Upload para Supabase Storage
 async function uploadToStorage(fileBuffer, fileName, mimeType, folder) {
   const uploadPath = `${folder}/${fileName}`;
   const { error } = await supabaseAdmin.storage.from(BUCKET_NAME).upload(uploadPath, fileBuffer, {
@@ -56,10 +51,7 @@ async function uploadToStorage(fileBuffer, fileName, mimeType, folder) {
   });
 
   if (error) {
-    console.error("STORAGE UPLOAD ERROR:", {
-      message: error.message,
-      path: uploadPath,
-    });
+    console.error("STORAGE UPLOAD ERROR:", { message: error.message, path: uploadPath });
     throw new Error(`Upload falhou: ${error.message}`);
   }
 
@@ -67,18 +59,30 @@ async function uploadToStorage(fileBuffer, fileName, mimeType, folder) {
   return { url: data.publicUrl, path: uploadPath };
 }
 
-// Validação de tamanho antes do upload
-function validateFileSize(file, fieldName) {
-  const isImage = fieldName.includes("image");
-  const maxSize = isImage ? MAX_BANNER_IMAGE_BYTES : MAX_BANNER_VIDEO_BYTES;
-  
-  if (file.size > maxSize) {
-    const sizeMB = maxSize / 1024 / 1024;
-    throw new Error(`Arquivo muito grande. Máximo ${sizeMB}MB para ${fieldName}`);
-  }
+async function optimizeAndStore(file, type, bannerId, preset = "balanced") {
+  const optimized = await optimizeBannerMedia(file.buffer, type, preset);
+  const filename = `${bannerId}-${type}-${generateUUID()}.${optimized.extension}`;
+  const stored = await uploadToStorage(
+    optimized.buffer,
+    filename,
+    optimized.mimeType,
+    getFolder(type)
+  );
+
+  return {
+    ...stored,
+    originalName: file.originalname || filename,
+    originalSize: optimized.originalSize,
+    optimizedSize: optimized.optimizedSize,
+    savingsPercent: optimized.savingsPercent,
+    width: optimized.width,
+    height: optimized.height,
+    duration: optimized.duration || null,
+    preset: optimized.preset,
+    optimized: true,
+  };
 }
 
-// Middleware para verificar bucket antes das rotas de upload
 async function checkBucketExists(req, res, next) {
   try {
     const bucketCheck = await verifyBucketExists();
@@ -102,7 +106,7 @@ async function checkBucketExists(req, res, next) {
   }
 }
 
-// Upload único para todos os 4 tipos de mídia
+// Upload padrão. Toda mídia é otimizada antes de chegar ao Storage.
 router.post("/upload", requireAuth, checkBucketExists, upload.fields([
   { name: "desktop_image", maxCount: 1 },
   { name: "desktop_video", maxCount: 1 },
@@ -117,120 +121,181 @@ router.post("/upload", requireAuth, checkBucketExists, upload.fields([
       mobile_video: null,
     };
 
-    const bannerId = req.query.banner_id || generateUUID();
+    const bannerId = req.body?.banner_id || req.query.banner_id || generateUUID();
 
-    // Processar Desktop Image
-    if (req.files?.desktop_image?.[0]) {
-      const file = req.files.desktop_image[0];
-      validateFileSize(file, "desktop_image");
-      
-      const processed = await processImage(file.buffer, "desktop", 0.85);
-      const filename = `${bannerId}-desktop-${generateUUID()}.webp`;
-      results.desktop_image = await uploadToStorage(processed.buffer, filename, processed.mimeType, "desktop");
-    }
-
-    // Processar Desktop Video
-    if (req.files?.desktop_video?.[0]) {
-      const file = req.files.desktop_video[0];
-      validateFileSize(file, "desktop_video");
-      
-      const filename = `${bannerId}-desktop-${generateUUID()}.mp4`;
-      results.desktop_video = await uploadToStorage(file.buffer, filename, "video/mp4", "videos");
-    }
-
-    // Processar Mobile Image
-    if (req.files?.mobile_image?.[0]) {
-      const file = req.files.mobile_image[0];
-      validateFileSize(file, "mobile_image");
-      
-      const processed = await processImage(file.buffer, "mobile", 0.85);
-      const filename = `${bannerId}-mobile-${generateUUID()}.webp`;
-      results.mobile_image = await uploadToStorage(processed.buffer, filename, processed.mimeType, "mobile");
-    }
-
-    // Processar Mobile Video
-    if (req.files?.mobile_video?.[0]) {
-      const file = req.files.mobile_video[0];
-      validateFileSize(file, "mobile_video");
-      
-      const filename = `${bannerId}-mobile-${generateUUID()}.mp4`;
-      results.mobile_video = await uploadToStorage(file.buffer, filename, "video/mp4", "videos");
+    for (const type of ALLOWED_MEDIA_TYPES) {
+      const file = req.files?.[type]?.[0];
+      if (!file) continue;
+      validateDirectFileSize(file, type);
+      results[type] = await optimizeAndStore(file, type, bannerId, "balanced");
     }
 
     return res.status(200).json({
       success: true,
-      message: "Arquivos enviados com sucesso",
+      message: "Mídia otimizada e enviada com sucesso",
       data: results,
     });
   } catch (error) {
     console.error("ERRO UPLOAD BANNER:", error);
-    return res.status(500).json({
+    return res.status(error.statusCode || 500).json({
       success: false,
       message: error.message || "Erro ao enviar arquivos",
-      code: "UPLOAD_ERROR",
+      code: error.statusCode === 413 ? "MEDIA_REQUIRES_OPTIMIZATION" : "UPLOAD_ERROR",
     });
   }
 });
 
-// Upload individual (para substituir um único arquivo)
+// Upload individual. Também otimiza automaticamente antes de salvar.
 router.post("/upload/:type", requireAuth, checkBucketExists, upload.single("file"), async (req, res) => {
   try {
     const { type } = req.params;
-    const allowedTypes = ["desktop_image", "desktop_video", "mobile_image", "mobile_video"];
-    
-    if (!allowedTypes.includes(type)) {
+    if (!ALLOWED_MEDIA_TYPES.includes(type)) {
       return res.status(400).json({
         success: false,
-        message: "Tipo inválido. Use: desktop_image, desktop_video, mobile_image, mobile_video",
+        message: "Tipo inválido. Use desktop_image, desktop_video, mobile_image ou mobile_video",
       });
     }
 
     if (!req.file) {
-      return res.status(400).json({
-        success: false,
-        message: "Arquivo não enviado",
-      });
+      return res.status(400).json({ success: false, message: "Arquivo não enviado" });
     }
 
-    validateFileSize(req.file, type);
-
-    const bannerId = req.query.banner_id || generateUUID();
-    let processed;
-    
-    if (type.includes("image")) {
-      const deviceType = type === "mobile_image" ? "mobile" : "desktop";
-      processed = await processImage(req.file.buffer, deviceType, 0.85);
-    } else {
-      processed = { buffer: req.file.buffer, mimeType: "video/mp4" };
-    }
-
-    const filename = `${bannerId}-${type}-${generateUUID()}.${processed.mimeType.includes("webp") ? "webp" : "mp4"}`;
-    const folder = type.includes("video") ? "videos" : (type.includes("mobile") ? "mobile" : "desktop");
-    
-    const result = await uploadToStorage(processed.buffer, filename, processed.mimeType, folder);
+    validateDirectFileSize(req.file, type);
+    const bannerId = req.body?.banner_id || req.query.banner_id || generateUUID();
+    const result = await optimizeAndStore(req.file, type, bannerId, "balanced");
 
     return res.status(200).json({
       success: true,
+      message: "Mídia otimizada e enviada com sucesso",
       data: { [type]: result },
     });
   } catch (error) {
     console.error("ERRO UPLOAD INDIVIDUAL:", error);
-    return res.status(500).json({
+    return res.status(error.statusCode || 500).json({
       success: false,
       message: error.message || "Erro ao enviar arquivo",
+      code: error.statusCode === 413 ? "MEDIA_REQUIRES_OPTIMIZATION" : "UPLOAD_ERROR",
     });
   }
 });
 
-// Deletar arquivo específico
+// Arquivos acima de 15MB entram neste fluxo. O endpoint aceita até 120MB,
+// comprime e só então envia o resultado leve ao Storage.
+router.post(
+  "/media-optimizer/:type",
+  requireAuth,
+  checkBucketExists,
+  mediaOptimizerUpload.single("file"),
+  async (req, res) => {
+    try {
+      const { type } = req.params;
+      const preset = ["high", "balanced", "compact"].includes(req.body?.preset)
+        ? req.body.preset
+        : "compact";
+
+      if (!ALLOWED_MEDIA_TYPES.includes(type)) {
+        return res.status(400).json({ success: false, message: "Tipo de mídia inválido" });
+      }
+
+      if (!req.file) {
+        return res.status(400).json({ success: false, message: "Arquivo não enviado" });
+      }
+
+      const bannerId = req.body?.banner_id || req.query.banner_id || generateUUID();
+      const result = await optimizeAndStore(req.file, type, bannerId, preset);
+
+      return res.status(200).json({
+        success: true,
+        message: "Arquivo comprimido, otimizado e vinculado ao banner",
+        data: { [type]: result },
+      });
+    } catch (error) {
+      console.error("ERRO OTIMIZADOR DE MÍDIA:", error);
+      return res.status(error.statusCode || 500).json({
+        success: false,
+        message: error.message || "Erro ao otimizar mídia",
+        code: "MEDIA_OPTIMIZATION_ERROR",
+      });
+    }
+  }
+);
+
+// Legendas automáticas do Studio. O recurso é opcional e só é ativado quando
+// OPENAI_API_KEY estiver configurada no ambiente da API.
+router.post("/video-editor/captions", requireAuth, async (req, res) => {
+  try {
+    const { source_url, language = "auto" } = req.body || {};
+
+    if (!source_url || typeof source_url !== "string") {
+      return res.status(400).json({ success: false, message: "source_url é obrigatório" });
+    }
+
+    const result = await transcribeBannerVideo({
+      sourceUrl: source_url,
+      language,
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Legendas geradas com sucesso",
+      data: result,
+    });
+  } catch (error) {
+    console.error("ERRO LEGENDAS AUTOMÁTICAS DO BANNER:", error);
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.message || "Erro ao gerar legendas automáticas",
+      code: error.code || "CAPTIONS_GENERATION_ERROR",
+    });
+  }
+});
+
+// Editor profissional de vídeo: renderiza cortes, ajustes, áudio e transformações com FFmpeg.
+router.post("/video-editor/render", requireAuth, checkBucketExists, async (req, res) => {
+  try {
+    const { source_url, media_type = "desktop_video", settings = {} } = req.body || {};
+
+    if (!source_url || typeof source_url !== "string") {
+      return res.status(400).json({ success: false, message: "source_url é obrigatório" });
+    }
+
+    if (!["desktop_video", "mobile_video"].includes(media_type)) {
+      return res.status(400).json({
+        success: false,
+        message: "media_type inválido. Use desktop_video ou mobile_video",
+      });
+    }
+
+    const result = await renderBannerVideo({
+      sourceUrl: source_url,
+      mediaType: media_type,
+      rawSettings: settings,
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Vídeo renderizado com sucesso",
+      data: result,
+    });
+  } catch (error) {
+    console.error("ERRO EDITOR DE VÍDEO DO BANNER:", error);
+    const message = error.message || "Erro ao renderizar vídeo";
+    const missingFfmpeg = /ffmpeg/i.test(message) && /não está instalado|indisponível|ENOENT/i.test(message);
+
+    return res.status(missingFfmpeg ? 503 : 500).json({
+      success: false,
+      message,
+      code: missingFfmpeg ? "FFMPEG_UNAVAILABLE" : "VIDEO_RENDER_ERROR",
+    });
+  }
+});
+
 router.delete("/upload/:type/:path", requireAuth, checkBucketExists, async (req, res) => {
   try {
     const { type, path: filePath } = req.params;
-    
-    // Sanitizar o path para evitar path traversal
     const sanitizedPath = decodeURIComponent(filePath).replace(/\.\./g, "").replace(/^\/+/, "");
     const deleteUrl = `${env.supabaseUrl}/storage/v1/object/banner-images/${type}/${encodeURIComponent(sanitizedPath)}`;
-    
+
     const deleteResponse = await fetch(deleteUrl, {
       method: "DELETE",
       headers: {
@@ -246,13 +311,9 @@ router.delete("/upload/:type/:path", requireAuth, checkBucketExists, async (req,
         body: errorText,
         url: deleteUrl,
       });
-      // Não falhar se o arquivo já foi removido ou não existe
     }
 
-    return res.status(200).json({
-      success: true,
-      message: "Arquivo removido com sucesso",
-    });
+    return res.status(200).json({ success: true, message: "Arquivo removido com sucesso" });
   } catch (error) {
     console.error("ERRO AO REMOVER ARQUIVO:", error);
     return res.status(500).json({
