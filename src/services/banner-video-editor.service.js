@@ -8,7 +8,6 @@ import sharp from "sharp";
 import OpenAI from "openai";
 import { env } from "../config/env.js";
 import { supabaseAdmin } from "../config/supabase.js";
-import { optimizeBannerVideo } from "./banner-media-optimizer.service.js";
 
 let bundledFfmpegPath = null;
 try {
@@ -27,7 +26,8 @@ const FFMPEG_BINARY = String(
 
 const BUCKET_NAME = "banner-images";
 const MAX_SOURCE_BYTES = 120 * 1024 * 1024;
-const RENDER_TIMEOUT_MS = 240_000;
+const RENDER_TIMEOUT_MS = 720_000;
+const MAX_FINAL_VIDEO_BYTES = 14.5 * 1024 * 1024;
 const MAX_SEGMENTS = 12;
 const MAX_CAPTIONS = 80;
 
@@ -286,7 +286,7 @@ function buildTransformFilters(settings, width, height) {
   if (settings.flipY) filters.push("vflip");
 
   filters.push(...buildScaleFilter(width, height, settings.fit));
-  filters.push("fps=30", "format=yuv420p", "settb=AVTB");
+  filters.push(`fps=${settings.renderFps || 30}`, "format=yuv420p", "settb=AVTB");
   return filters;
 }
 
@@ -458,6 +458,60 @@ function normalizeCaptions(rawCaptions = [], duration) {
   }).filter((caption) => caption.text && caption.end > caption.start);
 }
 
+function getRenderProfile(quality, isMobile) {
+  if (quality === "high") {
+    return {
+      width: isMobile ? 1080 : 1920,
+      height: isMobile ? 1920 : 700,
+      fps: 30,
+      targetMb: 11.5,
+      audioKbps: 96,
+      preset: "veryfast",
+      maxVideoKbps: isMobile ? 4200 : 5000,
+    };
+  }
+
+  if (quality === "compact") {
+    return {
+      width: isMobile ? 540 : 1280,
+      height: isMobile ? 960 : 466,
+      fps: 24,
+      targetMb: 4.8,
+      audioKbps: 72,
+      preset: "ultrafast",
+      maxVideoKbps: isMobile ? 2000 : 2500,
+    };
+  }
+
+  return {
+    width: isMobile ? 720 : 1600,
+    height: isMobile ? 1280 : 584,
+    fps: 24,
+    targetMb: 7.5,
+    audioKbps: 96,
+    preset: "superfast",
+    maxVideoKbps: isMobile ? 2800 : 3400,
+  };
+}
+
+function calculateRenderBitrate(duration, profile, hasAudio) {
+  const safeDuration = Math.max(0.5, Number(duration) || 0.5);
+  const audioKbps = hasAudio ? profile.audioKbps : 0;
+
+  // Reservamos margem para container/metadata para o MP4 final ficar
+  // confortavelmente abaixo do limite de 15MB sem uma segunda recodificação.
+  const usableBits = profile.targetMb * 1024 * 1024 * 8 * 0.94;
+  const totalKbps = usableBits / safeDuration / 1000;
+  const videoKbps = Math.round(clamp(totalKbps - audioKbps, 320, profile.maxVideoKbps));
+
+  return {
+    audioKbps,
+    videoKbps,
+    maxrateKbps: Math.max(videoKbps, Math.round(videoKbps * 1.08)),
+    bufsizeKbps: Math.max(640, Math.round(videoKbps * 2)),
+  };
+}
+
 function normalizeSettings(raw = {}, duration, mediaType) {
   const trimStart = clamp(asNumber(raw.trimStart, 0), 0, Math.max(0, duration - 0.1));
   const trimEnd = clamp(asNumber(raw.trimEnd, duration), trimStart + 0.1, duration);
@@ -482,7 +536,7 @@ function normalizeSettings(raw = {}, duration, mediaType) {
     flipX: raw.flipX === true,
     flipY: raw.flipY === true,
     fit: raw.fit === "contain" ? "contain" : "cover",
-    quality: ["high", "standard", "compact"].includes(raw.quality) ? raw.quality : "high",
+    quality: ["high", "standard", "compact"].includes(raw.quality) ? raw.quality : "standard",
     mediaType: mediaType === "mobile_video" ? "mobile_video" : "desktop_video",
     effect: ALLOWED_EFFECTS.has(raw.effect) ? raw.effect : "original",
     effectIntensity: clamp(asNumber(raw.effectIntensity, 0.8), 0, 1),
@@ -789,9 +843,10 @@ export async function renderBannerVideo({ sourceUrl, mediaType, rawSettings }) {
     const settings = normalizeSettings(rawSettings, metadata.duration, mediaType);
 
     const isMobile = settings.mediaType === "mobile_video";
-    const width = isMobile ? 1080 : 1920;
-    const height = isMobile ? 1920 : 700;
-    const qualityCrf = settings.quality === "compact" ? 28 : settings.quality === "standard" ? 24 : 20;
+    const renderProfile = getRenderProfile(settings.quality, isMobile);
+    const width = renderProfile.width;
+    const height = renderProfile.height;
+    settings.renderFps = renderProfile.fps;
     const mappedCaptions = mapCaptionsToTimeline(settings.captions, settings.segments, settings.speed);
     const captionAssets = [];
 
@@ -816,23 +871,37 @@ export async function renderBannerVideo({ sourceUrl, mediaType, rawSettings }) {
     ];
 
     captionAssets.forEach((caption) => {
-      args.push("-loop", "1", "-framerate", "30", "-i", caption.filePath);
+      args.push("-loop", "1", "-framerate", String(renderProfile.fps), "-i", caption.filePath);
     });
+
+    const bitrate = calculateRenderBitrate(
+      settings.outputDuration,
+      renderProfile,
+      Boolean(finalAudioLabel)
+    );
 
     args.push(
       "-filter_complex", filterGraph,
       "-map", `[${finalVideoLabel}]`,
       "-c:v", "libx264",
-      "-preset", settings.quality === "high" ? "medium" : "veryfast",
-      "-crf", String(qualityCrf),
+      "-preset", renderProfile.preset,
+      "-b:v", `${bitrate.videoKbps}k`,
+      "-maxrate", `${bitrate.maxrateKbps}k`,
+      "-bufsize", `${bitrate.bufsizeKbps}k`,
       "-pix_fmt", "yuv420p",
       "-movflags", "+faststart",
       "-threads", "0",
+      "-max_muxing_queue_size", "1024",
       "-t", settings.outputDuration.toFixed(3)
     );
 
     if (finalAudioLabel) {
-      args.push("-map", `[${finalAudioLabel}]`, "-c:a", "aac", "-b:a", "128k");
+      args.push(
+        "-map", `[${finalAudioLabel}]`,
+        "-c:a", "aac",
+        "-b:a", `${bitrate.audioKbps}k`,
+        "-ac", "2"
+      );
     } else {
       args.push("-an");
     }
@@ -845,14 +914,10 @@ export async function renderBannerVideo({ sourceUrl, mediaType, rawSettings }) {
       throw new Error("FFmpeg gerou um arquivo vazio");
     }
 
-    if (outputBuffer.length > 14.5 * 1024 * 1024) {
-      const optimizationPreset = settings.quality === "compact"
-        ? "compact"
-        : settings.quality === "standard"
-          ? "balanced"
-          : "high";
-      const optimized = await optimizeBannerVideo(outputBuffer, settings.mediaType, optimizationPreset);
-      outputBuffer = optimized.buffer;
+    if (outputBuffer.length > MAX_FINAL_VIDEO_BYTES) {
+      throw new Error(
+        "O vídeo renderizado ultrapassou 15MB. Use qualidade Padrão/Compacta ou reduza a duração do projeto."
+      );
     }
 
     const uploaded = await uploadRenderedVideo(outputBuffer, settings.mediaType);
@@ -864,6 +929,15 @@ export async function renderBannerVideo({ sourceUrl, mediaType, rawSettings }) {
       size: outputBuffer.length,
       settings: {
         ...settings,
+        renderProfile: {
+          width,
+          height,
+          fps: renderProfile.fps,
+          preset: renderProfile.preset,
+          targetMb: renderProfile.targetMb,
+          videoKbps: bitrate.videoKbps,
+          audioKbps: bitrate.audioKbps,
+        },
         captions: settings.captions.length,
         segments: settings.segments.map((segment) => ({
           id: segment.id,
