@@ -2,8 +2,10 @@ import { spawn } from "child_process";
 import crypto from "crypto";
 import os from "os";
 import path from "path";
-import { createReadStream } from "fs";
-import { mkdtemp, rm, writeFile, readFile } from "fs/promises";
+import { createReadStream, createWriteStream } from "fs";
+import { Readable, Transform } from "stream";
+import { pipeline } from "stream/promises";
+import { mkdtemp, rm, stat } from "fs/promises";
 import sharp from "sharp";
 import OpenAI from "openai";
 import { env } from "../config/env.js";
@@ -29,7 +31,27 @@ const MAX_SOURCE_BYTES = 120 * 1024 * 1024;
 const RENDER_TIMEOUT_MS = 720_000;
 const MAX_FINAL_VIDEO_BYTES = 14.5 * 1024 * 1024;
 const MAX_SEGMENTS = 12;
-const MAX_CAPTIONS = 80;
+const MAX_CAPTIONS = 50;
+const MAX_PENDING_RENDERS = 2;
+
+let renderQueueTail = Promise.resolve();
+let pendingRenderCount = 0;
+
+function enqueueRender(task) {
+  if (pendingRenderCount >= MAX_PENDING_RENDERS) {
+    const error = new Error("Já existem renderizações em andamento. Aguarde alguns instantes e tente novamente.");
+    error.statusCode = 429;
+    error.code = "VIDEO_RENDER_BUSY";
+    throw error;
+  }
+
+  pendingRenderCount += 1;
+  const run = renderQueueTail.then(task, task);
+  renderQueueTail = run.catch(() => {});
+  return run.finally(() => {
+    pendingRenderCount = Math.max(0, pendingRenderCount - 1);
+  });
+}
 
 const ALLOWED_TRANSITIONS = new Set([
   "none",
@@ -233,7 +255,7 @@ function inspectVideo(filePath) {
 
 async function downloadSource(sourceUrl, targetPath) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 60_000);
+  const timeout = setTimeout(() => controller.abort(), 90_000);
 
   try {
     const response = await fetch(sourceUrl, { signal: controller.signal });
@@ -251,12 +273,28 @@ async function downloadSource(sourceUrl, targetPath) {
       throw new Error("Vídeo de origem excede 120MB");
     }
 
-    const buffer = Buffer.from(await response.arrayBuffer());
-    if (buffer.length > MAX_SOURCE_BYTES) {
-      throw new Error("Vídeo de origem excede 120MB");
+    if (!response.body) {
+      throw new Error("A origem do vídeo não retornou conteúdo");
     }
 
-    await writeFile(targetPath, buffer);
+    let receivedBytes = 0;
+    const limiter = new Transform({
+      transform(chunk, _encoding, callback) {
+        receivedBytes += chunk.length;
+        if (receivedBytes > MAX_SOURCE_BYTES) {
+          callback(new Error("Vídeo de origem excede 120MB"));
+          return;
+        }
+        callback(null, chunk);
+      },
+    });
+
+    // Streaming evita carregar até 120MB inteiros dentro do heap do Node.
+    await pipeline(
+      Readable.fromWeb(response.body),
+      limiter,
+      createWriteStream(targetPath, { highWaterMark: 64 * 1024 })
+    );
   } finally {
     clearTimeout(timeout);
   }
@@ -484,8 +522,8 @@ function getRenderProfile(quality, isMobile) {
   }
 
   return {
-    width: isMobile ? 720 : 1600,
-    height: isMobile ? 1280 : 584,
+    width: isMobile ? 720 : 1280,
+    height: isMobile ? 1280 : 466,
     fps: 24,
     targetMb: 7.5,
     audioKbps: 96,
@@ -733,13 +771,14 @@ function buildFilterGraph(settings, metadata, width, height, captionAssets) {
   };
 }
 
-async function uploadRenderedVideo(buffer, mediaType) {
+async function uploadRenderedVideo(filePath, mediaType) {
   const filename = `${mediaType}-${Date.now()}-${crypto.randomUUID()}.mp4`;
   const storagePath = `videos/edited/${filename}`;
+  const stream = createReadStream(filePath, { highWaterMark: 64 * 1024 });
 
   const { error } = await supabaseAdmin.storage
     .from(BUCKET_NAME)
-    .upload(storagePath, buffer, {
+    .upload(storagePath, stream, {
       contentType: "video/mp4",
       cacheControl: "31536000",
       upsert: false,
@@ -831,7 +870,7 @@ export async function transcribeBannerVideo({ sourceUrl, language = "auto" }) {
   }
 }
 
-export async function renderBannerVideo({ sourceUrl, mediaType, rawSettings }) {
+async function renderBannerVideoInternal({ sourceUrl, mediaType, rawSettings }) {
   const safeSourceUrl = validateSourceUrl(sourceUrl);
   const tmpDir = await mkdtemp(path.join(os.tmpdir(), "ozonteck-banner-editor-"));
   const inputPath = path.join(tmpDir, "input.mp4");
@@ -867,11 +906,19 @@ export async function renderBannerVideo({ sourceUrl, mediaType, rawSettings }) {
     const args = [
       "-hide_banner",
       "-loglevel", "error",
+      "-filter_threads", "1",
+      "-filter_complex_threads", "1",
+      "-thread_queue_size", "64",
       "-i", inputPath,
     ];
 
     captionAssets.forEach((caption) => {
-      args.push("-loop", "1", "-framerate", String(renderProfile.fps), "-i", caption.filePath);
+      args.push(
+        "-thread_queue_size", "8",
+        "-loop", "1",
+        "-framerate", String(renderProfile.fps),
+        "-i", caption.filePath
+      );
     });
 
     const bitrate = calculateRenderBitrate(
@@ -890,7 +937,7 @@ export async function renderBannerVideo({ sourceUrl, mediaType, rawSettings }) {
       "-bufsize", `${bitrate.bufsizeKbps}k`,
       "-pix_fmt", "yuv420p",
       "-movflags", "+faststart",
-      "-threads", "0",
+      "-threads", "1",
       "-max_muxing_queue_size", "1024",
       "-t", settings.outputDuration.toFixed(3)
     );
@@ -909,24 +956,26 @@ export async function renderBannerVideo({ sourceUrl, mediaType, rawSettings }) {
     args.push("-y", outputPath);
     await runProcess(FFMPEG_BINARY, args);
 
-    let outputBuffer = await readFile(outputPath);
-    if (!outputBuffer.length) {
+    const outputStats = await stat(outputPath);
+    if (!outputStats.size) {
       throw new Error("FFmpeg gerou um arquivo vazio");
     }
 
-    if (outputBuffer.length > MAX_FINAL_VIDEO_BYTES) {
+    if (outputStats.size > MAX_FINAL_VIDEO_BYTES) {
       throw new Error(
         "O vídeo renderizado ultrapassou 15MB. Use qualidade Padrão/Compacta ou reduza a duração do projeto."
       );
     }
 
-    const uploaded = await uploadRenderedVideo(outputBuffer, settings.mediaType);
+    // Envia diretamente do arquivo temporário para o Storage, sem duplicar
+    // o MP4 inteiro na memória do processo Node.
+    const uploaded = await uploadRenderedVideo(outputPath, settings.mediaType);
     return {
       ...uploaded,
       width,
       height,
       duration: Number(settings.outputDuration.toFixed(3)),
-      size: outputBuffer.length,
+      size: outputStats.size,
       settings: {
         ...settings,
         renderProfile: {
@@ -951,4 +1000,9 @@ export async function renderBannerVideo({ sourceUrl, mediaType, rawSettings }) {
   } finally {
     await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
   }
+}
+
+
+export function renderBannerVideo(payload) {
+  return enqueueRender(() => renderBannerVideoInternal(payload));
 }
