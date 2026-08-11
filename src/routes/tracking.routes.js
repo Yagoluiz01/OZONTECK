@@ -60,6 +60,7 @@ const RECOVERY_ORDER_EVENT_TYPES = [
   "payment_success",
   "purchase",
 ];
+const ADMIN_RECOVERY_EVENT_TYPE = "admin_recovery_started";
 
 function clampMinutes(value, fallback, max = 24 * 60) {
   const minutes = Number(value);
@@ -813,6 +814,182 @@ router.get("/events", requireAdminAuth, requireMasterAdmin, async (req, res) => 
 });
 
 
+router.post("/checkout-leads/:sessionId/recovery-started", requireAdminAuth, requireMasterAdmin, async (req, res) => {
+  try {
+    const sessionId = normalizeText(req.params.sessionId, 180);
+    const leadId = normalizeText(req.body?.lead_id || req.body?.leadId, 180);
+    const orderNumberFromClient = normalizeText(req.body?.order_number || req.body?.orderNumber, 180);
+    const checkoutDelayMinutes = CHECKOUT_RECOVERY_DELAY_MINUTES;
+    const orderDelayMinutes = ORDER_RECOVERY_DELAY_MINUTES;
+
+    if (!sessionId) {
+      return res.status(400).json({
+        success: false,
+        message: "sessionId é obrigatório",
+      });
+    }
+
+    const existingSession = await findSession(sessionId);
+    if (existingSession.error) {
+      console.error("TRACKING RECOVERY SESSION LOOKUP ERROR:", existingSession.error);
+      return res.status(500).json({
+        success: false,
+        message: "Erro ao validar sessão do lead.",
+      });
+    }
+
+    if (!existingSession.data?.id) {
+      return res.status(404).json({
+        success: false,
+        message: "Sessão do lead não encontrada.",
+      });
+    }
+
+    const { data: latestContactRows, error: latestContactError } = await supabaseAdmin
+      .from("lead_events")
+      .select("*")
+      .eq("session_id", sessionId)
+      .eq("event_type", "checkout_contact")
+      .order("created_at", { ascending: false })
+      .limit(1);
+
+    if (latestContactError) {
+      console.error("TRACKING RECOVERY CONTACT LOOKUP ERROR:", latestContactError);
+      return res.status(500).json({
+        success: false,
+        message: "Erro ao validar oportunidade de recuperação.",
+      });
+    }
+
+    const latestContact = Array.isArray(latestContactRows) && latestContactRows.length
+      ? latestContactRows[0]
+      : null;
+
+    if (!latestContact?.id) {
+      return res.status(404).json({
+        success: false,
+        message: "Lead de checkout não encontrado para esta sessão.",
+      });
+    }
+
+    const lead = buildCheckoutLeadRecord(latestContact);
+
+    const { data: orderEventRows, error: orderEventError } = await supabaseAdmin
+      .from("lead_events")
+      .select("id, session_id, event_type, section, created_at")
+      .eq("session_id", sessionId)
+      .in("event_type", RECOVERY_ORDER_EVENT_TYPES)
+      .order("created_at", { ascending: false })
+      .limit(1);
+
+    if (orderEventError) {
+      console.error("TRACKING RECOVERY ORDER EVENT LOOKUP ERROR:", orderEventError);
+    }
+
+    const orderEventRow = Array.isArray(orderEventRows) && orderEventRows.length
+      ? orderEventRows[0]
+      : null;
+    const orderEvent = orderEventRow ? normalizeOrderTrackingEvent(orderEventRow) : null;
+
+    let order = null;
+    const trustedOrderNumber = orderEvent?.order_number || null;
+    if (trustedOrderNumber) {
+      const { data: orderRows, error: orderError } = await supabaseAdmin
+        .from("orders")
+        .select("id, order_number, payment_status, order_status, payment_gateway, total_amount, created_at")
+        .eq("order_number", trustedOrderNumber)
+        .limit(1);
+
+      if (orderError) {
+        console.error("TRACKING RECOVERY ORDER LOOKUP ERROR:", orderError);
+      } else if (Array.isArray(orderRows) && orderRows.length) {
+        order = orderRows[0];
+      }
+    }
+
+    const recoveryState = applyCheckoutRecoveryState(lead, {
+      nowMs: Date.now(),
+      checkoutDelayMinutes,
+      orderDelayMinutes,
+      orderEvent,
+      order,
+    });
+
+    if (!recoveryState.is_recoverable) {
+      return res.status(409).json({
+        success: false,
+        message: recoveryState.recovery_message || "Lead ainda não está liberado para recuperação.",
+        recovery_status: recoveryState.recovery_status,
+        wait_seconds_remaining: recoveryState.wait_seconds_remaining,
+      });
+    }
+
+    const { data: priorRecoveryRows, error: priorRecoveryError } = await supabaseAdmin
+      .from("lead_events")
+      .select("id, created_at")
+      .eq("session_id", sessionId)
+      .eq("event_type", ADMIN_RECOVERY_EVENT_TYPE)
+      .gte("created_at", latestContact.created_at)
+      .order("created_at", { ascending: false })
+      .limit(1);
+
+    if (priorRecoveryError) {
+      console.error("TRACKING RECOVERY PRIOR LOOKUP ERROR:", priorRecoveryError);
+    }
+
+    const priorRecovery = Array.isArray(priorRecoveryRows) && priorRecoveryRows.length
+      ? priorRecoveryRows[0]
+      : null;
+
+    if (priorRecovery?.id) {
+      return res.status(200).json({
+        success: true,
+        already_marked: true,
+        recovered_at: priorRecovery.created_at,
+      });
+    }
+
+    const payload = {
+      session_id: sessionId,
+      visitor_id: existingSession.data.visitor_id || null,
+      event_type: ADMIN_RECOVERY_EVENT_TYPE,
+      page: "admin/inteligencia-leads",
+      section: JSON.stringify({
+        action: "whatsapp_recovery_started",
+        lead_id: leadId || latestContact.id,
+        order_number: recoveryState.order_number || trustedOrderNumber || orderNumberFromClient || null,
+      }),
+      duration_ms: 0,
+    };
+
+    const { data, error } = await supabaseAdmin
+      .from("lead_events")
+      .insert([payload])
+      .select("id, session_id, event_type, created_at")
+      .single();
+
+    if (error) {
+      console.error("TRACKING RECOVERY START INSERT ERROR:", error);
+      return res.status(500).json({
+        success: false,
+        message: "Não foi possível registrar o início da recuperação.",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Recuperação marcada como iniciada.",
+      data,
+    });
+  } catch (error) {
+    console.error("TRACKING RECOVERY START INTERNAL ERROR:", error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Erro ao marcar recuperação",
+    });
+  }
+});
+
 router.get("/checkout-leads", requireAdminAuth, requireMasterAdmin, async (req, res) => {
   try {
     const dateFrom = normalizeText(req.query.date_from);
@@ -888,6 +1065,27 @@ router.get("/checkout-leads", requireAdminAuth, requireMasterAdmin, async (req, 
       }
     }
 
+    const latestRecoveryStartedBySession = new Map();
+
+    if (sessionIds.length) {
+      const { data: recoveryEvents, error: recoveryEventsError } = await supabaseAdmin
+        .from("lead_events")
+        .select("id, session_id, event_type, created_at")
+        .in("session_id", sessionIds)
+        .eq("event_type", ADMIN_RECOVERY_EVENT_TYPE)
+        .order("created_at", { ascending: false })
+        .limit(Math.min(sessionIds.length * 3, 1000));
+
+      if (recoveryEventsError) {
+        console.error("TRACKING GET RECOVERY ACTIONS ERROR:", recoveryEventsError);
+      } else {
+        (Array.isArray(recoveryEvents) ? recoveryEvents : []).forEach((row) => {
+          if (!row?.session_id || latestRecoveryStartedBySession.has(row.session_id)) return;
+          latestRecoveryStartedBySession.set(row.session_id, row);
+        });
+      }
+    }
+
     const orderNumbers = Array.from(latestOrderEventBySession.values())
       .map((event) => event.order_number)
       .filter(Boolean);
@@ -912,7 +1110,21 @@ router.get("/checkout-leads", requireAdminAuth, requireMasterAdmin, async (req, 
     }
 
     const nowMs = Date.now();
+    let recoveredHiddenCount = 0;
     const leads = groupedLeads
+      .filter((lead) => {
+        const recoveryStarted = latestRecoveryStartedBySession.get(lead.session_id) || null;
+        if (!recoveryStarted?.created_at) return true;
+
+        const contactTime = Date.parse(lead.created_at || "");
+        const recoveryTime = Date.parse(recoveryStarted.created_at || "");
+        const recoveryCoversCurrentOpportunity =
+          Number.isFinite(recoveryTime) &&
+          (!Number.isFinite(contactTime) || recoveryTime >= contactTime);
+
+        if (recoveryCoversCurrentOpportunity) recoveredHiddenCount += 1;
+        return !recoveryCoversCurrentOpportunity;
+      })
       .map((lead) => {
         const orderEvent = latestOrderEventBySession.get(lead.session_id) || null;
         const order = orderEvent?.order_number
@@ -934,6 +1146,7 @@ router.get("/checkout-leads", requireAdminAuth, requireMasterAdmin, async (req, 
       meta: {
         checkout_recovery_delay_minutes: checkoutDelayMinutes,
         order_recovery_delay_minutes: orderDelayMinutes,
+        recovered_hidden_count: recoveredHiddenCount,
       },
       data: leads,
     });
