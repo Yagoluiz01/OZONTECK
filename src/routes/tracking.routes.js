@@ -612,6 +612,114 @@ router.post("/session/end", publicTrackingLimiter, async (req, res) => {
   }
 });
 
+const FUNNEL_STEP_DEFINITIONS = [
+  { key: "product_view", label: "Produto visualizado", events: ["product_view"] },
+  { key: "add_to_cart", label: "Adicionou ao carrinho", events: ["add_to_cart"] },
+  { key: "cart_view", label: "Abriu o carrinho", events: ["cart_view"] },
+  { key: "checkout_view", label: "Abriu o checkout", events: ["checkout_view", "checkout_start"] },
+  { key: "shipping_selected", label: "Frete definido", events: ["shipping_selected", "shipping_calculated"] },
+  { key: "checkout_submitted", label: "Avançou para pagamento", events: ["checkout_submitted"] },
+  { key: "payment_view", label: "Abriu pagamento", events: ["payment_view"] },
+  { key: "payment_method_selected", label: "Escolheu método", events: ["payment_method_selected"] },
+  { key: "order_created", label: "Pedido criado", events: ["checkout_order_created"] },
+  { key: "pix_generated", label: "PIX gerado", events: ["pix_generated"] },
+  { key: "payment_confirmed", label: "Pagamento confirmado", events: ["payment_confirmed", "payment_success", "purchase"] },
+];
+
+function percent(part, total) {
+  if (!total) return 0;
+  return Number(((part / total) * 100).toFixed(1));
+}
+
+router.get("/funnel", requireAdminAuth, requireMasterAdmin, async (req, res) => {
+  try {
+    const days = Math.min(toPositiveInt(req.query.days, 7), 90);
+    const dateFrom = normalizeText(req.query.date_from) || new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+    const dateTo = normalizeText(req.query.date_to) || nowIso();
+    const eventNames = Array.from(new Set([
+      ...FUNNEL_STEP_DEFINITIONS.flatMap((step) => step.events),
+      "payment_rejected",
+      "payment_pending",
+      "payment_error",
+      "payment_attempt",
+    ]));
+
+    const { data, error } = await supabaseAdmin
+      .from("lead_events")
+      .select("session_id,event_type,section,created_at")
+      .in("event_type", eventNames)
+      .gte("created_at", dateFrom)
+      .lte("created_at", dateTo)
+      .order("created_at", { ascending: true })
+      .limit(20000);
+
+    if (error) {
+      console.error("TRACKING FUNNEL ERROR:", error);
+      return res.status(500).json({ success: false, message: "Erro ao carregar funil." });
+    }
+
+    const rows = Array.isArray(data) ? data : [];
+    const eventCounts = new Map();
+    const sessionSets = new Map();
+    const paymentMethods = new Map();
+
+    FUNNEL_STEP_DEFINITIONS.forEach((step) => {
+      eventCounts.set(step.key, 0);
+      sessionSets.set(step.key, new Set());
+    });
+
+    rows.forEach((row) => {
+      const matchingStep = FUNNEL_STEP_DEFINITIONS.find((step) => step.events.includes(row.event_type));
+      if (!matchingStep) return;
+      eventCounts.set(matchingStep.key, (eventCounts.get(matchingStep.key) || 0) + 1);
+      if (row.session_id) sessionSets.get(matchingStep.key).add(row.session_id);
+
+      if (["payment_method_selected", "pix_generated", "payment_confirmed"].includes(matchingStep.key)) {
+        const metadata = parseTrackingMetadata(row.section);
+        const method = normalizeText(metadata.payment_method || metadata.paymentMethod) || "nao_informado";
+        paymentMethods.set(method, (paymentMethods.get(method) || 0) + 1);
+      }
+    });
+
+    const firstStepSessions = sessionSets.get("product_view") || new Set();
+    let previousSessions = null;
+    const steps = FUNNEL_STEP_DEFINITIONS.map((step, index) => {
+      const currentSessions = sessionSets.get(step.key) || new Set();
+      const uniqueSessions = currentSessions.size;
+      const fromStart = Array.from(currentSessions).filter((id) => firstStepSessions.has(id)).length;
+      const fromPrevious = previousSessions
+        ? Array.from(currentSessions).filter((id) => previousSessions.has(id)).length
+        : uniqueSessions;
+      const result = {
+        key: step.key,
+        label: step.label,
+        events: eventCounts.get(step.key) || 0,
+        unique_sessions: uniqueSessions,
+        continued_from_previous: fromPrevious,
+        conversion_from_start: index === 0 ? 100 : percent(fromStart, firstStepSessions.size),
+        conversion_from_previous: index === 0 ? 100 : percent(fromPrevious, previousSessions?.size || 0),
+      };
+      previousSessions = currentSessions;
+      return result;
+    });
+
+    return res.status(200).json({
+      success: true,
+      period: { from: dateFrom, to: dateTo, days },
+      sampled_events: rows.length,
+      steps,
+      payment_methods: Object.fromEntries(Array.from(paymentMethods.entries()).sort((a, b) => b[1] - a[1])),
+      rejected_payments: rows.filter((row) => row.event_type === "payment_rejected").length,
+    });
+  } catch (error) {
+    console.error("TRACKING FUNNEL INTERNAL ERROR:", error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Erro ao montar funil de conversão",
+    });
+  }
+});
+
 router.get("/sessions", requireAdminAuth, requireMasterAdmin, async (req, res) => {
   try {
     const page = normalizeText(req.query.page);
