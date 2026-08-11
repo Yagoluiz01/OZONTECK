@@ -3292,7 +3292,7 @@ async function getMercadoPagoPayment(paymentId) {
 }
 
 
-async function createMercadoPagoPixPayment({ req, order, customer }) {
+async function createMercadoPagoPixPayment({ req, order, customer, clientIdempotencyKey = "" }) {
   const accessToken = getMercadoPagoAccessToken();
 
   if (!accessToken) {
@@ -3341,7 +3341,7 @@ async function createMercadoPagoPixPayment({ req, order, customer }) {
     headers: {
       Authorization: `Bearer ${accessToken}`,
       "Content-Type": "application/json",
-      "X-Idempotency-Key": `ozonteck-pix-${String(order.order_number || order.id || Date.now())}`
+      "X-Idempotency-Key": clientIdempotencyKey || `ozonteck-pix-${String(order.order_number || order.id || Date.now())}`
     },
     body: JSON.stringify(body)
   });
@@ -4254,19 +4254,50 @@ router.post("/payments", async (req, res) => {
       });
     }
 
+    const currentRawPaymentStatus = String(order.payment_raw_status || "").trim().toLowerCase();
+    const needsStockReservationRecovery =
+      currentPaymentStatus === "failed" ||
+      Boolean(order.stock_released_at) ||
+      ["rejected", "cancelled", "canceled", "failed"].includes(currentRawPaymentStatus);
+
+    let stockReservation = { reserved: true, reason: "existing_reservation" };
+    if (needsStockReservationRecovery) {
+      stockReservation = await ensureOrderStockReserved(order.id);
+      if (!stockReservation?.reserved) {
+        return res.status(409).json({
+          success: false,
+          code: "INSUFFICIENT_STOCK",
+          message: "Um dos produtos ficou sem estoque antes da nova tentativa de pagamento.",
+        });
+      }
+    }
+
     const idempotencyKey = normalizeClientIdempotencyKey(
       req.headers["x-idempotency-key"],
       "card"
     );
-    const payment = await createMercadoPagoCardPayment({
-      req,
-      order,
-      token: req.body?.token,
-      installments: req.body?.installments,
-      issuerId: req.body?.issuer || req.body?.issuerId,
-      paymentMethodId: req.body?.paymentMethodId || req.body?.payment_method_id,
-      clientIdempotencyKey: idempotencyKey,
-    });
+
+    let payment;
+    try {
+      payment = await createMercadoPagoCardPayment({
+        req,
+        order,
+        token: req.body?.token,
+        installments: req.body?.installments,
+        issuerId: req.body?.issuer || req.body?.issuerId,
+        paymentMethodId: req.body?.paymentMethodId || req.body?.payment_method_id,
+        clientIdempotencyKey: idempotencyKey,
+      });
+    } catch (paymentError) {
+      if (stockReservation?.reason === "reserved_again") {
+        try {
+          await releaseOrderStock(order.id, "card_retry_gateway_error");
+        } catch (releaseError) {
+          console.error("ERRO AO DEVOLVER ESTOQUE APÓS FALHA NO RETRY DE CARTÃO:", releaseError?.message || releaseError);
+        }
+      }
+      throw paymentError;
+    }
 
     const paymentStatus = String(payment.status || "").trim().toLowerCase();
     const receivedAmount = roundMoney(payment.transaction_amount || 0);
@@ -4345,6 +4376,273 @@ router.post("/payments", async (req, res) => {
     return res.status(Number(error?.statusCode) || 500).json({
       success: false,
       message: error.message || "Não foi possível processar o pagamento.",
+    });
+  }
+});
+
+
+router.post("/payments/pix", async (req, res) => {
+  try {
+    const orderNumber = String(req.body?.orderNumber || req.body?.order_number || "").trim();
+
+    if (!orderNumber) {
+      return res.status(400).json({
+        success: false,
+        message: "Número do pedido é obrigatório.",
+      });
+    }
+
+    const order = await findOrderByExternalReference(orderNumber).catch(() => null);
+
+    if (!order?.id) {
+      return res.status(404).json({
+        success: false,
+        message: "Pedido não encontrado.",
+      });
+    }
+
+    if (!isValidOrderAccessToken(req, order)) {
+      return res.status(403).json({
+        success: false,
+        message: "Acesso ao pedido não autorizado.",
+      });
+    }
+
+    const currentPaymentStatus = String(order.payment_status || "").trim().toLowerCase();
+    const currentOrderStatus = String(order.order_status || "").trim().toLowerCase();
+    const currentGateway = String(order.payment_gateway || "").trim().toLowerCase();
+    const currentRawStatus = String(order.payment_raw_status || "").trim().toLowerCase();
+    const currentPaymentId = String(order.payment_reference || "").trim();
+
+    if (["paid", "approved", "pago", "aprovado"].includes(currentPaymentStatus)) {
+      return res.status(409).json({
+        success: false,
+        code: "ORDER_ALREADY_PAID",
+        message: "Este pedido já está pago.",
+        order: { number: order.order_number, paymentStatus: currentPaymentStatus },
+      });
+    }
+
+    if (["shipped", "enviado", "delivered", "entregue"].includes(currentOrderStatus)) {
+      return res.status(409).json({
+        success: false,
+        code: "ORDER_NOT_PAYABLE",
+        message: "Este pedido não aceita uma nova tentativa de pagamento.",
+      });
+    }
+
+    // Se já existe um Pix ainda válido, devolvemos o mesmo pagamento. Isso evita
+    // dois QR Codes ativos para o mesmo pedido e torna o retry idempotente para o cliente.
+    if (currentGateway === "mercado_pago_pix" && /^\d{1,32}$/.test(currentPaymentId)) {
+      let existingPayment;
+
+      try {
+        existingPayment = await getMercadoPagoPayment(currentPaymentId);
+      } catch (verificationError) {
+        console.error("ERRO AO VERIFICAR PIX ATUAL ANTES DA RECUPERAÇÃO:", verificationError?.message || verificationError);
+        return res.status(502).json({
+          success: false,
+          code: "PIX_STATUS_UNAVAILABLE",
+          message: "Não foi possível verificar o Pix atual. Tente novamente em instantes.",
+        });
+      }
+
+      const existingStatus = String(existingPayment?.status || "").trim().toLowerCase();
+      const existingAmount = roundMoney(existingPayment?.transaction_amount || 0);
+      const expectedAmount = roundMoney(order.total_amount || 0);
+      const existingReference = String(existingPayment?.external_reference || "").trim();
+      const metadataOrderId = String(existingPayment?.metadata?.order_id || "").trim();
+      const currencyId = String(existingPayment?.currency_id || "BRL").trim().toUpperCase();
+
+      if (
+        Math.abs(existingAmount - expectedAmount) > 0.01 ||
+        existingReference !== String(order.order_number || "") ||
+        (metadataOrderId && metadataOrderId !== String(order.id || "")) ||
+        currencyId !== "BRL"
+      ) {
+        return res.status(409).json({
+          success: false,
+          code: "PIX_VALIDATION_FAILED",
+          message: "O Pix atual não corresponde aos dados oficiais deste pedido.",
+        });
+      }
+
+      if (existingStatus === "approved") {
+        const financialData = getMercadoPagoFinancialData(existingPayment);
+        await ensureOrderStockReserved(order.id);
+        await applyMercadoPagoPaymentTransition({
+          externalReference: order.order_number,
+          paymentId: existingPayment.id,
+          rawStatus: existingStatus,
+          gatewayFee: financialData.gatewayFee,
+          netAmount: financialData.netAmount,
+          paymentMethodId: financialData.paymentMethodId,
+          paymentTypeId: financialData.paymentTypeId,
+          installments: financialData.installments,
+        });
+
+        return res.status(409).json({
+          success: false,
+          code: "ORDER_ALREADY_PAID",
+          message: "O pagamento deste pedido já foi aprovado.",
+          order: { number: order.order_number, paymentStatus: "paid" },
+        });
+      }
+
+      const transactionData = existingPayment?.point_of_interaction?.transaction_data || {};
+      const expirationText = String(
+        transactionData.date_of_expiration || existingPayment?.date_of_expiration || ""
+      ).trim();
+      const expirationMs = expirationText ? Date.parse(expirationText) : NaN;
+      const isExpiredByDate = Number.isFinite(expirationMs) && expirationMs <= Date.now();
+      const canReuseExisting =
+        ["pending", "in_process"].includes(existingStatus) && !isExpiredByDate;
+
+      if (canReuseExisting) {
+        return res.status(200).json({
+          success: true,
+          reusedExisting: true,
+          message: "O Pix atual ainda está válido.",
+          order: {
+            id: order.id,
+            number: order.order_number,
+            total: expectedAmount,
+            status: order.order_status,
+            paymentStatus: order.payment_status,
+          },
+          payment: {
+            gateway: "mercado_pago_pix",
+            method: "pix",
+            paymentId: existingPayment.id,
+            externalReference: order.order_number,
+            status: existingStatus,
+            statusDetail: existingPayment.status_detail || "",
+            qrCode: transactionData.qr_code || "",
+            qrCodeBase64: transactionData.qr_code_base64 || "",
+            ticketUrl: transactionData.ticket_url || "",
+            expiresAt: expirationText,
+          },
+        });
+      }
+
+      const canReplaceExisting =
+        isExpiredByDate ||
+        ["rejected", "cancelled", "canceled", "refunded", "charged_back"].includes(existingStatus);
+
+      if (!canReplaceExisting) {
+        return res.status(409).json({
+          success: false,
+          code: "PAYMENT_STILL_PROCESSING",
+          message: "O pagamento atual ainda está sendo processado. Aguarde a confirmação antes de gerar outro Pix.",
+        });
+      }
+    } else if (currentGateway === "mercado_pago_card" && currentPaymentId) {
+      // Troca para Pix só é liberada quando a tentativa de cartão terminou de forma
+      // definitiva. Em processamento, criar outro meio poderia causar pagamento duplicado.
+      const canSwitchFromCard =
+        currentPaymentStatus === "failed" ||
+        ["rejected", "cancelled", "canceled", "failed", "card_validation_failed"].includes(currentRawStatus);
+
+      if (!canSwitchFromCard) {
+        return res.status(409).json({
+          success: false,
+          code: "PAYMENT_STILL_PROCESSING",
+          message: "O pagamento com cartão ainda está sendo processado. Aguarde a confirmação antes de trocar para Pix.",
+        });
+      }
+    }
+
+    const reservation = await ensureOrderStockReserved(order.id);
+    if (!reservation?.reserved) {
+      return res.status(409).json({
+        success: false,
+        code: "INSUFFICIENT_STOCK",
+        message: "Um dos produtos ficou sem estoque antes da nova tentativa de pagamento.",
+      });
+    }
+
+    const retryIdempotencyKey = normalizeClientIdempotencyKey(
+      req.headers["x-idempotency-key"],
+      "pix-retry"
+    );
+
+    const customer = {
+      nome: String(order.customer_name || "").trim(),
+      email: String(order.customer_email || "").trim(),
+      telefone: String(order.customer_phone || "").trim(),
+      cpf: String(order.customer_cpf || "").trim(),
+    };
+
+    let pixPayment;
+    try {
+      pixPayment = await createMercadoPagoPixPayment({
+        req,
+        order,
+        customer,
+        clientIdempotencyKey: retryIdempotencyKey,
+      });
+    } catch (pixError) {
+      if (reservation?.reason === "reserved_again") {
+        try {
+          await releaseOrderStock(order.id, "pix_retry_generation_failed");
+        } catch (releaseError) {
+          console.error("ERRO AO DEVOLVER ESTOQUE APÓS FALHA NO NOVO PIX:", releaseError?.message || releaseError);
+        }
+      }
+      throw pixError;
+    }
+
+    const transactionData = pixPayment?.point_of_interaction?.transaction_data || {};
+    const paymentUpdate = await updateOrderById(order.id, {
+      payment_gateway: "mercado_pago_pix",
+      payment_reference: String(pixPayment.id || ""),
+      payment_external_reference: String(order.order_number || ""),
+      payment_raw_status: String(pixPayment.status || "pending"),
+      payment_status: "pending",
+      order_status: "pending",
+    });
+
+    if (!paymentUpdate.ok) {
+      return res.status(500).json({
+        success: false,
+        message: "O novo Pix foi criado, mas não foi possível salvar a referência no pedido.",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      regenerated: true,
+      message: "Novo Pix gerado sem refazer o checkout.",
+      order: {
+        id: order.id,
+        number: order.order_number,
+        total: roundMoney(order.total_amount || 0),
+        status: "pending",
+        paymentStatus: "pending",
+      },
+      payment: {
+        gateway: "mercado_pago_pix",
+        method: "pix",
+        paymentId: pixPayment.id,
+        externalReference: order.order_number,
+        status: pixPayment.status || "pending",
+        statusDetail: pixPayment.status_detail || "",
+        qrCode: transactionData.qr_code || "",
+        qrCodeBase64: transactionData.qr_code_base64 || "",
+        ticketUrl: transactionData.ticket_url || "",
+        expiresAt: transactionData.date_of_expiration || pixPayment.date_of_expiration || "",
+      },
+    });
+  } catch (error) {
+    console.error("ERRO AO RECUPERAR PAGAMENTO COM PIX:", {
+      message: error?.message,
+      statusCode: error?.statusCode,
+      gatewayStatus: error?.gatewayStatus,
+    });
+
+    return res.status(Number(error?.statusCode) || 500).json({
+      success: false,
+      message: error.message || "Não foi possível gerar um novo Pix.",
     });
   }
 });
@@ -4983,6 +5281,27 @@ Pagamento ${String(payment.id || "")} exige revisão: valor, moeda ou vínculo d
         received: true,
         reviewRequired: true,
         reason: "payment_validation_failed",
+      });
+    }
+
+    const currentPaymentReference = String(previousOrder.payment_reference || "").trim();
+    const incomingPaymentId = String(payment?.id || "").trim();
+
+    // Um pedido pode receber uma nova tentativa depois de uma recusa/expiração.
+    // Webhooks atrasados da tentativa anterior não podem rebaixar o estado da
+    // tentativa atual nem liberar seu estoque. Aprovações continuam sendo
+    // processadas, pois representam dinheiro efetivamente recebido.
+    if (
+      paymentStatus !== "approved" &&
+      currentPaymentReference &&
+      incomingPaymentId &&
+      currentPaymentReference !== incomingPaymentId
+    ) {
+      return res.status(200).json({
+        success: true,
+        received: true,
+        ignored: true,
+        reason: "stale_payment_attempt",
       });
     }
 
