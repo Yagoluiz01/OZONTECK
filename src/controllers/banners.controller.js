@@ -49,7 +49,7 @@ export async function listAllBanners(req, res) {
 export async function listActiveBanners(req, res) {
   try {
     const banners = await getCachedActiveBanners();
-    res.set("Cache-Control", "public, max-age=60, s-maxage=60");
+    res.set("Cache-Control", "public, max-age=60, s-maxage=60, stale-while-revalidate=300");
     return res.status(200).json({ success: true, banners });
   } catch (error) {
     console.error("ERRO LISTAR BANNERS ATIVOS:", error);

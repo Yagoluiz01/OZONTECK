@@ -53,6 +53,7 @@ const HOME_PRODUCTS_SERVER_CACHE_LIMIT = 24;
 let homeProductsServerCache = {
   createdAt: 0,
   products: [],
+  contextProducts: [],
 };
 let homeProductsLoadPromise = null;
 
@@ -2534,6 +2535,90 @@ async function fetchProductsTable() {
   };
 }
 
+async function fetchHomeProductsTable() {
+  // A home não precisa baixar a tabela inteira: filtros simples ficam no
+  // PostgREST/Supabase e o ranking final continua sendo aplicado pela API.
+  const params = new URLSearchParams({
+    select: "*",
+    status: "eq.active",
+    stock_quantity: "gt.0",
+    show_on_home: "eq.true",
+  });
+  const url = `${env.supabaseUrl}/rest/v1/products?${params.toString()}`;
+
+  const response = await fetch(url, {
+    method: "GET",
+    headers: {
+      apikey: env.supabaseServiceRoleKey,
+      Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
+      "Content-Type": "application/json",
+      Accept: "application/json"
+    }
+  });
+
+  const text = await response.text();
+  let data = [];
+
+  try {
+    data = text ? JSON.parse(text) : [];
+  } catch {
+    data = [];
+  }
+
+  return {
+    ok: response.ok,
+    status: response.status,
+    data: Array.isArray(data) ? data : [],
+    raw: data
+  };
+}
+
+function toPostgrestInValue(value) {
+  return `"${String(value || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
+async function fetchHomeProductContext(products = []) {
+  const groups = Array.from(new Set(
+    products
+      .map((product) => String(product?.variant_group || product?.variantGroup || "").trim())
+      .filter(Boolean)
+  ));
+
+  if (!groups.length) return [];
+
+  const params = new URLSearchParams();
+  params.set("select", "id,name,sku,price,status,variant_group,variant_type");
+  params.set("status", "eq.active");
+  params.set("variant_group", `in.(${groups.map(toPostgrestInValue).join(",")})`);
+
+  try {
+    const response = await fetch(`${env.supabaseUrl}/rest/v1/products?${params.toString()}`, {
+      method: "GET",
+      headers: {
+        apikey: env.supabaseServiceRoleKey,
+        Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
+        "Content-Type": "application/json",
+        Accept: "application/json"
+      }
+    });
+
+    if (!response.ok) {
+      console.warn("PRODUTOS DA HOME: contexto de kits indisponível; seguindo somente com a vitrine.", {
+        status: response.status,
+      });
+      return [];
+    }
+
+    const data = await response.json().catch(() => []);
+    return Array.isArray(data) ? data.map(normalizeProduct) : [];
+  } catch (error) {
+    console.warn("PRODUTOS DA HOME: falha ao carregar contexto de kits; seguindo sem bloquear.", {
+      error: error?.message || String(error),
+    });
+    return [];
+  }
+}
+
 function buildHomeProductsSnapshot(rows = []) {
   return rankHomeProducts(
     filterKitChildrenForStorefront(
@@ -2558,13 +2643,14 @@ async function getHomeProductsSnapshot() {
   ) {
     return {
       products: homeProductsServerCache.products,
+      contextProducts: homeProductsServerCache.contextProducts,
       source: "memory",
     };
   }
 
   if (!homeProductsLoadPromise) {
     homeProductsLoadPromise = (async () => {
-      const response = await fetchProductsTable();
+      const response = await fetchHomeProductsTable();
 
       if (!response.ok) {
         const error = new Error("Erro ao buscar produtos da página inicial");
@@ -2574,14 +2660,17 @@ async function getHomeProductsSnapshot() {
       }
 
       const products = buildHomeProductsSnapshot(response.data);
+      const contextProducts = await fetchHomeProductContext(products);
 
       homeProductsServerCache = {
         createdAt: Date.now(),
         products,
+        contextProducts,
       };
 
       return {
         products,
+        contextProducts,
         source: "origin",
       };
     })();
@@ -2605,6 +2694,7 @@ async function getHomeProductsSnapshot() {
 
       return {
         products: homeProductsServerCache.products,
+        contextProducts: homeProductsServerCache.contextProducts,
         source: "stale",
       };
     }
@@ -3916,12 +4006,13 @@ router.get("/products/home", async (req, res) => {
     const snapshot = await getHomeProductsSnapshot();
     const products = snapshot.products.slice(0, limit);
 
-    res.set("Cache-Control", "public, max-age=30, stale-while-revalidate=300");
+    res.set("Cache-Control", "public, max-age=30, s-maxage=60, stale-while-revalidate=300");
     res.set("X-Ozonteck-Home-Cache", snapshot.source);
 
     return res.status(200).json({
       success: true,
-      products
+      products,
+      contextProducts: snapshot.contextProducts || []
     });
   } catch (error) {
     console.error("ERRO AO LISTAR PRODUTOS DA HOME:", error);
