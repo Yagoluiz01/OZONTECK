@@ -53,7 +53,6 @@ const HOME_PRODUCTS_SERVER_CACHE_LIMIT = 24;
 let homeProductsServerCache = {
   createdAt: 0,
   products: [],
-  contextProducts: [],
 };
 let homeProductsLoadPromise = null;
 
@@ -2535,90 +2534,6 @@ async function fetchProductsTable() {
   };
 }
 
-async function fetchHomeProductsTable() {
-  // A home não precisa baixar a tabela inteira: filtros simples ficam no
-  // PostgREST/Supabase e o ranking final continua sendo aplicado pela API.
-  const params = new URLSearchParams({
-    select: "*",
-    status: "eq.active",
-    stock_quantity: "gt.0",
-    show_on_home: "eq.true",
-  });
-  const url = `${env.supabaseUrl}/rest/v1/products?${params.toString()}`;
-
-  const response = await fetch(url, {
-    method: "GET",
-    headers: {
-      apikey: env.supabaseServiceRoleKey,
-      Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
-      "Content-Type": "application/json",
-      Accept: "application/json"
-    }
-  });
-
-  const text = await response.text();
-  let data = [];
-
-  try {
-    data = text ? JSON.parse(text) : [];
-  } catch {
-    data = [];
-  }
-
-  return {
-    ok: response.ok,
-    status: response.status,
-    data: Array.isArray(data) ? data : [],
-    raw: data
-  };
-}
-
-function toPostgrestInValue(value) {
-  return `"${String(value || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
-}
-
-async function fetchHomeProductContext(products = []) {
-  const groups = Array.from(new Set(
-    products
-      .map((product) => String(product?.variant_group || product?.variantGroup || "").trim())
-      .filter(Boolean)
-  ));
-
-  if (!groups.length) return [];
-
-  const params = new URLSearchParams();
-  params.set("select", "id,name,sku,price,status,variant_group,variant_type");
-  params.set("status", "eq.active");
-  params.set("variant_group", `in.(${groups.map(toPostgrestInValue).join(",")})`);
-
-  try {
-    const response = await fetch(`${env.supabaseUrl}/rest/v1/products?${params.toString()}`, {
-      method: "GET",
-      headers: {
-        apikey: env.supabaseServiceRoleKey,
-        Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
-        "Content-Type": "application/json",
-        Accept: "application/json"
-      }
-    });
-
-    if (!response.ok) {
-      console.warn("PRODUTOS DA HOME: contexto de kits indisponível; seguindo somente com a vitrine.", {
-        status: response.status,
-      });
-      return [];
-    }
-
-    const data = await response.json().catch(() => []);
-    return Array.isArray(data) ? data.map(normalizeProduct) : [];
-  } catch (error) {
-    console.warn("PRODUTOS DA HOME: falha ao carregar contexto de kits; seguindo sem bloquear.", {
-      error: error?.message || String(error),
-    });
-    return [];
-  }
-}
-
 function buildHomeProductsSnapshot(rows = []) {
   return rankHomeProducts(
     filterKitChildrenForStorefront(
@@ -2643,14 +2558,13 @@ async function getHomeProductsSnapshot() {
   ) {
     return {
       products: homeProductsServerCache.products,
-      contextProducts: homeProductsServerCache.contextProducts,
       source: "memory",
     };
   }
 
   if (!homeProductsLoadPromise) {
     homeProductsLoadPromise = (async () => {
-      const response = await fetchHomeProductsTable();
+      const response = await fetchProductsTable();
 
       if (!response.ok) {
         const error = new Error("Erro ao buscar produtos da página inicial");
@@ -2660,17 +2574,14 @@ async function getHomeProductsSnapshot() {
       }
 
       const products = buildHomeProductsSnapshot(response.data);
-      const contextProducts = await fetchHomeProductContext(products);
 
       homeProductsServerCache = {
         createdAt: Date.now(),
         products,
-        contextProducts,
       };
 
       return {
         products,
-        contextProducts,
         source: "origin",
       };
     })();
@@ -2694,7 +2605,6 @@ async function getHomeProductsSnapshot() {
 
       return {
         products: homeProductsServerCache.products,
-        contextProducts: homeProductsServerCache.contextProducts,
         source: "stale",
       };
     }
@@ -3292,7 +3202,7 @@ async function getMercadoPagoPayment(paymentId) {
 }
 
 
-async function createMercadoPagoPixPayment({ req, order, customer, clientIdempotencyKey = "" }) {
+async function createMercadoPagoPixPayment({ req, order, customer }) {
   const accessToken = getMercadoPagoAccessToken();
 
   if (!accessToken) {
@@ -3341,7 +3251,7 @@ async function createMercadoPagoPixPayment({ req, order, customer, clientIdempot
     headers: {
       Authorization: `Bearer ${accessToken}`,
       "Content-Type": "application/json",
-      "X-Idempotency-Key": clientIdempotencyKey || `ozonteck-pix-${String(order.order_number || order.id || Date.now())}`
+      "X-Idempotency-Key": `ozonteck-pix-${String(order.order_number || order.id || Date.now())}`
     },
     body: JSON.stringify(body)
   });
@@ -4006,13 +3916,12 @@ router.get("/products/home", async (req, res) => {
     const snapshot = await getHomeProductsSnapshot();
     const products = snapshot.products.slice(0, limit);
 
-    res.set("Cache-Control", "public, max-age=30, s-maxage=60, stale-while-revalidate=300");
+    res.set("Cache-Control", "public, max-age=30, stale-while-revalidate=300");
     res.set("X-Ozonteck-Home-Cache", snapshot.source);
 
     return res.status(200).json({
       success: true,
-      products,
-      contextProducts: snapshot.contextProducts || []
+      products
     });
   } catch (error) {
     console.error("ERRO AO LISTAR PRODUTOS DA HOME:", error);
@@ -4254,50 +4163,19 @@ router.post("/payments", async (req, res) => {
       });
     }
 
-    const currentRawPaymentStatus = String(order.payment_raw_status || "").trim().toLowerCase();
-    const needsStockReservationRecovery =
-      currentPaymentStatus === "failed" ||
-      Boolean(order.stock_released_at) ||
-      ["rejected", "cancelled", "canceled", "failed"].includes(currentRawPaymentStatus);
-
-    let stockReservation = { reserved: true, reason: "existing_reservation" };
-    if (needsStockReservationRecovery) {
-      stockReservation = await ensureOrderStockReserved(order.id);
-      if (!stockReservation?.reserved) {
-        return res.status(409).json({
-          success: false,
-          code: "INSUFFICIENT_STOCK",
-          message: "Um dos produtos ficou sem estoque antes da nova tentativa de pagamento.",
-        });
-      }
-    }
-
     const idempotencyKey = normalizeClientIdempotencyKey(
       req.headers["x-idempotency-key"],
       "card"
     );
-
-    let payment;
-    try {
-      payment = await createMercadoPagoCardPayment({
-        req,
-        order,
-        token: req.body?.token,
-        installments: req.body?.installments,
-        issuerId: req.body?.issuer || req.body?.issuerId,
-        paymentMethodId: req.body?.paymentMethodId || req.body?.payment_method_id,
-        clientIdempotencyKey: idempotencyKey,
-      });
-    } catch (paymentError) {
-      if (stockReservation?.reason === "reserved_again") {
-        try {
-          await releaseOrderStock(order.id, "card_retry_gateway_error");
-        } catch (releaseError) {
-          console.error("ERRO AO DEVOLVER ESTOQUE APÓS FALHA NO RETRY DE CARTÃO:", releaseError?.message || releaseError);
-        }
-      }
-      throw paymentError;
-    }
+    const payment = await createMercadoPagoCardPayment({
+      req,
+      order,
+      token: req.body?.token,
+      installments: req.body?.installments,
+      issuerId: req.body?.issuer || req.body?.issuerId,
+      paymentMethodId: req.body?.paymentMethodId || req.body?.payment_method_id,
+      clientIdempotencyKey: idempotencyKey,
+    });
 
     const paymentStatus = String(payment.status || "").trim().toLowerCase();
     const receivedAmount = roundMoney(payment.transaction_amount || 0);
@@ -4376,273 +4254,6 @@ router.post("/payments", async (req, res) => {
     return res.status(Number(error?.statusCode) || 500).json({
       success: false,
       message: error.message || "Não foi possível processar o pagamento.",
-    });
-  }
-});
-
-
-router.post("/payments/pix", async (req, res) => {
-  try {
-    const orderNumber = String(req.body?.orderNumber || req.body?.order_number || "").trim();
-
-    if (!orderNumber) {
-      return res.status(400).json({
-        success: false,
-        message: "Número do pedido é obrigatório.",
-      });
-    }
-
-    const order = await findOrderByExternalReference(orderNumber).catch(() => null);
-
-    if (!order?.id) {
-      return res.status(404).json({
-        success: false,
-        message: "Pedido não encontrado.",
-      });
-    }
-
-    if (!isValidOrderAccessToken(req, order)) {
-      return res.status(403).json({
-        success: false,
-        message: "Acesso ao pedido não autorizado.",
-      });
-    }
-
-    const currentPaymentStatus = String(order.payment_status || "").trim().toLowerCase();
-    const currentOrderStatus = String(order.order_status || "").trim().toLowerCase();
-    const currentGateway = String(order.payment_gateway || "").trim().toLowerCase();
-    const currentRawStatus = String(order.payment_raw_status || "").trim().toLowerCase();
-    const currentPaymentId = String(order.payment_reference || "").trim();
-
-    if (["paid", "approved", "pago", "aprovado"].includes(currentPaymentStatus)) {
-      return res.status(409).json({
-        success: false,
-        code: "ORDER_ALREADY_PAID",
-        message: "Este pedido já está pago.",
-        order: { number: order.order_number, paymentStatus: currentPaymentStatus },
-      });
-    }
-
-    if (["shipped", "enviado", "delivered", "entregue"].includes(currentOrderStatus)) {
-      return res.status(409).json({
-        success: false,
-        code: "ORDER_NOT_PAYABLE",
-        message: "Este pedido não aceita uma nova tentativa de pagamento.",
-      });
-    }
-
-    // Se já existe um Pix ainda válido, devolvemos o mesmo pagamento. Isso evita
-    // dois QR Codes ativos para o mesmo pedido e torna o retry idempotente para o cliente.
-    if (currentGateway === "mercado_pago_pix" && /^\d{1,32}$/.test(currentPaymentId)) {
-      let existingPayment;
-
-      try {
-        existingPayment = await getMercadoPagoPayment(currentPaymentId);
-      } catch (verificationError) {
-        console.error("ERRO AO VERIFICAR PIX ATUAL ANTES DA RECUPERAÇÃO:", verificationError?.message || verificationError);
-        return res.status(502).json({
-          success: false,
-          code: "PIX_STATUS_UNAVAILABLE",
-          message: "Não foi possível verificar o Pix atual. Tente novamente em instantes.",
-        });
-      }
-
-      const existingStatus = String(existingPayment?.status || "").trim().toLowerCase();
-      const existingAmount = roundMoney(existingPayment?.transaction_amount || 0);
-      const expectedAmount = roundMoney(order.total_amount || 0);
-      const existingReference = String(existingPayment?.external_reference || "").trim();
-      const metadataOrderId = String(existingPayment?.metadata?.order_id || "").trim();
-      const currencyId = String(existingPayment?.currency_id || "BRL").trim().toUpperCase();
-
-      if (
-        Math.abs(existingAmount - expectedAmount) > 0.01 ||
-        existingReference !== String(order.order_number || "") ||
-        (metadataOrderId && metadataOrderId !== String(order.id || "")) ||
-        currencyId !== "BRL"
-      ) {
-        return res.status(409).json({
-          success: false,
-          code: "PIX_VALIDATION_FAILED",
-          message: "O Pix atual não corresponde aos dados oficiais deste pedido.",
-        });
-      }
-
-      if (existingStatus === "approved") {
-        const financialData = getMercadoPagoFinancialData(existingPayment);
-        await ensureOrderStockReserved(order.id);
-        await applyMercadoPagoPaymentTransition({
-          externalReference: order.order_number,
-          paymentId: existingPayment.id,
-          rawStatus: existingStatus,
-          gatewayFee: financialData.gatewayFee,
-          netAmount: financialData.netAmount,
-          paymentMethodId: financialData.paymentMethodId,
-          paymentTypeId: financialData.paymentTypeId,
-          installments: financialData.installments,
-        });
-
-        return res.status(409).json({
-          success: false,
-          code: "ORDER_ALREADY_PAID",
-          message: "O pagamento deste pedido já foi aprovado.",
-          order: { number: order.order_number, paymentStatus: "paid" },
-        });
-      }
-
-      const transactionData = existingPayment?.point_of_interaction?.transaction_data || {};
-      const expirationText = String(
-        transactionData.date_of_expiration || existingPayment?.date_of_expiration || ""
-      ).trim();
-      const expirationMs = expirationText ? Date.parse(expirationText) : NaN;
-      const isExpiredByDate = Number.isFinite(expirationMs) && expirationMs <= Date.now();
-      const canReuseExisting =
-        ["pending", "in_process"].includes(existingStatus) && !isExpiredByDate;
-
-      if (canReuseExisting) {
-        return res.status(200).json({
-          success: true,
-          reusedExisting: true,
-          message: "O Pix atual ainda está válido.",
-          order: {
-            id: order.id,
-            number: order.order_number,
-            total: expectedAmount,
-            status: order.order_status,
-            paymentStatus: order.payment_status,
-          },
-          payment: {
-            gateway: "mercado_pago_pix",
-            method: "pix",
-            paymentId: existingPayment.id,
-            externalReference: order.order_number,
-            status: existingStatus,
-            statusDetail: existingPayment.status_detail || "",
-            qrCode: transactionData.qr_code || "",
-            qrCodeBase64: transactionData.qr_code_base64 || "",
-            ticketUrl: transactionData.ticket_url || "",
-            expiresAt: expirationText,
-          },
-        });
-      }
-
-      const canReplaceExisting =
-        isExpiredByDate ||
-        ["rejected", "cancelled", "canceled", "refunded", "charged_back"].includes(existingStatus);
-
-      if (!canReplaceExisting) {
-        return res.status(409).json({
-          success: false,
-          code: "PAYMENT_STILL_PROCESSING",
-          message: "O pagamento atual ainda está sendo processado. Aguarde a confirmação antes de gerar outro Pix.",
-        });
-      }
-    } else if (currentGateway === "mercado_pago_card" && currentPaymentId) {
-      // Troca para Pix só é liberada quando a tentativa de cartão terminou de forma
-      // definitiva. Em processamento, criar outro meio poderia causar pagamento duplicado.
-      const canSwitchFromCard =
-        currentPaymentStatus === "failed" ||
-        ["rejected", "cancelled", "canceled", "failed", "card_validation_failed"].includes(currentRawStatus);
-
-      if (!canSwitchFromCard) {
-        return res.status(409).json({
-          success: false,
-          code: "PAYMENT_STILL_PROCESSING",
-          message: "O pagamento com cartão ainda está sendo processado. Aguarde a confirmação antes de trocar para Pix.",
-        });
-      }
-    }
-
-    const reservation = await ensureOrderStockReserved(order.id);
-    if (!reservation?.reserved) {
-      return res.status(409).json({
-        success: false,
-        code: "INSUFFICIENT_STOCK",
-        message: "Um dos produtos ficou sem estoque antes da nova tentativa de pagamento.",
-      });
-    }
-
-    const retryIdempotencyKey = normalizeClientIdempotencyKey(
-      req.headers["x-idempotency-key"],
-      "pix-retry"
-    );
-
-    const customer = {
-      nome: String(order.customer_name || "").trim(),
-      email: String(order.customer_email || "").trim(),
-      telefone: String(order.customer_phone || "").trim(),
-      cpf: String(order.customer_cpf || "").trim(),
-    };
-
-    let pixPayment;
-    try {
-      pixPayment = await createMercadoPagoPixPayment({
-        req,
-        order,
-        customer,
-        clientIdempotencyKey: retryIdempotencyKey,
-      });
-    } catch (pixError) {
-      if (reservation?.reason === "reserved_again") {
-        try {
-          await releaseOrderStock(order.id, "pix_retry_generation_failed");
-        } catch (releaseError) {
-          console.error("ERRO AO DEVOLVER ESTOQUE APÓS FALHA NO NOVO PIX:", releaseError?.message || releaseError);
-        }
-      }
-      throw pixError;
-    }
-
-    const transactionData = pixPayment?.point_of_interaction?.transaction_data || {};
-    const paymentUpdate = await updateOrderById(order.id, {
-      payment_gateway: "mercado_pago_pix",
-      payment_reference: String(pixPayment.id || ""),
-      payment_external_reference: String(order.order_number || ""),
-      payment_raw_status: String(pixPayment.status || "pending"),
-      payment_status: "pending",
-      order_status: "pending",
-    });
-
-    if (!paymentUpdate.ok) {
-      return res.status(500).json({
-        success: false,
-        message: "O novo Pix foi criado, mas não foi possível salvar a referência no pedido.",
-      });
-    }
-
-    return res.status(200).json({
-      success: true,
-      regenerated: true,
-      message: "Novo Pix gerado sem refazer o checkout.",
-      order: {
-        id: order.id,
-        number: order.order_number,
-        total: roundMoney(order.total_amount || 0),
-        status: "pending",
-        paymentStatus: "pending",
-      },
-      payment: {
-        gateway: "mercado_pago_pix",
-        method: "pix",
-        paymentId: pixPayment.id,
-        externalReference: order.order_number,
-        status: pixPayment.status || "pending",
-        statusDetail: pixPayment.status_detail || "",
-        qrCode: transactionData.qr_code || "",
-        qrCodeBase64: transactionData.qr_code_base64 || "",
-        ticketUrl: transactionData.ticket_url || "",
-        expiresAt: transactionData.date_of_expiration || pixPayment.date_of_expiration || "",
-      },
-    });
-  } catch (error) {
-    console.error("ERRO AO RECUPERAR PAGAMENTO COM PIX:", {
-      message: error?.message,
-      statusCode: error?.statusCode,
-      gatewayStatus: error?.gatewayStatus,
-    });
-
-    return res.status(Number(error?.statusCode) || 500).json({
-      success: false,
-      message: error.message || "Não foi possível gerar um novo Pix.",
     });
   }
 });
@@ -5281,27 +4892,6 @@ Pagamento ${String(payment.id || "")} exige revisão: valor, moeda ou vínculo d
         received: true,
         reviewRequired: true,
         reason: "payment_validation_failed",
-      });
-    }
-
-    const currentPaymentReference = String(previousOrder.payment_reference || "").trim();
-    const incomingPaymentId = String(payment?.id || "").trim();
-
-    // Um pedido pode receber uma nova tentativa depois de uma recusa/expiração.
-    // Webhooks atrasados da tentativa anterior não podem rebaixar o estado da
-    // tentativa atual nem liberar seu estoque. Aprovações continuam sendo
-    // processadas, pois representam dinheiro efetivamente recebido.
-    if (
-      paymentStatus !== "approved" &&
-      currentPaymentReference &&
-      incomingPaymentId &&
-      currentPaymentReference !== incomingPaymentId
-    ) {
-      return res.status(200).json({
-        success: true,
-        received: true,
-        ignored: true,
-        reason: "stale_payment_attempt",
       });
     }
 
@@ -6080,7 +5670,9 @@ router.get("/orders/:orderNumber/status", async (req, res) => {
         paid_at: order.paid_at || null,
         shipping_label_status: order.shipping_label_status || null,
         shipping_label_generated_at: order.shipping_label_generated_at || null,
+        shipping_carrier: order.shipping_carrier || null,
         shipping_service_name: order.shipping_service_name || null,
+        shipping_delivery_time: Number(order.shipping_delivery_time || 0) || null,
       },
     });
   } catch (error) {
