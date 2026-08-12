@@ -12,6 +12,7 @@ import {
   buildProductPerformance,
   RECOMMENDATION_PRODUCT_EVENT_TYPES,
 } from "../intelligence/recommendation.engine.js";
+import { buildLeadScore } from "../intelligence/leadScore.engine.js";
 
 const router = express.Router();
 
@@ -183,6 +184,44 @@ router.post("/intent", intentLimiter, async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "Erro interno ao calcular intenção.",
+    });
+  }
+});
+
+
+router.post("/lead-score", intentLimiter, async (req, res) => {
+  try {
+    const visitorId = normalizeId(req.body?.visitor_id || req.body?.visitorId);
+    const sessionId = normalizeId(req.body?.session_id || req.body?.sessionId);
+
+    if (!visitorId || !sessionId) {
+      return res.status(400).json({
+        success: false,
+        message: "visitor_id e session_id são obrigatórios.",
+      });
+    }
+
+    const validSession = await validateVisitorSession(visitorId, sessionId);
+    if (!validSession) {
+      return res.status(404).json({
+        success: false,
+        message: "Sessão de inteligência ainda não disponível.",
+      });
+    }
+
+    const profile = await loadIntentProfile(visitorId, sessionId);
+    const leadScore = buildLeadScore(profile);
+
+    res.setHeader("Cache-Control", "private, no-store, max-age=0");
+    return res.status(200).json({
+      success: true,
+      data: leadScore,
+    });
+  } catch (error) {
+    console.error("STORE INTELLIGENCE LEAD SCORE ERROR:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Não foi possível calcular o lead score agora.",
     });
   }
 });
