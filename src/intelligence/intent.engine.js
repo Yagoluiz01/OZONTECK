@@ -135,6 +135,68 @@ function cleanText(value, maxLength = 160) {
   return text ? text.slice(0, maxLength) : null;
 }
 
+function normalizeProductIdentityToken(value) {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "")
+    .trim();
+}
+
+function buildProductAliasMap(events = []) {
+  const candidatesByToken = new Map();
+
+  for (const row of events) {
+    const metadata = safeJsonParse(row?.section);
+    const productId = cleanText(metadata.product_id || metadata.productId, 180);
+    const productName = cleanText(metadata.product_name || metadata.productName, 180);
+    if (!productId || !productName) continue;
+
+    // Só eventos que conhecem simultaneamente ID e nome podem ensinar aliases.
+    // Isso evita assumir que qualquer texto da URL é, sozinho, o ID canônico.
+    const tokens = new Set([
+      normalizeProductIdentityToken(productId),
+      normalizeProductIdentityToken(productName),
+    ]);
+
+    for (const token of tokens) {
+      if (!token) continue;
+      const ids = candidatesByToken.get(token) || new Set();
+      ids.add(productId);
+      candidatesByToken.set(token, ids);
+    }
+  }
+
+  const aliases = new Map();
+  for (const [token, ids] of candidatesByToken.entries()) {
+    // Se o mesmo nome apontar para produtos diferentes, não unifica por nome.
+    if (ids.size === 1) aliases.set(token, Array.from(ids)[0]);
+  }
+
+  return aliases;
+}
+
+function resolveProductAggregationIdentity(productId, productName, aliases) {
+  const id = cleanText(productId, 180) || "";
+  const name = cleanText(productName, 180) || "";
+  const idToken = normalizeProductIdentityToken(id);
+  const nameToken = normalizeProductIdentityToken(name);
+
+  const canonicalId =
+    aliases?.get(idToken) ||
+    aliases?.get(nameToken) ||
+    id ||
+    name ||
+    "";
+
+  if (!canonicalId) return { key: null, canonicalId: "" };
+  return {
+    key: `product:${normalizeProductIdentityToken(canonicalId)}`,
+    canonicalId,
+  };
+}
+
 function parseIsoOrNull(value) {
   const time = Date.parse(String(value || ""));
   return Number.isFinite(time) ? new Date(time).toISOString() : null;
@@ -330,6 +392,7 @@ export function buildIntentProfile(rows = [], options = {}) {
     .slice()
     .sort((a, b) => eventTimeMs(a) - eventTimeMs(b));
 
+  const productAliases = buildProductAliasMap(events);
   const products = new Map();
   const categories = new Map();
   const paymentMethods = new Map();
@@ -361,6 +424,13 @@ export function buildIntentProfile(rows = [], options = {}) {
     const metadata = safeJsonParse(row.section);
     const productId = cleanText(metadata.product_id || metadata.productId, 180);
     const productName = cleanText(metadata.product_name || metadata.productName, 180);
+    const productIdentity = resolveProductAggregationIdentity(
+      productId,
+      productName,
+      productAliases
+    );
+    const productKey = productIdentity.key;
+    const canonicalProductId = productIdentity.canonicalId || productId;
     const category = cleanText(metadata.category, 120);
     const productValue = getProductPrice(metadata, row.event_type, productId);
     const paymentMethod = cleanText(metadata.payment_method || metadata.paymentMethod, 80);
@@ -392,10 +462,10 @@ export function buildIntentProfile(rows = [], options = {}) {
     const memoryWeight = currentSession ? 1.18 : 0.52;
 
     let repeatBoost = 1;
-    if (definition.repeatableProductSignal && productId) {
-      const previousViews = productDetailSeenCounts.get(productId) || 0;
+    if (definition.repeatableProductSignal && productKey) {
+      const previousViews = productDetailSeenCounts.get(productKey) || 0;
       repeatBoost += Math.min(previousViews * 0.12, 0.36);
-      productDetailSeenCounts.set(productId, previousViews + 1);
+      productDetailSeenCounts.set(productKey, previousViews + 1);
     }
 
     const contribution = definition.weight * recent * memoryWeight * saturation * repeatBoost;
@@ -423,9 +493,9 @@ export function buildIntentProfile(rows = [], options = {}) {
       historicalEffectiveStrength += saturation;
     }
 
-    if (productId && definition.productWeight) {
-      const current = products.get(productId) || {
-        id: productId,
+    if (productId && productKey && definition.productWeight) {
+      const current = products.get(productKey) || {
+        id: canonicalProductId,
         name: productName || productId,
         category: category || null,
         rawScore: 0,
@@ -437,6 +507,7 @@ export function buildIntentProfile(rows = [], options = {}) {
         lastSeenAt: null,
       };
 
+      current.id = canonicalProductId || current.id;
       current.name = productName || current.name;
       current.category = category || current.category;
       const productContribution =
@@ -450,7 +521,7 @@ export function buildIntentProfile(rows = [], options = {}) {
       if (!current.lastSeenAt || eventMs >= Date.parse(current.lastSeenAt || "")) {
         current.lastSeenAt = row.created_at || current.lastSeenAt;
       }
-      products.set(productId, current);
+      products.set(productKey, current);
 
       if (productValue !== null) {
         priceSamples.push({
@@ -584,7 +655,7 @@ export function buildIntentProfile(rows = [], options = {}) {
   });
 
   return {
-    version: "intent-v1.1",
+    version: "intent-v1.2",
     learning_start_at: learningStartAt,
     score,
     current_session_score: currentSessionScore,
@@ -704,7 +775,7 @@ export function buildIntentOverview(rows = [], options = {}) {
   ).length;
 
   return {
-    version: "intent-v1.1",
+    version: "intent-v1.2",
     learning_start_at: learningStartAt,
     visitors_evaluated: total,
     average_intent_score: averageScore,
