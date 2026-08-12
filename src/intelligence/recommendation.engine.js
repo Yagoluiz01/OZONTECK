@@ -520,8 +520,8 @@ export function buildPersonalizedRanking({
   }
 
   return {
-    version: "recommendation-v2.1.1-observer",
-    mode: "observation",
+    version: "recommendation-v2.2-active",
+    mode: "active",
     intent_version: String(profile?.version || "unknown"),
     intent_score: intentScore,
     intent_confidence: intentConfidence,
