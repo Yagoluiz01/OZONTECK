@@ -4,6 +4,7 @@ import { supabaseAdmin } from "../config/supabase.js";
 import {
   buildIntentProfile,
   INTENT_SIGNAL_EVENT_TYPES,
+  getIntelligenceLearningStartAt,
 } from "../intelligence/intent.engine.js";
 
 const router = express.Router();
@@ -59,7 +60,9 @@ router.post("/intent", intentLimiter, async (req, res) => {
       });
     }
 
-    const dateFrom = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const learningStartAt = getIntelligenceLearningStartAt();
+    const rollingDateFrom = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const dateFrom = new Date(Math.max(Date.parse(rollingDateFrom), Date.parse(learningStartAt))).toISOString();
 
     const { data, error } = await supabaseAdmin
       .from("lead_events")
@@ -80,6 +83,7 @@ router.post("/intent", intentLimiter, async (req, res) => {
 
     const profile = buildIntentProfile(data || [], {
       currentSessionId: sessionId,
+      learningStartAt,
     });
 
     res.setHeader("Cache-Control", "private, no-store, max-age=0");

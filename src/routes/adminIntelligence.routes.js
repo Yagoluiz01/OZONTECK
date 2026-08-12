@@ -6,6 +6,7 @@ import {
   buildIntentOverview,
   buildIntentProfile,
   INTENT_SIGNAL_EVENT_TYPES,
+  getIntelligenceLearningStartAt,
 } from "../intelligence/intent.engine.js";
 
 const router = express.Router();
@@ -26,7 +27,9 @@ router.use(requireAdminAuth, requireMasterAdmin);
 router.get("/intent/overview", async (req, res) => {
   try {
     const days = Math.min(toPositiveInt(req.query.days, 7), 30);
-    const dateFrom = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+    const learningStartAt = getIntelligenceLearningStartAt();
+    const requestedDateFrom = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+    const dateFrom = new Date(Math.max(Date.parse(requestedDateFrom), Date.parse(learningStartAt))).toISOString();
 
     const { data, error } = await supabaseAdmin
       .from("lead_events")
@@ -44,7 +47,7 @@ router.get("/intent/overview", async (req, res) => {
       });
     }
 
-    const overview = buildIntentOverview(data || []);
+    const overview = buildIntentOverview(data || [], { learningStartAt });
 
     res.setHeader("Cache-Control", "private, no-store, max-age=0");
     return res.status(200).json({
@@ -71,7 +74,9 @@ router.get("/intent/visitor/:visitorId", async (req, res) => {
       return res.status(400).json({ success: false, message: "visitorId inválido." });
     }
 
-    const dateFrom = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+    const learningStartAt = getIntelligenceLearningStartAt();
+    const requestedDateFrom = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+    const dateFrom = new Date(Math.max(Date.parse(requestedDateFrom), Date.parse(learningStartAt))).toISOString();
 
     const { data, error } = await supabaseAdmin
       .from("lead_events")
@@ -96,6 +101,7 @@ router.get("/intent/visitor/:visitorId", async (req, res) => {
 
     const profile = buildIntentProfile(rows, {
       currentSessionId: effectiveSessionId,
+      learningStartAt,
     });
 
     res.setHeader("Cache-Control", "private, no-store, max-age=0");
