@@ -67,12 +67,27 @@ function inactivityPenalty(ageMinutes) {
   return 28;
 }
 
-function momentumPoints(profile) {
+function momentumBasePoints(profile) {
   const current = Number(profile?.current_session_score || 0);
   const historical = Number(profile?.historical_score || 0);
   const effectiveStrength = Number(profile?.current_session_effective_strength || 0);
   const growth = Math.max(0, current - historical);
   return Math.min(9, growth * 0.08 + Math.log1p(Math.max(0, effectiveStrength)) * 1.8);
+}
+
+function momentumDecayFactor(ageMinutes) {
+  if (ageMinutes === null || !Number.isFinite(ageMinutes)) return 0;
+  const age = Math.max(0, ageMinutes);
+
+  if (age <= 10) return 1;
+  if (age <= 30) return 1 - ((age - 10) / 20) * 0.4;
+  if (age <= 60) return 0.6 - ((age - 30) / 30) * 0.35;
+  if (age < 90) return 0.25 - ((age - 60) / 30) * 0.25;
+  return 0;
+}
+
+function momentumPoints(profile, ageMinutes) {
+  return momentumBasePoints(profile) * momentumDecayFactor(ageMinutes);
 }
 
 function getLeadTier(score, converted) {
@@ -179,7 +194,7 @@ function buildEvidence(profile, components, ageMinutes) {
   if (count(profile, "payment_method_selected") > 0) evidence.push("escolheu_pagamento");
   if (count(profile, "pix_generated") > 0) evidence.push("pix_gerado");
   if (Number(profile?.friction_score || 0) > 0) evidence.push("friccao_no_pagamento");
-  if (components.momentum >= 5) evidence.push("intencao_em_aceleracao");
+  if (ageMinutes !== null && ageMinutes <= 30 && components.momentum >= 5) evidence.push("intencao_em_aceleracao");
   if (ageMinutes !== null && ageMinutes <= 20) evidence.push("atividade_muito_recente");
 
   return Array.from(new Set(evidence));
@@ -194,7 +209,7 @@ export function buildLeadScore(profile = {}, options = {}) {
 
   if (converted) {
     return {
-      version: "lead-score-v3.1-observer",
+      version: "lead-score-v3.1.1-observer",
       mode: "observation",
       lead_score: 100,
       tier: getLeadTier(100, true),
@@ -211,7 +226,8 @@ export function buildLeadScore(profile = {}, options = {}) {
         stage: stagePoints(profile?.stage?.rank || 0),
         commitment: 20,
         recency: recencyPoints(ageMinutes),
-        momentum: round(momentumPoints(profile), 2),
+        momentum: round(momentumPoints(profile, ageMinutes), 2),
+        momentum_decay_factor: round(momentumDecayFactor(ageMinutes), 3),
         inactivity_penalty: 0,
         friction_probability_penalty: 0,
       },
@@ -228,7 +244,8 @@ export function buildLeadScore(profile = {}, options = {}) {
     stage: stagePoints(profile?.stage?.rank || 0),
     commitment: commitmentPoints(profile),
     recency: recencyPoints(ageMinutes),
-    momentum: momentumPoints(profile),
+    momentum: momentumPoints(profile, ageMinutes),
+    momentum_decay_factor: momentumDecayFactor(ageMinutes),
     inactivity_penalty: inactivityPenalty(ageMinutes),
   };
 
@@ -247,7 +264,7 @@ export function buildLeadScore(profile = {}, options = {}) {
   const recoveryPriority = recoveryDecision({ profile, score: leadScore, ageMinutes });
 
   return {
-    version: "lead-score-v3.1-observer",
+    version: "lead-score-v3.1.1-observer",
     mode: "observation",
     lead_score: leadScore,
     tier: getLeadTier(leadScore, false),
@@ -269,6 +286,7 @@ export function buildLeadScore(profile = {}, options = {}) {
       commitment: round(components.commitment, 2),
       recency: round(components.recency, 2),
       momentum: round(components.momentum, 2),
+      momentum_decay_factor: round(components.momentum_decay_factor, 3),
       inactivity_penalty: round(components.inactivity_penalty, 2),
       friction_probability_penalty: round(frictionScore * 3.5, 2),
     },
@@ -296,7 +314,7 @@ export function buildLeadScoreOverview(scoredLeads = [], options = {}) {
   };
 
   return {
-    version: "lead-score-v3.1-observer",
+    version: "lead-score-v3.1.1-observer",
     mode: "observation",
     visitors_evaluated: rows.length,
     active_leads: active.length,
