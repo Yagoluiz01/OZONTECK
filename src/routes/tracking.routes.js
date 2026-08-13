@@ -72,7 +72,7 @@ async function loadRecoveryIntelligence(visitorId, sessionId) {
 }
 
 const TRACKING_TIMESTAMP_OFFSET = String(
-  process.env.TRACKING_TIMESTAMP_OFFSET || "-03:00"
+  process.env.TRACKING_TIMESTAMP_OFFSET || "Z"
 ).trim();
 
 function parseTrackingDateMs(value) {
