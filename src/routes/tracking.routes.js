@@ -71,11 +71,29 @@ async function loadRecoveryIntelligence(visitorId, sessionId) {
   return buildLeadScore(profile);
 }
 
+const TRACKING_TIMESTAMP_OFFSET = String(
+  process.env.TRACKING_TIMESTAMP_OFFSET || "-03:00"
+).trim();
+
+function parseTrackingDateMs(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return NaN;
+
+  // lead_events/lead_sessions usam timestamp sem timezone.
+  // Se já vier Z ou offset explícito, preserve.
+  const hasExplicitTimezone = /(?:Z|[+-]\\d{2}:?\\d{2})$/i.test(raw);
+  const normalized = hasExplicitTimezone
+    ? raw
+    : `${raw}${TRACKING_TIMESTAMP_OFFSET}`;
+
+  return Date.parse(normalized);
+}
+
 function behaviorWaitSeconds(score = {}, nowMs = Date.now()) {
   const recovery = score?.recovery_priority || {};
   if (recovery.eligible_by_behavior !== true || recovery.ready_by_behavior === true) return 0;
 
-  const lastSignalMs = Date.parse(score?.last_signal_at || "");
+  const lastSignalMs = parseTrackingDateMs(score?.last_signal_at);
   const waitMinutes = Math.max(0, Number(recovery.minimum_wait_minutes || 0));
   if (!Number.isFinite(lastSignalMs) || !waitMinutes) return 0;
 
@@ -119,13 +137,13 @@ function clampMinutes(value, fallback, max = 24 * 60) {
 }
 
 function addMinutesIso(value, minutes) {
-  const time = Date.parse(value || "");
+  const time = parseTrackingDateMs(value);
   if (!Number.isFinite(time)) return null;
   return new Date(time + minutes * 60 * 1000).toISOString();
 }
 
 function secondsUntil(value, nowMs = Date.now()) {
-  const time = Date.parse(value || "");
+  const time = parseTrackingDateMs(value);
   if (!Number.isFinite(time)) return 0;
   return Math.max(0, Math.ceil((time - nowMs) / 1000));
 }
