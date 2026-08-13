@@ -120,8 +120,8 @@ function safeJsonParse(value, fallback = null) {
 }
 
 
-const CHECKOUT_RECOVERY_DELAY_MINUTES = 5;
-const ORDER_RECOVERY_DELAY_MINUTES = 10;
+const CHECKOUT_RECOVERY_DELAY_MINUTES = 3;
+const ORDER_RECOVERY_DELAY_MINUTES = 5;
 const RECOVERY_ORDER_EVENT_TYPES = [
   "checkout_order_created",
   "checkout_payment_confirmed",

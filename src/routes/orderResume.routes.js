@@ -149,13 +149,34 @@ async function loadOrder(orderNumber) {
   const { data, error } = await supabaseAdmin
     .from("orders")
     .select(
-      "id,order_number,subtotal,shipping_amount,discount_amount,total_amount,payment_status,order_status,payment_gateway,payment_reference,created_at,paid_at"
+      "id,order_number,customer_name,subtotal,shipping_amount,discount_amount,total_amount,payment_status,order_status,payment_gateway,payment_reference,shipping_carrier,shipping_service_code,shipping_service_name,shipping_delivery_time,shipping_city,shipping_state,created_at,paid_at"
     )
     .eq("order_number", orderNumber)
     .limit(1);
 
   if (error) throw error;
   return Array.isArray(data) && data.length ? data[0] : null;
+}
+
+async function loadOrderItems(orderId) {
+  if (!orderId) return [];
+
+  const { data, error } = await supabaseAdmin
+    .from("order_items")
+    .select("product_id,product_name,sku,unit_price,quantity,total_price")
+    .eq("order_id", orderId)
+    .order("created_at", { ascending: true });
+
+  if (error) throw error;
+
+  return (Array.isArray(data) ? data : []).map((item) => ({
+    id: item.product_id || item.sku || null,
+    name: normalizeText(item.product_name, 180) || "Produto OZONTECK",
+    sku: normalizeText(item.sku, 100),
+    price: Number(item.unit_price || 0),
+    quantity: Math.max(1, Number(item.quantity || 1)),
+    total: Number(item.total_price || 0),
+  }));
 }
 
 async function loadOrderEventForSession(sessionId, orderNumber) {
@@ -290,6 +311,8 @@ router.post("/exchange", exchangeLimiter, async (req, res) => {
       });
     }
 
+    const items = await loadOrderItems(order.id);
+
     // Troca o bearer temporário por um token forte de acesso ao pedido.
     // O token real nunca fica na URL. Após a troca, a página remove ?resume=...
     // imediatamente do histórico/endereço.
@@ -325,6 +348,7 @@ router.post("/exchange", exchangeLimiter, async (req, res) => {
       converted: isPaidStatus(order.payment_status),
       order: {
         number: order.order_number,
+        customerName: normalizeText(order.customer_name, 160),
         subtotal: Number(order.subtotal || 0),
         shippingAmount: Number(order.shipping_amount || 0),
         discountAmount: Number(order.discount_amount || 0),
@@ -334,6 +358,17 @@ router.post("/exchange", exchangeLimiter, async (req, res) => {
         paymentGateway: order.payment_gateway || null,
         paymentId: order.payment_reference || null,
         paidAt: order.paid_at || null,
+        shipping: {
+          carrier: normalizeText(order.shipping_carrier, 120),
+          serviceCode: normalizeText(order.shipping_service_code, 120),
+          serviceName: normalizeText(order.shipping_service_name, 160),
+          deliveryTime: Number.isFinite(Number(order.shipping_delivery_time))
+            ? Number(order.shipping_delivery_time)
+            : null,
+          city: normalizeText(order.shipping_city, 120),
+          state: normalizeText(order.shipping_state, 40),
+        },
+        items,
         accessToken,
       },
     });
