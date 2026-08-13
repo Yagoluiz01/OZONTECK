@@ -169,14 +169,47 @@ async function loadOrderItems(orderId) {
 
   if (error) throw error;
 
-  return (Array.isArray(data) ? data : []).map((item) => ({
-    id: item.product_id || item.sku || null,
-    name: normalizeText(item.product_name, 180) || "Produto OZONTECK",
-    sku: normalizeText(item.sku, 100),
-    price: Number(item.unit_price || 0),
-    quantity: Math.max(1, Number(item.quantity || 1)),
-    total: Number(item.total_price || 0),
-  }));
+  const rows = Array.isArray(data) ? data : [];
+  const productIds = [...new Set(
+    rows.map((item) => String(item?.product_id || "").trim()).filter(Boolean)
+  )];
+
+  const productById = new Map();
+
+  if (productIds.length) {
+    const { data: products, error: productsError } = await supabaseAdmin
+      .from("products")
+      .select("id,image_url,image_thumb_url,image_card_url,image_detail_url")
+      .in("id", productIds);
+
+    if (productsError) {
+      console.warn("[ORDER_RESUME_PRODUCT_IMAGE_WARNING]", productsError.message);
+    } else {
+      for (const product of Array.isArray(products) ? products : []) {
+        productById.set(String(product.id), product);
+      }
+    }
+  }
+
+  return rows.map((item) => {
+    const product = productById.get(String(item.product_id || "")) || {};
+    const imageUrl =
+      product.image_detail_url ||
+      product.image_card_url ||
+      product.image_url ||
+      product.image_thumb_url ||
+      null;
+
+    return {
+      id: item.product_id || item.sku || null,
+      name: normalizeText(item.product_name, 180) || "Produto OZONTECK",
+      sku: normalizeText(item.sku, 100),
+      price: Number(item.unit_price || 0),
+      quantity: Math.max(1, Number(item.quantity || 1)),
+      total: Number(item.total_price || 0),
+      imageUrl: normalizeText(imageUrl, 2000),
+    };
+  });
 }
 
 async function loadOrderEventForSession(sessionId, orderNumber) {
