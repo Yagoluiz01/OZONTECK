@@ -171,7 +171,7 @@ router.post("/lead-score/batch", async (req, res) => {
       return res.status(200).json({
         success: true,
         data: {
-          version: "lead-score-v3.1.2-observer",
+          version: "lead-score-v3.1.3-observer",
           mode: "observation",
           leads: [],
           requested: 0,
@@ -238,7 +238,7 @@ router.post("/lead-score/batch", async (req, res) => {
       success: true,
       period: { days, from: dateFrom, to: new Date().toISOString() },
       data: {
-        version: "lead-score-v3.1.2-observer",
+        version: "lead-score-v3.1.3-observer",
         mode: "observation",
         requested: targets.length,
         scored: scored.length,

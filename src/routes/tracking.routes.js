@@ -7,6 +7,7 @@ import {
   getIntelligenceLearningStartAt,
 } from "../intelligence/intent.engine.js";
 import { buildLeadScore } from "../intelligence/leadScore.engine.js";
+import { notifyRecoveryReadyLeads } from "../services/leadRecoveryNotification.service.js";
 
 import { requireAdminAuth } from "../middlewares/auth.middleware.js";
 import { requireMasterAdmin } from "../middlewares/masterAdmin.middleware.js";
@@ -101,8 +102,8 @@ function safeJsonParse(value, fallback = null) {
 }
 
 
-const CHECKOUT_RECOVERY_DELAY_MINUTES = 15;
-const ORDER_RECOVERY_DELAY_MINUTES = 30;
+const CHECKOUT_RECOVERY_DELAY_MINUTES = 5;
+const ORDER_RECOVERY_DELAY_MINUTES = 10;
 const RECOVERY_ORDER_EVENT_TYPES = [
   "checkout_order_created",
   "checkout_payment_confirmed",
@@ -1235,12 +1236,15 @@ router.get("/checkout-leads", requireAdminAuth, requireMasterAdmin, async (req, 
       })
       .slice(0, limit);
 
+    const { created: recoveryNotificationsCreated } = await notifyRecoveryReadyLeads(leads, { nowMs });
+
     return res.status(200).json({
       success: true,
       meta: {
         checkout_recovery_delay_minutes: checkoutDelayMinutes,
         order_recovery_delay_minutes: orderDelayMinutes,
         recovered_hidden_count: recoveredHiddenCount,
+        recovery_notifications_created: recoveryNotificationsCreated,
       },
       data: leads,
     });

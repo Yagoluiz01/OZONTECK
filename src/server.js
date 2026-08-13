@@ -4,6 +4,7 @@ import aiRoutes from "./services/AI/router/ai.route.js";
 import { syncPendingMelhorEnvioLabels } from "./services/shipping.service.js";
 import { runExpiredStockReservationCleanup } from "./jobs/releaseExpiredStockReservations.js";
 import { reconcilePendingMercadoPagoPayments } from "./jobs/reconcilePendingMercadoPagoPayments.js";
+import { runLeadRecoveryReadyNotificationSweep } from "./services/leadRecoveryNotification.service.js";
 
 // Rede de segurança: um erro não tratado em qualquer parte do código não pode
 // mais derrubar o processo inteiro. Apenas loga o erro e mantém a API no ar.
@@ -67,6 +68,20 @@ const paymentReconcileBatchLimit = Math.max(
   Number(process.env.MERCADO_PAGO_RECONCILE_BATCH_LIMIT || 30)
 );
 
+const leadRecoveryNotificationsEnabled = !["0", "false", "off", "no"].includes(
+  String(process.env.LEAD_RECOVERY_NOTIFICATIONS_ENABLED || "true").trim().toLowerCase()
+);
+
+const leadRecoveryNotificationIntervalSeconds = Math.max(
+  20,
+  Number(process.env.LEAD_RECOVERY_NOTIFICATION_INTERVAL_SECONDS || 30)
+);
+
+const leadRecoveryOrderDelayMinutes = Math.max(
+  1,
+  Number(process.env.LEAD_RECOVERY_ORDER_DELAY_MINUTES || 10)
+);
+
 let syncRunning = false;
 let syncTimer = null;
 let stockCleanupTimer = null;
@@ -75,6 +90,36 @@ let startupStockCleanupTimer = null;
 let paymentReconcileTimer = null;
 let startupPaymentReconcileTimer = null;
 let paymentReconcileRunning = false;
+
+let leadRecoveryNotificationTimer = null;
+let startupLeadRecoveryNotificationTimer = null;
+let leadRecoveryNotificationRunning = false;
+
+async function runLeadRecoveryNotificationSweep(trigger = "interval") {
+  if (!leadRecoveryNotificationsEnabled || leadRecoveryNotificationRunning) return;
+  leadRecoveryNotificationRunning = true;
+
+  try {
+    const result = await runLeadRecoveryReadyNotificationSweep({
+      orderDelayMinutes: leadRecoveryOrderDelayMinutes,
+      limit: 80,
+    });
+
+    if (result?.created > 0) {
+      console.log(
+        "LEAD RECOVERY NOTIFICATIONS: " +
+          JSON.stringify({ trigger, checked: result.checked, eligible: result.eligible, created: result.created })
+      );
+    }
+  } catch (error) {
+    console.error("LEAD RECOVERY NOTIFICATIONS ERROR:", {
+      trigger,
+      message: error?.message || String(error),
+    });
+  } finally {
+    leadRecoveryNotificationRunning = false;
+  }
+}
 
 async function runPaymentReconciliation(trigger = "interval") {
   if (!paymentReconcileEnabled || paymentReconcileRunning) return;
@@ -176,6 +221,22 @@ const server = app.listen(PORT, () => {
     console.log("MERCADO PAGO AUTO RECONCILE: desativado por configuração");
   }
 
+  if (leadRecoveryNotificationsEnabled) {
+    console.log(
+      `LEAD RECOVERY NOTIFICATIONS: ativado a cada ${leadRecoveryNotificationIntervalSeconds} segundo(s); pedido disponível após ${leadRecoveryOrderDelayMinutes} minuto(s)`
+    );
+
+    startupLeadRecoveryNotificationTimer = setTimeout(() => {
+      runLeadRecoveryNotificationSweep("startup");
+    }, 12000);
+
+    leadRecoveryNotificationTimer = setInterval(() => {
+      runLeadRecoveryNotificationSweep("interval");
+    }, leadRecoveryNotificationIntervalSeconds * 1000);
+  } else {
+    console.log("LEAD RECOVERY NOTIFICATIONS: desativado por configuração");
+  }
+
   if (stockCleanupEnabled) {
     console.log(
       `ORDER STOCK CLEANUP: ativado para rodar a cada ${stockCleanupIntervalMinutes} minuto(s)`
@@ -210,6 +271,8 @@ function clearBackgroundTimers() {
   if (startupStockCleanupTimer) clearTimeout(startupStockCleanupTimer);
   if (paymentReconcileTimer) clearInterval(paymentReconcileTimer);
   if (startupPaymentReconcileTimer) clearTimeout(startupPaymentReconcileTimer);
+  if (leadRecoveryNotificationTimer) clearInterval(leadRecoveryNotificationTimer);
+  if (startupLeadRecoveryNotificationTimer) clearTimeout(startupLeadRecoveryNotificationTimer);
 }
 
 let shuttingDown = false;

@@ -133,6 +133,10 @@ function resolveNotificationUrl(notification = {}) {
     return "/orders";
   }
 
+  if (entityType === "lead" || type.includes("lead") || type.includes("tracking")) {
+    return "/tracking";
+  }
+
   if (
     entityType === "affiliate" ||
     entityType === "affiliate_application" ||

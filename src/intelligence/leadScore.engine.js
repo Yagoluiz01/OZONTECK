@@ -154,7 +154,7 @@ function recoveryDecision({ profile, score, ageMinutes }) {
     };
   }
 
-  const minimumWait = stageRank >= 4 ? 30 : stageRank >= 3 ? 15 : 30;
+  const minimumWait = stageRank >= 4 ? 10 : stageRank >= 3 ? 5 : 10;
 
   let urgency = score * 0.45 + stageRank * 8 + friction * 5;
   if (age >= minimumWait && minimumWait > 0) urgency += 12;
@@ -232,7 +232,7 @@ export function buildLeadScore(profile = {}, options = {}) {
 
   if (converted) {
     return {
-      version: "lead-score-v3.1.2-observer",
+      version: "lead-score-v3.1.3-observer",
       mode: "observation",
       lead_score: 100,
       tier: getLeadTier(100, true),
@@ -287,7 +287,7 @@ export function buildLeadScore(profile = {}, options = {}) {
   const recoveryPriority = recoveryDecision({ profile, score: leadScore, ageMinutes });
 
   return {
-    version: "lead-score-v3.1.2-observer",
+    version: "lead-score-v3.1.3-observer",
     mode: "observation",
     lead_score: leadScore,
     tier: getLeadTier(leadScore, false),
@@ -337,7 +337,7 @@ export function buildLeadScoreOverview(scoredLeads = [], options = {}) {
   };
 
   return {
-    version: "lead-score-v3.1.2-observer",
+    version: "lead-score-v3.1.3-observer",
     mode: "observation",
     visitors_evaluated: rows.length,
     active_leads: active.length,
