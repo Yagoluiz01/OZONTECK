@@ -120,9 +120,10 @@ function recoveryDecision({ profile, score, ageMinutes }) {
   if (profile?.converted_current_session) {
     return {
       key: "none",
-      label: "Não recuperar",
+      label: "Sem recuperação",
       urgency_score: 0,
       minimum_wait_minutes: 0,
+      eligible_by_behavior: false,
       ready_by_behavior: false,
       next_best_action: "nao_interromper_cliente_convertido",
       reason: "Pagamento já confirmado nesta sessão.",
@@ -132,7 +133,28 @@ function recoveryDecision({ profile, score, ageMinutes }) {
   const stageRank = Number(profile?.stage?.rank || 0);
   const friction = clamp(profile?.friction_score, 0, 10);
   const age = ageMinutes === null ? Number.POSITIVE_INFINITY : ageMinutes;
-  const minimumWait = stageRank >= 4 ? 30 : stageRank >= 3 ? 15 : stageRank >= 2 ? 30 : 0;
+  const currentSessionScore = clamp(profile?.current_session_score, 0, 100);
+
+  // Recuperação começa somente quando existe compromisso comercial atual
+  // (carrinho ou etapa posterior). Navegação/consideração isolada não entra
+  // na fila só por ter histórico antigo ou algum score residual.
+  if (stageRank < 2) {
+    const coldAndInactive = score < 18 && currentSessionScore < 18 && age >= 90;
+    return {
+      key: "none",
+      label: "Sem recuperação",
+      urgency_score: 0,
+      minimum_wait_minutes: 0,
+      eligible_by_behavior: false,
+      ready_by_behavior: false,
+      next_best_action: "aguardar_nova_interacao",
+      reason: coldAndInactive
+        ? "Lead frio, sem compromisso recente e sem atividade atual; histórico antigo não cria oportunidade de recuperação."
+        : "Ainda não há compromisso comercial suficiente; aguardar carrinho ou avanço posterior no funil.",
+    };
+  }
+
+  const minimumWait = stageRank >= 4 ? 30 : stageRank >= 3 ? 15 : 30;
 
   let urgency = score * 0.45 + stageRank * 8 + friction * 5;
   if (age >= minimumWait && minimumWait > 0) urgency += 12;
@@ -172,6 +194,7 @@ function recoveryDecision({ profile, score, ageMinutes }) {
     label: labels[key],
     urgency_score: urgency,
     minimum_wait_minutes: minimumWait,
+    eligible_by_behavior: true,
     ready_by_behavior: ready,
     next_best_action: nextBestAction,
     reason,
@@ -209,7 +232,7 @@ export function buildLeadScore(profile = {}, options = {}) {
 
   if (converted) {
     return {
-      version: "lead-score-v3.1.1-observer",
+      version: "lead-score-v3.1.2-observer",
       mode: "observation",
       lead_score: 100,
       tier: getLeadTier(100, true),
@@ -264,7 +287,7 @@ export function buildLeadScore(profile = {}, options = {}) {
   const recoveryPriority = recoveryDecision({ profile, score: leadScore, ageMinutes });
 
   return {
-    version: "lead-score-v3.1.1-observer",
+    version: "lead-score-v3.1.2-observer",
     mode: "observation",
     lead_score: leadScore,
     tier: getLeadTier(leadScore, false),
@@ -314,7 +337,7 @@ export function buildLeadScoreOverview(scoredLeads = [], options = {}) {
   };
 
   return {
-    version: "lead-score-v3.1.1-observer",
+    version: "lead-score-v3.1.2-observer",
     mode: "observation",
     visitors_evaluated: rows.length,
     active_leads: active.length,
@@ -327,6 +350,8 @@ export function buildLeadScoreOverview(scoredLeads = [], options = {}) {
       : 0,
     tiers: countBy((row) => row?.tier?.key),
     recovery_priorities: countBy((row) => row?.recovery_priority?.key),
+    recovery_eligible_leads: active.filter((row) => row?.recovery_priority?.eligible_by_behavior === true).length,
+    no_recovery_leads: active.filter((row) => row?.recovery_priority?.eligible_by_behavior !== true).length,
     high_priority_leads: active.filter((row) => ["critical", "high"].includes(row?.recovery_priority?.key)).length,
     hot_leads: active.filter((row) => row?.tier?.key === "hot").length,
     calibrated_probability: false,
