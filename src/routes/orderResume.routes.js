@@ -327,19 +327,32 @@ router.post("/exchange", exchangeLimiter, async (req, res) => {
     if (updateError) throw updateError;
 
     if (payload.session_id) {
-      await supabaseAdmin
-        .from("lead_events")
-        .insert({
-          session_id: payload.session_id,
-          event_type: "order_resume_opened",
-          page: "pagamento.html",
-          section: JSON.stringify({
-            order_number: order.order_number,
-            source: "lead_recovery",
-          }),
-          duration_ms: 0,
-        })
-        .catch(() => null);
+      try {
+        const { error: resumeEventError } = await supabaseAdmin
+          .from("lead_events")
+          .insert({
+            session_id: payload.session_id,
+            event_type: "order_resume_opened",
+            page: "pagamento.html",
+            section: JSON.stringify({
+              order_number: order.order_number,
+              source: "lead_recovery",
+            }),
+            duration_ms: 0,
+          });
+
+        if (resumeEventError) {
+          console.warn(
+            "[ORDER_RESUME_EVENT_WARNING]",
+            resumeEventError.message || resumeEventError
+          );
+        }
+      } catch (resumeEventError) {
+        console.warn(
+          "[ORDER_RESUME_EVENT_WARNING]",
+          resumeEventError?.message || resumeEventError
+        );
+      }
     }
 
     res.setHeader("Cache-Control", "private, no-store, max-age=0");
