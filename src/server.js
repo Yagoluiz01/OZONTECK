@@ -79,7 +79,7 @@ const leadRecoveryNotificationIntervalSeconds = Math.max(
 
 const leadRecoveryOrderDelayMinutes = Math.max(
   1,
-  Number(process.env.LEAD_RECOVERY_ORDER_DELAY_MINUTES || 10)
+  Number(process.env.LEAD_RECOVERY_ORDER_DELAY_MINUTES || 5)
 );
 
 let syncRunning = false;

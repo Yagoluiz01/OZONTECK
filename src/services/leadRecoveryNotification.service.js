@@ -16,6 +16,22 @@ const DEFAULT_LOOKBACK_MINUTES = 90;
 const INTELLIGENCE_HISTORY_DAYS = 30;
 const inflightKeys = new Set();
 
+const TRACKING_TIMESTAMP_OFFSET = String(
+  process.env.TRACKING_TIMESTAMP_OFFSET || "Z"
+).trim();
+
+function parseTrackingDateMs(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return NaN;
+
+  const hasExplicitTimezone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(raw);
+  const normalized = hasExplicitTimezone
+    ? raw
+    : `${raw}${TRACKING_TIMESTAMP_OFFSET}`;
+
+  return Date.parse(normalized);
+}
+
 function normalizeText(value, maxLength = 240) {
   const text = String(value || "").trim().slice(0, Math.max(1, maxLength));
   return text || null;
@@ -49,14 +65,14 @@ function isPaidStatus(value) {
 }
 
 function addMinutesIso(value, minutes) {
-  const time = Date.parse(value || "");
+  const time = parseTrackingDateMs(value);
   if (!Number.isFinite(time)) return null;
   return new Date(time + Math.max(0, Number(minutes || 0)) * 60 * 1000).toISOString();
 }
 
 function maxIso(...values) {
   const times = values
-    .map((value) => Date.parse(value || ""))
+    .map((value) => parseTrackingDateMs(value))
     .filter((value) => Number.isFinite(value));
   return times.length ? new Date(Math.max(...times)).toISOString() : null;
 }
@@ -91,8 +107,8 @@ function latestOrderEvents(events = []) {
     if (!event?.session_id || !event?.order_number || !event?.created_at) continue;
     const key = `${event.session_id}::${event.order_number}`;
     const current = latest.get(key);
-    const eventAt = Date.parse(event.created_at || "");
-    const currentAt = Date.parse(current?.created_at || "");
+    const eventAt = parseTrackingDateMs(event.created_at);
+    const currentAt = parseTrackingDateMs(current?.created_at);
 
     if (!current || (Number.isFinite(eventAt) && (!Number.isFinite(currentAt) || eventAt > currentAt))) {
       latest.set(key, event);
@@ -156,7 +172,7 @@ export async function notifyRecoveryReadyLeads(leads = [], options = {}) {
       lead?.recovery_ready_at
     )
     .filter((lead) => {
-      const readyAtMs = Date.parse(lead.recovery_ready_at || "");
+      const readyAtMs = parseTrackingDateMs(lead.recovery_ready_at);
       if (!Number.isFinite(readyAtMs) || readyAtMs > nowMs) return false;
       return (nowMs - readyAtMs) / 60000 <= lookbackMinutes;
     })
@@ -229,7 +245,7 @@ export async function runLeadRecoveryReadyNotificationSweep(options = {}) {
 
   const currentOrderEvents = latestOrderEvents(parsedOrderEvents);
   const orderEvents = currentOrderEvents.filter((event) => {
-    const readyAt = Date.parse(addMinutesIso(event.created_at, orderDelayMinutes) || "");
+    const readyAt = parseTrackingDateMs(addMinutesIso(event.created_at, orderDelayMinutes));
     return Number.isFinite(readyAt) && readyAt <= nowMs;
   });
 
@@ -296,7 +312,7 @@ export async function runLeadRecoveryReadyNotificationSweep(options = {}) {
   const recoveryAtBySession = new Map();
   for (const row of Array.isArray(recoveryResult.data) ? recoveryResult.data : []) {
     if (!row?.session_id || recoveryAtBySession.has(row.session_id)) continue;
-    recoveryAtBySession.set(row.session_id, Date.parse(row.created_at || ""));
+    recoveryAtBySession.set(row.session_id, parseTrackingDateMs(row.created_at));
   }
 
   const orderByNumber = new Map();
@@ -315,7 +331,7 @@ export async function runLeadRecoveryReadyNotificationSweep(options = {}) {
   const notificationLeads = [];
 
   for (const event of orderEvents) {
-    const eventAtMs = Date.parse(event.created_at || "");
+    const eventAtMs = parseTrackingDateMs(event.created_at);
     const order = orderByNumber.get(String(event.order_number)) || null;
     const recoveryAtMs = recoveryAtBySession.get(event.session_id) || 0;
     const phone = phoneBySession.get(event.session_id) || "";
@@ -341,7 +357,7 @@ export async function runLeadRecoveryReadyNotificationSweep(options = {}) {
     const orderReadyAt = addMinutesIso(event.created_at, orderDelayMinutes);
     const intelligenceReadyAt = behaviorReadyAt(score);
     const effectiveReadyAt = maxIso(orderReadyAt, intelligenceReadyAt);
-    if (!effectiveReadyAt || Date.parse(effectiveReadyAt) > nowMs) continue;
+    if (!effectiveReadyAt || parseTrackingDateMs(effectiveReadyAt) > nowMs) continue;
 
     notificationLeads.push({
       session_id: event.session_id,
@@ -362,9 +378,15 @@ export async function runLeadRecoveryReadyNotificationSweep(options = {}) {
     knownKeys,
   });
 
-  return {
+  const summary = {
     checked: currentOrderEvents.length,
     eligible: notificationLeads.length,
     created: result.created,
   };
+
+  if (summary.eligible > 0 || summary.created > 0) {
+    console.log("[LEAD_RECOVERY_SWEEP_RESULT]", summary);
+  }
+
+  return summary;
 }
