@@ -238,13 +238,48 @@ async function loadOrderEventForSession(sessionId, orderNumber) {
   }) || null;
 }
 
+
+async function loadLatestOrderEventForSession(sessionId) {
+  if (!sessionId) return null;
+
+  const { data, error } = await supabaseAdmin
+    .from("lead_events")
+    .select("id,session_id,visitor_id,event_type,section,created_at")
+    .eq("session_id", sessionId)
+    .eq("event_type", "checkout_order_created")
+    .order("created_at", { ascending: false })
+    .limit(20);
+
+  if (error) throw error;
+
+  for (const row of Array.isArray(data) ? data : []) {
+    const meta = safeJsonParse(row.section, {});
+    const orderNumber = normalizeText(
+      meta.order_number ||
+      meta.orderNumber ||
+      meta.external_reference ||
+      meta.externalReference,
+      180
+    );
+
+    if (orderNumber) {
+      return {
+        ...row,
+        order_number: orderNumber,
+      };
+    }
+  }
+
+  return null;
+}
+
 router.post(
   "/admin-link",
   requireAdminAuth,
   requireMasterAdmin,
   async (req, res) => {
     try {
-      const orderNumber = normalizeText(
+      let orderNumber = normalizeText(
         req.body?.order_number || req.body?.orderNumber,
         180
       );
@@ -253,10 +288,18 @@ router.post(
         180
       );
 
+      let resolvedOrderEvent = null;
+
+      if (!orderNumber && sessionId) {
+        resolvedOrderEvent = await loadLatestOrderEventForSession(sessionId);
+        orderNumber = normalizeText(resolvedOrderEvent?.order_number, 180);
+      }
+
       if (!orderNumber) {
-        return res.status(400).json({
+        return res.status(404).json({
           success: false,
-          message: "Pedido não informado.",
+          code: "SESSION_HAS_NO_ORDER",
+          message: "Nenhum pedido criado foi encontrado para esta sessão.",
         });
       }
 
@@ -287,7 +330,10 @@ router.post(
       // Quando a recuperação veio de uma sessão conhecida, confirme que o pedido
       // realmente pertence àquela sessão de checkout antes de gerar o link.
       if (sessionId) {
-        const event = await loadOrderEventForSession(sessionId, orderNumber);
+        const event =
+          resolvedOrderEvent ||
+          await loadOrderEventForSession(sessionId, orderNumber);
+
         if (!event) {
           return res.status(409).json({
             success: false,
