@@ -1,7 +1,7 @@
 import jwt from "jsonwebtoken";
 
 import { env } from "../config/env.js";
-import { supabaseAdmin, supabaseAuth } from "../config/supabase.js";
+import { supabaseAdmin } from "../config/supabase.js";
 
 function normalizeEmail(value) {
   return String(value || "").trim().toLowerCase();
@@ -53,46 +53,6 @@ function sanitizeJwtErrorMessage(error) {
   }
 
   return "Token inválido ou expirado.";
-}
-
-
-async function validateEmbeddedSupabaseSession(decoded) {
-  const accessToken = String(decoded?.supabase_access_token || "").trim();
-
-  if (!accessToken) {
-    const sessionError = new Error("Sessão administrativa inválida.");
-    sessionError.statusCode = 401;
-    throw sessionError;
-  }
-
-  const { data, error } = await supabaseAuth.auth.getUser(accessToken);
-  const user = data?.user || null;
-
-  if (error || !user) {
-    const sessionError = new Error("Sessão administrativa expirada ou inválida.");
-    sessionError.statusCode = 401;
-    throw sessionError;
-  }
-
-  if (decoded?.sub && String(user.id) !== String(decoded.sub)) {
-    const identityError = new Error("Sessão administrativa inválida.");
-    identityError.statusCode = 401;
-    throw identityError;
-  }
-
-  if (
-    decoded?.email &&
-    normalizeEmail(user.email) !== normalizeEmail(decoded.email)
-  ) {
-    const identityError = new Error("Sessão administrativa inválida.");
-    identityError.statusCode = 401;
-    throw identityError;
-  }
-
-  return {
-    accessToken,
-    user,
-  };
 }
 
 async function loadActiveAdmin(decoded) {
@@ -162,10 +122,6 @@ export async function requireAdminAuth(req, res, next) {
       });
     }
 
-    // Fase de transição: preserva a validação da sessão Supabase que as
-    // rotas administrativas legadas faziam em toda requisição.
-    const supabaseSession = await validateEmbeddedSupabaseSession(decoded);
-
     // Não confia apenas no JWT: reconsulta o administrador em toda rota protegida.
     // Assim, bloqueio, exclusão ou troca de função passa a valer imediatamente.
     const currentAdmin = await loadActiveAdmin(decoded);
@@ -179,13 +135,7 @@ export async function requireAdminAuth(req, res, next) {
       is_master: currentAdmin.is_master,
     };
 
-    // Compatibilidade temporária para rotas administrativas legadas.
-    // Mantém o formato antigo enquanto a Fase 1 é validada em produção.
-    req.auth = {
-      admin: currentAdmin,
-      appToken: token,
-      supabaseAccessToken: supabaseSession.accessToken,
-    };
+
 
     return next();
   } catch (error) {

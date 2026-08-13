@@ -186,7 +186,7 @@ export async function runLeadRecoveryReadyNotificationSweep(options = {}) {
   }
 
   const sessionIds = Array.from(new Set(orderEvents.map((event) => event.session_id)));
-  const orderNumbers = Array.from(new Set(orderEvents.map((event) => event.order_number));
+  const orderNumbers = Array.from(new Set(orderEvents.map((event) => event.order_number)));
 
   const [contactResult, recoveryResult, ordersResult, knownKeys] = await Promise.all([
     supabaseAdmin
