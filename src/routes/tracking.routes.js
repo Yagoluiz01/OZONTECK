@@ -1,6 +1,12 @@
 import express from "express";
 import rateLimit from "express-rate-limit";
 import { supabaseAdmin } from "../config/supabase.js";
+import {
+  buildIntentProfile,
+  INTENT_SIGNAL_EVENT_TYPES,
+  getIntelligenceLearningStartAt,
+} from "../intelligence/intent.engine.js";
+import { buildLeadScore } from "../intelligence/leadScore.engine.js";
 
 import { requireAdminAuth } from "../middlewares/auth.middleware.js";
 import { requireMasterAdmin } from "../middlewares/masterAdmin.middleware.js";
@@ -30,6 +36,49 @@ function normalizeText(value, maxLength = 500) {
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+async function loadRecoveryIntelligence(visitorId, sessionId) {
+  const safeVisitorId = normalizeText(visitorId, 180);
+  const safeSessionId = normalizeText(sessionId, 180);
+  if (!safeVisitorId || !safeSessionId) return null;
+
+  const learningStartAt = getIntelligenceLearningStartAt();
+  const rollingStart = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+  const dateFrom = new Date(
+    Math.max(Date.parse(rollingStart), Date.parse(learningStartAt))
+  ).toISOString();
+
+  const { data, error } = await supabaseAdmin
+    .from("lead_events")
+    .select("session_id,visitor_id,event_type,page,section,created_at")
+    .eq("visitor_id", safeVisitorId)
+    .in("event_type", INTENT_SIGNAL_EVENT_TYPES)
+    .gte("created_at", dateFrom)
+    .order("created_at", { ascending: true })
+    .limit(2500);
+
+  if (error) throw error;
+
+  const rows = data || [];
+  if (!rows.some((row) => row?.session_id === safeSessionId)) return null;
+
+  const profile = buildIntentProfile(rows, {
+    currentSessionId: safeSessionId,
+    learningStartAt,
+  });
+  return buildLeadScore(profile);
+}
+
+function behaviorWaitSeconds(score = {}, nowMs = Date.now()) {
+  const recovery = score?.recovery_priority || {};
+  if (recovery.eligible_by_behavior !== true || recovery.ready_by_behavior === true) return 0;
+
+  const lastSignalMs = Date.parse(score?.last_signal_at || "");
+  const waitMinutes = Math.max(0, Number(recovery.minimum_wait_minutes || 0));
+  if (!Number.isFinite(lastSignalMs) || !waitMinutes) return 0;
+
+  return Math.max(0, Math.ceil((lastSignalMs + waitMinutes * 60 * 1000 - nowMs) / 1000));
 }
 
 
@@ -924,6 +973,48 @@ router.post("/checkout-leads/:sessionId/recovery-started", requireAdminAuth, req
       });
     }
 
+    let recoveryIntelligence = null;
+    try {
+      recoveryIntelligence = await loadRecoveryIntelligence(
+        existingSession.data.visitor_id,
+        sessionId
+      );
+    } catch (intelligenceError) {
+      // A proteção temporal do checkout continua autoritativa mesmo se a camada
+      // comportamental estiver momentaneamente indisponível. O erro é auditado,
+      // mas não derruba a operação administrativa inteira.
+      console.error("TRACKING RECOVERY INTELLIGENCE ERROR:", intelligenceError);
+    }
+
+    if (recoveryIntelligence) {
+      const behaviorRecovery = recoveryIntelligence.recovery_priority || {};
+
+      if (behaviorRecovery.eligible_by_behavior !== true) {
+        return res.status(409).json({
+          success: false,
+          message:
+            behaviorRecovery.reason ||
+            "A inteligência comportamental não considera este lead elegível para recuperação agora.",
+          recovery_status: "behavior_not_eligible",
+          lead_score: recoveryIntelligence.lead_score,
+          intelligence_version: recoveryIntelligence.version,
+        });
+      }
+
+      if (behaviorRecovery.ready_by_behavior !== true) {
+        return res.status(409).json({
+          success: false,
+          message:
+            behaviorRecovery.reason ||
+            "A janela comportamental de segurança ainda não terminou.",
+          recovery_status: "behavior_waiting",
+          wait_seconds_remaining: behaviorWaitSeconds(recoveryIntelligence),
+          lead_score: recoveryIntelligence.lead_score,
+          intelligence_version: recoveryIntelligence.version,
+        });
+      }
+    }
+
     const { data: priorRecoveryRows, error: priorRecoveryError } = await supabaseAdmin
       .from("lead_events")
       .select("id, created_at")
@@ -958,6 +1049,9 @@ router.post("/checkout-leads/:sessionId/recovery-started", requireAdminAuth, req
         action: "whatsapp_recovery_started",
         lead_id: leadId || latestContact.id,
         order_number: recoveryState.order_number || trustedOrderNumber || orderNumberFromClient || null,
+        intelligence_version: recoveryIntelligence?.version || null,
+        lead_score: recoveryIntelligence?.lead_score ?? null,
+        recovery_priority: recoveryIntelligence?.recovery_priority?.key || null,
       }),
       duration_ms: 0,
     };
