@@ -3,6 +3,10 @@ import crypto from 'crypto';
 import { env } from '../config/env.js';
 import { requireAdminAuth } from '../middlewares/auth.middleware.js';
 import { requireMasterAdmin } from '../middlewares/masterAdmin.middleware.js';
+import {
+  sanitizeHttpsUrlFields,
+  sanitizeOptionalHttpsUrl
+} from '../utils/affiliateMarketingUrl.js';
 import rateLimit from 'express-rate-limit';
 
 const router = express.Router();
@@ -166,8 +170,8 @@ router.post('/assets', async (req, res) => {
       description: description || null,
       asset_type,
       channel: channel || 'general',
-      file_url: file_url || null,
-      thumbnail_url: thumbnail_url || null,
+      file_url: sanitizeOptionalHttpsUrl(file_url, 'file_url'),
+      thumbnail_url: sanitizeOptionalHttpsUrl(thumbnail_url, 'thumbnail_url'),
       content_text: content_text || null,
       sort_order: toInteger(sort_order, 0),
       is_featured: toBoolean(is_featured, false),
@@ -186,7 +190,7 @@ router.post('/assets', async (req, res) => {
     });
   } catch (error) {
     console.error('ADMIN AFFILIATE MARKETING ASSET CREATE ERROR:', error);
-    return res.status(500).json(normalizeError(error));
+    return res.status(error?.statusCode || 500).json(normalizeError(error));
   }
 });
 
@@ -219,6 +223,8 @@ router.put('/assets/:id', async (req, res) => {
       }
     }
 
+    sanitizeHttpsUrlFields(payload, ['file_url', 'thumbnail_url']);
+
     if (Object.prototype.hasOwnProperty.call(payload, 'sort_order')) {
       payload.sort_order = toInteger(payload.sort_order, 0);
     }
@@ -246,7 +252,7 @@ router.put('/assets/:id', async (req, res) => {
     });
   } catch (error) {
     console.error('ADMIN AFFILIATE MARKETING ASSET UPDATE ERROR:', error);
-    return res.status(500).json(normalizeError(error));
+    return res.status(error?.statusCode || 500).json(normalizeError(error));
   }
 });
 
@@ -354,8 +360,8 @@ router.post('/messages', async (req, res) => {
       message_text,
       cta_text: cta_text || null,
       media_type: media_type || null,
-      media_url: media_url || null,
-      media_thumbnail_url: media_thumbnail_url || null,
+      media_url: sanitizeOptionalHttpsUrl(media_url, 'media_url'),
+      media_thumbnail_url: sanitizeOptionalHttpsUrl(media_thumbnail_url, 'media_thumbnail_url'),
       sort_order: toInteger(sort_order, 0),
       is_featured: toBoolean(is_featured, false),
       is_active: toBoolean(is_active, true)
@@ -373,7 +379,7 @@ router.post('/messages', async (req, res) => {
     });
   } catch (error) {
     console.error('ADMIN AFFILIATE MESSAGE CREATE ERROR:', error);
-    return res.status(500).json(normalizeError(error));
+    return res.status(error?.statusCode || 500).json(normalizeError(error));
   }
 });
 
@@ -407,6 +413,8 @@ router.put('/messages/:id', async (req, res) => {
       }
     }
 
+    sanitizeHttpsUrlFields(payload, ['media_url', 'media_thumbnail_url']);
+
     if (Object.prototype.hasOwnProperty.call(payload, 'sort_order')) {
       payload.sort_order = toInteger(payload.sort_order, 0);
     }
@@ -434,7 +442,7 @@ router.put('/messages/:id', async (req, res) => {
     });
   } catch (error) {
     console.error('ADMIN AFFILIATE MESSAGE UPDATE ERROR:', error);
-    return res.status(500).json(normalizeError(error));
+    return res.status(error?.statusCode || 500).json(normalizeError(error));
   }
 });
 
@@ -541,8 +549,8 @@ router.post('/trainings', async (req, res) => {
       description: description || null,
       module_type: module_type || 'text',
       content: content || null,
-      video_url: video_url || null,
-      thumbnail_url: thumbnail_url || null,
+      video_url: sanitizeOptionalHttpsUrl(video_url, 'video_url'),
+      thumbnail_url: sanitizeOptionalHttpsUrl(thumbnail_url, 'thumbnail_url'),
       duration_minutes: duration_minutes ? toInteger(duration_minutes, null) : null,
       sort_order: toInteger(sort_order, 0),
       is_required: toBoolean(is_required, false),
@@ -561,7 +569,7 @@ router.post('/trainings', async (req, res) => {
     });
   } catch (error) {
     console.error('ADMIN AFFILIATE TRAINING CREATE ERROR:', error);
-    return res.status(500).json(normalizeError(error));
+    return res.status(error?.statusCode || 500).json(normalizeError(error));
   }
 });
 
@@ -594,6 +602,8 @@ router.put('/trainings/:id', async (req, res) => {
         payload[field] = req.body[field];
       }
     }
+
+    sanitizeHttpsUrlFields(payload, ['video_url', 'thumbnail_url']);
 
     if (Object.prototype.hasOwnProperty.call(payload, 'duration_minutes')) {
       payload.duration_minutes = payload.duration_minutes
@@ -628,7 +638,7 @@ router.put('/trainings/:id', async (req, res) => {
     });
   } catch (error) {
     console.error('ADMIN AFFILIATE TRAINING UPDATE ERROR:', error);
-    return res.status(500).json(normalizeError(error));
+    return res.status(error?.statusCode || 500).json(normalizeError(error));
   }
 });
 
