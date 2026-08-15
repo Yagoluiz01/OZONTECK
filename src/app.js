@@ -249,6 +249,7 @@ app.use((req, res, next) => {
   const sensitiveApiPath =
     req.path.startsWith("/api/auth") ||
     req.path.startsWith("/api/admin") ||
+    req.path.startsWith("/api/ai") ||
     req.path.startsWith("/api/store/orders") ||
     req.path.startsWith("/api/store/payments");
 
@@ -357,7 +358,7 @@ app.use("/api/affiliate/feed", affiliateFeedRoutes);
 app.use("/api/affiliate", affiliatePortalRoutes);
 app.use("/api/admin/ai", adminAiLimiter, adminAiRoutes);
 app.use("/api/admin/reports", reportRoutes);
-app.use("/api/ai", aiRoutes);
+app.use("/api/ai", adminAiLimiter, aiRoutes);
 
 // Alias direto de segurança para a foto da loja do afiliado.
 // Mantém a rota funcionando mesmo se o roteador do portal não for recarregado em ambiente local.
