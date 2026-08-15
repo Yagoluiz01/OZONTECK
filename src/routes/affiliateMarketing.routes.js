@@ -75,7 +75,7 @@ async function supabaseRequest(path, options = {}) {
  * - mensagens
  * - treinamentos
  */
-router.get('/', async (req, res) => {
+router.get('/', requireAffiliateAuth, async (req, res) => {
   try {
     const [assets, messages, trainings] = await Promise.all([
       supabaseRequest(
@@ -108,7 +108,7 @@ router.get('/', async (req, res) => {
  *
  * Retorna o kit de divulgação de um produto específico.
  */
-router.get('/product/:productId', async (req, res) => {
+router.get('/product/:productId', requireAffiliateAuth, async (req, res) => {
   try {
     const { productId } = req.params;
 
