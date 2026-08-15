@@ -4,6 +4,7 @@ import { runAgent } from "../services/AI/agent/index.js";
 import { applyAiSecurityLayer } from "../services/AI/security/aiSecurityLayer.js";
 import { enforceTenantGuard } from "../services/AI/security/aiTenantGuard.js";
 import { runOrchestrator } from "../services/AI/orchestrator/index.js";
+import { improveProductDescription as improveDescription } from "../services/AI/products/productDescription.js";
 
 
 
@@ -194,7 +195,7 @@ export async function aiChat(req, res) {
     const orchestratorResult = await runOrchestrator({
       message: userMessage,
       contexts,
-      user: req.admin || req.body?.user || null,
+      user: req.admin,
       history,
       confirmed: Boolean(req.body?.confirmed),
       actionDetails: req.body?.actionDetails || null,
@@ -210,6 +211,42 @@ export async function aiChat(req, res) {
     return res.status(500).json({
       success: false,
       message: "Erro interno ao processar a mensagem.",
+    });
+  }
+}
+
+export async function improveProductDescription(req, res) {
+  try {
+    if (!env.deepseekApiKey) {
+      return res.status(503).json({
+        success: false,
+        message: "Assistente de IA não configurado.",
+      });
+    }
+
+    const result = await improveDescription({
+      name: req.body?.name,
+      description: req.body?.description,
+    });
+
+    return res.status(200).json({
+      success: true,
+      description: result.description,
+      used_fallback: result.usedFallback,
+    });
+  } catch (error) {
+    const statusCode = Number(error?.statusCode);
+    if (statusCode === 400) {
+      return res.status(400).json({
+        success: false,
+        message: error.message,
+      });
+    }
+
+    console.error("[ADMIN_AI_PRODUCT_DESCRIPTION_ERROR]", error);
+    return res.status(statusCode === 502 ? 502 : 500).json({
+      success: false,
+      message: "Não foi possível melhorar a descrição neste momento.",
     });
   }
 }

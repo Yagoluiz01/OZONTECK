@@ -1,9 +1,10 @@
 export const modulePermissions = {
   products: "products.view",
 
-  // Write operations (create/update/delete) for products.
-  // Default remain deny unless granted to the admin.
-  products_manage: "products.manage",
+  // As permissões precisam corresponder às chaves reais do catálogo RBAC.
+  products_create: "products.create",
+  products_edit: "products.edit",
+  products_delete: "products.delete",
 
   financial: "financial.view",
 

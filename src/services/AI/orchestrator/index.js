@@ -70,14 +70,21 @@ function detectWriteIntent(message) {
 
 // Extrai parâmetros da mensagem usando a LLM
 async function extractActionParameters({ message, intent, history, systemPrompt }) {
+  const isProductDraft = intent.entity === "product" && intent.operation === "create";
   const extractionPrompt = `Você é um extrator de parâmetros. Extraia os parâmetros da mensagem do usuário para a operação "${intent.operation}" de "${intent.entity}".
 
 Mensagem: "${message}"
 
 Responda APENAS com um JSON válido contendo os parâmetros extraídos. Não inclua texto adicional.
 
+${isProductDraft ? `Para criar produto, transforme as informações fornecidas em um rascunho comercial:
+- extraia somente o nome comercial informado pelo usuário;
+- não acrescente gênero, família olfativa, notas, volume, concentração, marca ou ocasião ao nome;
+- não gere descrição, categoria, preço, estoque, imagens ou status; esses campos são tratados pelo servidor ou preenchidos manualmente;
+- se a mensagem não descreve minimamente o produto, retorne missing=true.` : ""}
+
 Exemplos:
-- Para criar produto: {"name": "Perfume X", "price": 99.90, "stock": 10}
+- Para criar produto: {"name": "Donzela"}
 - Para atualizar produto: {"id": "123", "price": 89.90}
 - Para criar afiliado: {"name": "João", "email": "joao@email.com", "phone": "11999999999"}
 - Para atualizar status pedido: {"id": "123", "status": "shipped"}
@@ -237,7 +244,7 @@ export async function runOrchestrator({
           args: {
             permissions,
             reqMeta: { requestId: executionId },
-            actor: user?.id || "ai_user",
+            actor: user || {},
             authToken,
             operation: {
               type: writeIntent.operation,
@@ -268,16 +275,45 @@ export async function runOrchestrator({
           update_status: "status atualizado",
         }[writeIntent.operation] || writeIntent.operation;
 
+        const executedResult = toolResult?.[writeIntent.tool] || null;
+        const createdProduct =
+          writeIntent.entity === "product" && writeIntent.operation === "create"
+            ? executedResult?.product || null
+            : null;
+        const responseActions = createdProduct?.id
+          ? [{
+              type: "open_product_editor",
+              label: "Abrir produto",
+              productId: String(createdProduct.id),
+              module: "products",
+              mode: "edit",
+            }]
+          : [];
+
         return formatResponse({
           success: true,
-          reply: `✅ ${entityLabel.charAt(0).toUpperCase() + entityLabel.slice(1)} ${opLabel} com sucesso!\n\nDetalhes: ${JSON.stringify(toolResult, null, 2).slice(0, 500)}`,
-          data: { writeIntent, toolResult },
-          actions: [toolResult],
+          reply: createdProduct
+            ? `✅ Produto criado como rascunho com sucesso. Use “Abrir produto” para completar preço, estoque, imagens e publicação.`
+            : `✅ ${entityLabel.charAt(0).toUpperCase() + entityLabel.slice(1)} ${opLabel} com sucesso!`,
+          data: {
+            writeIntent,
+            toolResult,
+            ...(createdProduct ? { product: createdProduct } : {}),
+          },
+          actions: responseActions,
           metadata: {
             generatedAt: nowIso(),
             orchestrator: "v2_1",
             executionId,
             action_executed: true,
+            ...(createdProduct?.id
+              ? {
+                  ui_action: {
+                    type: "open_product_editor",
+                    productId: String(createdProduct.id),
+                  },
+                }
+              : {}),
             steps,
           },
         });

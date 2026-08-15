@@ -130,10 +130,13 @@ export async function runAgent({
         metadata: { tool: "report.generate" },
       };
     } else if (wantsProducts) {
-      // Hard-deny: operações de escrita em produtos (create/update/delete) só
-      // são permitidas com permissão explícita products.manage.
-      const managePerm = modulePermissions.products_manage || "products.manage";
-      const hasManagePermission = permissions.includes(managePerm) || permissions.includes("admin");
+      // Este fluxo legado só prepara criação. A execução final também revalida
+      // products.create dentro da tool de escrita.
+      const createPermission = modulePermissions.products_create || "products.create";
+      const hasManagePermission =
+        permissions.includes(createPermission) ||
+        permissions.includes("*") ||
+        permissions.includes("admin");
 
       if (!hasManagePermission) {
         audit.ok = false;
@@ -141,7 +144,7 @@ export async function runAgent({
           name: "products.write",
           status: "blocked",
           reason: "missing_permission",
-          required: managePerm,
+          required: createPermission,
         });
 
         return {
@@ -244,4 +247,3 @@ export async function runAgent({
     };
   }
 }
-

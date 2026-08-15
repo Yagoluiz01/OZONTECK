@@ -1,5 +1,7 @@
 import { env } from "../../../config/env.js";
+import { supabaseAdmin } from "../../../config/supabase.js";
 import { recordAuditLog } from "../../audit.service.js";
+import { buildAiProductDraftPayload } from "../products/productDraft.js";
 
 
 function scrub(value) {
@@ -16,11 +18,47 @@ function toMoney(v, fallback = 0) {
   return Number.isFinite(n) ? Number(n.toFixed(2)) : fallback;
 }
 
-function requireManagePermission({ permissions = [] } = {}) {
-  const manage = "products.manage";
-  const isAdmin = permissions.includes("admin");
-  const ok = isAdmin || permissions.includes(manage);
-  return { ok, required: manage, isAdmin };
+const PRODUCT_WRITE_PERMISSIONS = Object.freeze({
+  create: "products.create",
+  update: "products.edit",
+  delete: "products.delete",
+});
+
+function requireProductWritePermission({ permissions = [], operationType } = {}) {
+  const required = PRODUCT_WRITE_PERMISSIONS[operationType];
+  const granted = new Set(Array.isArray(permissions) ? permissions : []);
+  const isMaster = granted.has("*") || granted.has("admin");
+  return { ok: Boolean(required) && (isMaster || granted.has(required)), required, isMaster };
+}
+
+async function createProductDraft(payload) {
+  const draft = buildAiProductDraftPayload(payload);
+  const { data, error } = await supabaseAdmin
+    .from("products")
+    .insert(draft)
+    .select("*")
+    .single();
+
+  if (error) {
+    console.error("[AI_PRODUCT_DRAFT_CREATE_ERROR]", {
+      code: error.code || null,
+      message: error.message || String(error),
+    });
+
+    const createError = new Error(
+      error.code === "23505"
+        ? "Não foi possível gerar um SKU exclusivo. Tente confirmar novamente."
+        : "Não foi possível criar o rascunho do produto."
+    );
+    createError.statusCode = error.code === "23505" ? 409 : 500;
+    throw createError;
+  }
+
+  return {
+    success: true,
+    message: "Rascunho do produto criado com sucesso.",
+    product: data,
+  };
 }
 
 async function recordWriteAuditSafely({
@@ -120,14 +158,6 @@ async function productsWriteTool({
   actor,
   operation,
 } = {}) {
-  const perm = requireManagePermission({ permissions });
-  if (!perm.ok) {
-    const err = new Error("products.write blocked: missing products.manage");
-    err.statusCode = 403;
-    err.required = perm.required;
-    throw err;
-  }
-
   if (!operation || !isAllowedCrud(operation)) {
     const err = new Error("Invalid products write operation");
     err.statusCode = 400;
@@ -135,37 +165,31 @@ async function productsWriteTool({
   }
 
   const opType = operation.type;
+  const perm = requireProductWritePermission({ permissions, operationType: opType });
+  if (!perm.ok) {
+    const err = new Error(`products.write blocked: missing ${perm.required || "permission"}`);
+    err.statusCode = 403;
+    err.required = perm.required;
+    throw err;
+  }
+
   const payload = operation.payload || {};
 
   if (opType === "create") {
-    // payload deve ser compatível com validateProductPayload (sem ids)
-    const res = await callBackendRoute({
-      method: "POST",
-      path: "/api/products",
-      headers: {
-        "Content-Type": "application/json",
-        // auth é realizado pelo requireAuth; aqui não temos token admin
-        // então o modo seguro é exigir que quem chamou a tool já forneça token.
-        // Para manter consistência, esperamos operation.authToken.
-        Authorization: `Bearer ${operation.authToken || ""}`,
-      },
-      body: payload,
-    });
-
-    if (!res.ok) {
-      throw new Error(res.data?.message || "Erro ao criar produto");
-    }
+    // A IA cria somente um rascunho mínimo. Preço, estoque, imagens e publicação
+    // permanecem sob controle manual do administrador no editor de produtos.
+    const result = await createProductDraft(payload);
 
     await recordWriteAuditSafely({
       reqMeta,
       actor,
       action: "product_created",
-      entityId: res.data?.product?.id || null,
-      newValues: payload,
+      entityId: result.product?.id || null,
+      newValues: result.product,
       payload,
     });
 
-    return res.data;
+    return result;
   }
 
   if (opType === "update") {
@@ -236,4 +260,3 @@ async function productsWriteTool({
 export async function productsWriteToolWrapper(args) {
   return productsWriteTool(args);
 }
-

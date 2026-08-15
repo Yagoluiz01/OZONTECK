@@ -32,7 +32,9 @@ function getRequiredPermissionsForTool(toolName) {
   if (!toolName) return null;
 
   if (toolName === "products_write") {
-    return modulePermissions.products_manage || "products.manage";
+    // A tool aplica a permissão específica conforme a operação:
+    // products.create, products.edit ou products.delete.
+    return null;
   }
 
   // Reads: default view (quando existir)
@@ -129,4 +131,3 @@ export async function dispatchAction({
     });
   }
 }
-

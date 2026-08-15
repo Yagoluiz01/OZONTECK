@@ -8,6 +8,7 @@ import { env } from "../config/env.js";
 import { recordAuditLog } from "../services/audit.service.js";
 
 const router = express.Router();
+const PRODUCT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAX_PRODUCT_IMAGE_BYTES = 8 * 1024 * 1024;
 const ALLOWED_PRODUCT_IMAGE_MIME_TYPES = new Set([
   "image/jpeg",
@@ -210,7 +211,7 @@ function getUploadedFile(req, fieldName) {
 
 async function getProductById(productId) {
   const response = await fetch(
-    `${env.supabaseUrl}/rest/v1/products?select=*&id=eq.${productId}`,
+    `${env.supabaseUrl}/rest/v1/products?select=*&id=eq.${encodeURIComponent(String(productId || ""))}`,
     {
       method: "GET",
       headers: {
@@ -480,6 +481,43 @@ router.get("/", requireAuth, async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "Erro interno ao listar produtos",
+    });
+  }
+});
+
+router.get("/:id", requireAuth, async (req, res) => {
+  try {
+    const productId = String(req.params.id || "").trim().toLowerCase();
+
+    if (!PRODUCT_ID_PATTERN.test(productId)) {
+      return res.status(400).json({
+        success: false,
+        message: "ID do produto inválido",
+      });
+    }
+
+    const product = await getProductById(productId);
+
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        message: "Produto não encontrado",
+      });
+    }
+
+    res.set("Cache-Control", "no-store");
+    return res.status(200).json({
+      success: true,
+      product,
+    });
+  } catch (error) {
+    console.error("ERRO AO BUSCAR PRODUTO POR ID:", {
+      message: error?.message || String(error),
+    });
+
+    return res.status(500).json({
+      success: false,
+      message: "Erro interno ao buscar produto",
     });
   }
 });

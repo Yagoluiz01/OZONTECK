@@ -237,22 +237,23 @@ function buildSingleVolumeFromItems(items = []) {
 
   const height = Math.max(
     1,
-    items.reduce((sum, item) => {
-      return sum + Math.max(
+    items.reduce((max, item) => {
+      return Math.max(
+        max,
         1,
         toNumber(item?.height || item?.height_cm || item?.product?.heightCm, 1)
       );
-    }, 0)
+    }, 1)
   );
 
   const length = Math.max(
     1,
-    items.reduce((max, item) => {
-      return Math.max(
-        max,
+    items.reduce((sum, item) => {
+      return sum + Math.max(
+        1,
         toNumber(item?.length || item?.length_cm || item?.product?.lengthCm, 1)
-      );
-    }, 1)
+      ) * getItemQuantity(item);
+    }, 0)
   );
 
   const weight = Math.max(
@@ -261,7 +262,7 @@ function buildSingleVolumeFromItems(items = []) {
       return sum + Math.max(
         0.001,
         toNumber(item?.weight || item?.weight_kg || item?.product?.weightKg, 0.3)
-      );
+      ) * getItemQuantity(item);
     }, 0)
   );
 

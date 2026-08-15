@@ -51,3 +51,38 @@ export function requirePermission(permissionKey) {
     }
   };
 }
+
+export function requireAnyPermission(permissionKeys = []) {
+  const required = [...new Set(
+    permissionKeys.map((item) => String(item || "").trim()).filter(Boolean)
+  )];
+
+  return async function anyPermissionGuard(req, res, next) {
+    try {
+      if (!req.admin?.id) {
+        return res.status(401).json({
+          success: false,
+          message: "Administrador não autenticado.",
+        });
+      }
+
+      if (required.length === 0 || isMasterAdmin(req.admin)) {
+        return next();
+      }
+
+      for (const permission of required) {
+        if (await hasPermission(req.admin, permission)) {
+          return next();
+        }
+      }
+
+      return res.status(403).json({
+        success: false,
+        message: "Seu perfil não possui permissão para esta operação.",
+        required_permissions: required,
+      });
+    } catch (error) {
+      return next(error);
+    }
+  };
+}

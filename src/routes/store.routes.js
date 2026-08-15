@@ -44,6 +44,7 @@ import {
   sendCustomerOrderPushForTracking
 } from "../services/customerOrderPush.service.js";
 import { toPublicAffiliateApplication } from "../utils/publicAffiliateApplication.js";
+import { buildTrustedShippingQuoteSnapshot } from "../utils/shippingQuoteSnapshot.js";
 
 const router = express.Router();
 
@@ -3694,22 +3695,17 @@ async function validateSelectedShippingQuote({
   return {
     provider,
     quote: matchedQuote,
-    raw: result.raw || null
+    raw: result.raw || null,
+    package: result.package || buildShippingPackage(items)
   };
 }
 
-function buildShippingQuoteRawForOrder(selectedShipping = {}) {
-  const raw = selectedShipping?.raw || null;
-
-  return {
-    ...(raw && typeof raw === "object" ? raw : {}),
-    selected_service_code_front: String(selectedShipping?.serviceCode || "").trim(),
-    selected_service_name_front: String(selectedShipping?.serviceName || "").trim(),
-    selected_carrier_front: String(selectedShipping?.carrier || "").trim(),
-    selected_price_front: Number(selectedShipping?.price || 0) || 0,
-    selected_delivery_time_front:
-      Number(selectedShipping?.deliveryTime || 0) || 0
-  };
+function buildShippingQuoteRawForOrder(validatedShipping = {}) {
+  return buildTrustedShippingQuoteSnapshot({
+    provider: validatedShipping.provider,
+    quote: validatedShipping.quote,
+    fallbackPackage: validatedShipping.package
+  });
 }
 
 function normalizeShippingLabelStatusForSave(labelData = {}) {
@@ -4725,11 +4721,12 @@ router.post("/orders", async (req, res) => {
       shipping_neighborhood: String(customer.bairro || "").trim(),
       shipping_city: String(customer.cidade || "").trim(),
       shipping_state: String(customer.estado || "").trim(),
-      shipping_carrier: String(selectedShipping.carrier || "").trim(),
+      shipping_carrier: String(validatedShippingQuote.carrier || "").trim(),
       shipping_service_code: String(resolvedShippingServiceCode || "").trim(),
-      shipping_service_name: String(selectedShipping.serviceName || "").trim(),
-      shipping_delivery_time: Number(selectedShipping.deliveryTime || 0) || null,
-      shipping_quote_raw: buildShippingQuoteRawForOrder(selectedShipping),
+      shipping_service_name: String(validatedShippingQuote.serviceName || "").trim(),
+      shipping_delivery_time:
+        Number(validatedShippingQuote.deliveryTime || 0) || null,
+      shipping_quote_raw: buildShippingQuoteRawForOrder(validatedShipping),
       shipping_label_status: "pending",
       subtotal,
       shipping_amount: shippingAmount,
