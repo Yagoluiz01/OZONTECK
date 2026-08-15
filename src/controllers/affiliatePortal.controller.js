@@ -14,16 +14,16 @@ import {
   updateAffiliateProfile,
 } from "../services/affiliatePortal.service.js";
 import { syncAffiliateLevelAchievement } from "../services/affiliateCommunityAchievements.service.js";
+import { buildPublicApiError } from "../utils/publicApiError.js";
 
 function sendError(res, error) {
-  const statusCode = error.statusCode || 500;
+  const publicError = buildPublicApiError(error, {
+    fallbackMessage: "Erro interno no painel do afiliado.",
+  });
 
   console.error("AFFILIATE PORTAL ERROR:", error);
 
-  return res.status(statusCode).json({
-    success: false,
-    message: error.message || "Erro interno no painel do afiliado.",
-  });
+  return res.status(publicError.status).json(publicError.body);
 }
 
 export async function login(req, res) {

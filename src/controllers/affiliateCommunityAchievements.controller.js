@@ -2,15 +2,16 @@ import {
   congratulateAchievement,
   listAffiliateCommunityAchievements,
 } from "../services/affiliateCommunityAchievements.service.js";
+import { buildPublicApiError } from "../utils/publicApiError.js";
 
 function sendError(res, error) {
-  const status = Number(error?.statusCode || error?.status || 500);
-
-  return res.status(status >= 400 && status < 600 ? status : 500).json({
-    success: false,
-    message: error?.message || "Erro na comunidade de conquistas.",
-    details: process.env.NODE_ENV === "production" ? undefined : error?.details,
+  const publicError = buildPublicApiError(error, {
+    fallbackMessage: "Erro interno na comunidade de conquistas.",
   });
+
+  console.error("AFFILIATE ACHIEVEMENTS ERROR:", error);
+
+  return res.status(publicError.status).json(publicError.body);
 }
 
 export async function listAchievements(req, res) {

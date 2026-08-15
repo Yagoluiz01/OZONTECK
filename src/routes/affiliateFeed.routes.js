@@ -10,6 +10,7 @@ import {
   createAffiliateFeedStory,
   listAffiliateFeedStories,
 } from "../services/affiliateFeedStories.service.js";
+import { buildPublicApiError } from "../utils/publicApiError.js";
 
 const router = express.Router();
 
@@ -75,15 +76,13 @@ function rejectLargeStoryPayload(req, res, next) {
 }
 
 function sendError(res, error) {
-  const statusCode = error.statusCode || error.status || 500;
-  const safeMessage = statusCode >= 500 ? "Erro interno no feed dos afiliados." : error.message;
+  const publicError = buildPublicApiError(error, {
+    fallbackMessage: "Erro interno no feed dos afiliados.",
+  });
 
   console.error("AFFILIATE_FEED_ERROR:", error?.message || error);
 
-  return res.status(statusCode).json({
-    success: false,
-    message: safeMessage || "Erro interno no feed dos afiliados.",
-  });
+  return res.status(publicError.status).json(publicError.body);
 }
 
 router.use(requireAffiliateAuth);

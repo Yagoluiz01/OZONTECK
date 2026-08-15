@@ -121,6 +121,7 @@ async function supabaseRequest(endpoint, options = {}) {
     const error = new Error("Erro ao consultar dados do afiliado.");
     error.statusCode = response.status;
     error.details = details;
+    error.expose = false;
     throw error;
   }
 

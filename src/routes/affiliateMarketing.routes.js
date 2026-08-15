@@ -1,6 +1,7 @@
 import express from 'express';
 import { env } from '../config/env.js';
 import { requireAffiliateAuth } from '../middlewares/affiliateAuth.middleware.js';
+import { buildPublicApiError } from '../utils/publicApiError.js';
 
 const router = express.Router();
 
@@ -29,10 +30,9 @@ function getSupabaseHeaders() {
 }
 
 function normalizeError(error) {
-  return {
-    success: false,
-    message: error?.message || 'Erro interno no Kit de Divulgação.'
-  };
+  return buildPublicApiError(error, {
+    fallbackMessage: 'Erro interno no Kit de Divulgação.'
+  }).body;
 }
 
 async function supabaseRequest(path, options = {}) {

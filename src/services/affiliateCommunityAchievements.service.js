@@ -61,6 +61,7 @@ async function supabaseRequest(endpoint, options = {}) {
     const error = new Error(message);
     error.statusCode = response.status;
     error.details = data;
+    error.expose = false;
     throw error;
   }
 

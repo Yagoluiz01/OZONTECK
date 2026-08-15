@@ -109,6 +109,7 @@ async function supabaseRequest(path, options = {}) {
 
     const error = new Error(message);
     error.statusCode = response.status;
+    error.expose = false;
     throw error;
   }
 

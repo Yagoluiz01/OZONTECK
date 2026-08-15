@@ -4,6 +4,7 @@ import {
   removeAffiliatePushSubscription,
   sendPushToAffiliate,
 } from "../services/affiliatePush.service.js";
+import { buildPublicApiError } from "../utils/publicApiError.js";
 
 function ok(res, data = {}, message = "OK") {
   return res.status(200).json({
@@ -14,10 +15,14 @@ function ok(res, data = {}, message = "OK") {
 }
 
 function fail(res, error, status = 500) {
-  return res.status(status).json({
-    success: false,
-    message: error?.message || "Erro interno.",
+  const publicError = buildPublicApiError(error, {
+    defaultStatus: status,
+    fallbackMessage: "Erro interno nas notificações do afiliado.",
   });
+
+  console.error("AFFILIATE PUSH ERROR:", error);
+
+  return res.status(publicError.status).json(publicError.body);
 }
 
 export async function getPushConfig(req, res) {
@@ -50,7 +55,7 @@ export async function subscribeAffiliatePush(req, res) {
 
     return ok(res, { subscription: saved }, "Notificações ativadas com sucesso.");
   } catch (error) {
-    return fail(res, error, 400);
+    return fail(res, error);
   }
 }
 
@@ -69,7 +74,7 @@ export async function unsubscribeAffiliatePush(req, res) {
 
     return ok(res, {}, "Notificações desativadas com sucesso.");
   } catch (error) {
-    return fail(res, error, 400);
+    return fail(res, error);
   }
 }
 
@@ -84,6 +89,6 @@ export async function sendAffiliateTestPush(req, res) {
 
     return ok(res, { result }, "Notificação de teste enviada.");
   } catch (error) {
-    return fail(res, error, 400);
+    return fail(res, error);
   }
 }
