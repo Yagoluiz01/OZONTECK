@@ -43,6 +43,7 @@ import {
   sendCustomerOrderPushForPaymentApproved,
   sendCustomerOrderPushForTracking
 } from "../services/customerOrderPush.service.js";
+import { toPublicAffiliateApplication } from "../utils/publicAffiliateApplication.js";
 
 const router = express.Router();
 
@@ -6088,7 +6089,7 @@ router.post("/affiliates/apply", async (req, res) => {
         alreadyExists: true,
         message:
           "VocÃª jÃ¡ possui uma solicitaÃ§Ã£o de afiliado pendente. Aguarde a anÃ¡lise da equipe OZONTECK.",
-        application: result.application,
+        application: toPublicAffiliateApplication(result.application),
       });
     }
 
@@ -6097,7 +6098,7 @@ router.post("/affiliates/apply", async (req, res) => {
       alreadyExists: false,
       message:
         "SolicitaÃ§Ã£o enviada com sucesso. Nossa equipe vai analisar seu cadastro de afiliado.",
-      application: result.application,
+      application: toPublicAffiliateApplication(result.application),
     });
   } catch (error) {
     console.error("ERRO AO CRIAR SOLICITAÃ‡ÃƒO DE AFILIADO:", error);
@@ -6117,4 +6118,3 @@ router.get("/health", async (req, res) => {
 });
 
 export default router;
-
