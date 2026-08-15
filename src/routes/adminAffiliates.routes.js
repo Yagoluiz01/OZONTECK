@@ -1,6 +1,7 @@
 import express from "express";
 import multer from "multer";
 import { requireAdminAuth } from "../middlewares/auth.middleware.js";
+import { requirePermission } from "../middlewares/permission.middleware.js";
 import { requireMasterAdmin } from "../middlewares/masterAdmin.middleware.js";
 import {
   listAffiliates,
@@ -42,11 +43,34 @@ const upload = multer({
 
 router.use(requireAdminAuth);
 
+const SENSITIVE_RESPONSE_KEYS = new Set([
+  "password",
+  "password_hash",
+  "passwordHash",
+  "token_hash",
+]);
+
+function sanitizeResponseData(value) {
+  if (Array.isArray(value)) {
+    return value.map(sanitizeResponseData);
+  }
+
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => !SENSITIVE_RESPONSE_KEYS.has(key))
+      .map(([key, item]) => [key, sanitizeResponseData(item)])
+  );
+}
+
 function ok(res, data = {}, message = "OK") {
   return res.status(200).json({
     success: true,
     message,
-    ...data,
+    ...sanitizeResponseData(data),
   });
 }
 
@@ -96,7 +120,7 @@ function sanitizeAffiliatePayload(input = {}, { defaultCommission = false } = {}
 /**
  * SOLICITAÇÕES DE AFILIADOS
  */
-router.get("/applications", async (req, res) => {
+router.get("/applications", requirePermission("affiliates.view"), async (req, res) => {
   try {
     const applications = await listAffiliateApplications(req.query || {});
     return ok(res, { applications });
@@ -105,7 +129,7 @@ router.get("/applications", async (req, res) => {
   }
 });
 
-router.post("/applications/:id/approve", async (req, res) => {
+router.post("/applications/:id/approve", requireMasterAdmin, async (req, res) => {
   try {
     const result = await approveAffiliateApplication(
       req.params.id,
@@ -124,7 +148,7 @@ router.post("/applications/:id/approve", async (req, res) => {
   }
 });
 
-router.post("/applications/:id/reject", async (req, res) => {
+router.post("/applications/:id/reject", requireMasterAdmin, async (req, res) => {
   try {
     const application = await rejectAffiliateApplication(
       req.params.id,
@@ -144,7 +168,7 @@ router.post("/applications/:id/reject", async (req, res) => {
 /**
  * RESUMO DOS AFILIADOS
  */
-router.get("/summary", async (req, res) => {
+router.get("/summary", requirePermission("affiliates.view"), async (req, res) => {
   try {
     const affiliates = await listAffiliateSummary(req.query || {});
     return ok(res, { affiliates });
@@ -157,7 +181,7 @@ router.get("/summary", async (req, res) => {
 /**
  * PRODUTOS PRECIFICADOS PARA AFILIADOS
  */
-router.get("/commission-products", async (req, res) => {
+router.get("/commission-products", requirePermission("affiliates.view"), async (req, res) => {
   try {
     const products = await listAffiliateCommissionProducts(req.query || {});
     return ok(res, { products }, "Produtos com comissão carregados com sucesso.");
@@ -169,7 +193,7 @@ router.get("/commission-products", async (req, res) => {
 /**
  * LISTAR AFILIADOS
  */
-router.get("/", async (req, res) => {
+router.get("/", requirePermission("affiliates.view"), async (req, res) => {
   try {
     const affiliates = await listAffiliates(req.query || {});
     return ok(res, { affiliates });
@@ -196,7 +220,7 @@ router.patch("/bulk-commission", requireMasterAdmin, async (req, res) => {
 /**
  * REDE DE AFILIADOS
  */
-router.get("/network", async (req, res) => {
+router.get("/network", requirePermission("affiliates.view"), async (req, res) => {
   try {
     const [network, applications] = await Promise.all([
       listAffiliateNetwork(req.query || {}),
@@ -209,7 +233,7 @@ router.get("/network", async (req, res) => {
   }
 });
 
-router.get("/:id/network", async (req, res) => {
+router.get("/:id/network", requirePermission("affiliates.view"), async (req, res) => {
   try {
     const result = await getAffiliateNetwork(req.params.id);
     return ok(res, result);
@@ -221,7 +245,7 @@ router.get("/:id/network", async (req, res) => {
 /**
  * METAS, NÍVEIS E BÔNUS EVOLUTIVOS
  */
-router.get("/levels", async (req, res) => {
+router.get("/levels", requirePermission("affiliates.goals"), async (req, res) => {
   try {
     const levels = await listAffiliateLevels();
     return ok(res, { levels });
@@ -258,7 +282,7 @@ router.delete("/levels/:levelId", requireMasterAdmin, async (req, res) => {
   }
 });
 
-router.get("/goals/overview", async (req, res) => {
+router.get("/goals/overview", requirePermission("affiliates.goals"), async (req, res) => {
   try {
     const goals = await listAffiliateGoalOverview(req.query || {});
     return ok(res, { goals });
@@ -267,7 +291,7 @@ router.get("/goals/overview", async (req, res) => {
   }
 });
 
-router.get("/level-bonuses", async (req, res) => {
+router.get("/level-bonuses", requirePermission("affiliates.goals"), async (req, res) => {
   try {
     const bonuses = await listAffiliateBonusOverview(req.query || {});
     return ok(res, { bonuses });
@@ -293,7 +317,7 @@ router.patch("/level-bonuses/:bonusId/status", requireMasterAdmin, async (req, r
   }
 });
 
-router.post("/:id/process-level-progress", async (req, res) => {
+router.post("/:id/process-level-progress", requirePermission("affiliates.goals"), async (req, res) => {
   try {
     const result = await processAffiliateLevelProgress(req.params.id);
     return ok(res, { result }, result?.message || "Progresso processado.");
@@ -305,7 +329,7 @@ router.post("/:id/process-level-progress", async (req, res) => {
 /**
  * BUSCAR AFILIADO POR ID
  */
-router.get("/:id", async (req, res) => {
+router.get("/:id", requirePermission("affiliates.view"), async (req, res) => {
   try {
     const affiliate = await getAffiliateById(req.params.id);
 
@@ -322,7 +346,7 @@ router.get("/:id", async (req, res) => {
 /**
  * CRIAR AFILIADO
  */
-router.post("/", async (req, res) => {
+router.post("/", requireMasterAdmin, async (req, res) => {
   try {
     const affiliate = await createAffiliate(
       sanitizeAffiliatePayload(req.body || {}, { defaultCommission: true })
@@ -336,7 +360,7 @@ router.post("/", async (req, res) => {
 /**
  * ATUALIZAR AFILIADO
  */
-router.patch("/:id", async (req, res) => {
+router.patch("/:id", requireMasterAdmin, async (req, res) => {
   try {
     const affiliate = await updateAffiliate(
       req.params.id,
@@ -369,7 +393,7 @@ router.delete("/:id", requireMasterAdmin, async (req, res) => {
 /**
  * CONVERSÕES / COMISSÕES
  */
-router.get("/:id/conversions", async (req, res) => {
+router.get("/:id/conversions", requirePermission("affiliates.view"), async (req, res) => {
   try {
     const conversions = await listAffiliateConversions({
       affiliate_id: req.params.id,
@@ -385,7 +409,7 @@ router.get("/:id/conversions", async (req, res) => {
 /**
  * PAGAMENTOS
  */
-router.get("/:id/payouts", async (req, res) => {
+router.get("/:id/payouts", requirePermission("affiliates.view"), async (req, res) => {
   try {
     const payouts = await listAffiliatePayouts({
       affiliate_id: req.params.id,

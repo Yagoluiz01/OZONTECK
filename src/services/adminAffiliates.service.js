@@ -195,6 +195,31 @@ function cleanText(value) {
   return String(value || "").trim();
 }
 
+const SENSITIVE_AFFILIATE_RESPONSE_KEYS = new Set([
+  "password",
+  "password_hash",
+  "passwordHash",
+  "token_hash",
+]);
+
+function sanitizeAffiliateResponseRecord(record) {
+  if (!record || typeof record !== "object" || Array.isArray(record)) {
+    return record;
+  }
+
+  return Object.fromEntries(
+    Object.entries(record).filter(
+      ([key]) => !SENSITIVE_AFFILIATE_RESPONSE_KEYS.has(key)
+    )
+  );
+}
+
+function sanitizeAffiliateResponseRows(rows) {
+  return Array.isArray(rows)
+    ? rows.map(sanitizeAffiliateResponseRecord)
+    : [];
+}
+
 async function safeAffiliateNotification(label, callback) {
   try {
     return await callback();
@@ -723,13 +748,18 @@ async function uploadAffiliateReceipt(file, affiliateId) {
   };
 }
 
-function buildAffiliatePayload(input = {}, isUpdate = false) {
+function buildAffiliatePayload(
+  input = {},
+  isUpdate = false,
+  { allowPasswordHash = false } = {}
+) {
   const fullName = cleanText(input.full_name || input.fullName || input.name);
   const email = cleanText(input.email).toLowerCase();
   const phone = cleanText(input.phone || input.telefone);
   const refCode = normalizeCode(input.ref_code || input.refCode);
   const couponCode = normalizeCode(input.coupon_code || input.couponCode);
-  const status = cleanText(input.status || "active") || "active";
+  const hasStatus = Object.prototype.hasOwnProperty.call(input, "status");
+  const status = hasStatus ? cleanText(input.status) : "";
   const commissionRate = toNumber(
   input.commission_rate ?? input.commissionRate,
   10
@@ -742,7 +772,9 @@ const recruitmentCommissionRate = toNumber(
 
 const pixKey = cleanText(input.pix_key || input.pixKey);
   const notes = cleanText(input.notes);
-  const passwordHash = cleanText(input.password_hash || input.passwordHash);
+  const passwordHash = allowPasswordHash
+    ? cleanText(input.password_hash || input.passwordHash)
+    : "";
   const accessEnabled =
     input.access_enabled !== undefined
       ? Boolean(input.access_enabled)
@@ -772,9 +804,13 @@ const recruiterRefCode = normalizeCode(
   if (!isUpdate || phone) payload.phone = phone || null;
   if (!isUpdate || refCode) payload.ref_code = refCode;
   if (!isUpdate || couponCode) payload.coupon_code = couponCode || null;
-  if (!isUpdate || status) payload.status = status;
+  if (!isUpdate) {
+    payload.status = status || "active";
+  } else if (hasStatus) {
+    payload.status = status;
+  }
 
-  if (!isUpdate || passwordHash) {
+  if (allowPasswordHash && (!isUpdate || passwordHash)) {
     if (passwordHash) payload.password_hash = passwordHash;
   }
 
@@ -844,7 +880,7 @@ if (
   }
 
   if (
-    payload.status &&
+    payload.status !== undefined &&
     !["active", "inactive", "blocked"].includes(payload.status)
   ) {
     throw new Error("Status inválido. Use active, inactive ou blocked.");
@@ -1037,7 +1073,8 @@ export async function listAffiliates(filters = {}) {
     );
   }
 
-  return supabaseRequest(`/affiliates?${params.toString()}`);
+  const rows = await supabaseRequest(`/affiliates?${params.toString()}`);
+  return sanitizeAffiliateResponseRows(rows);
 }
 
 async function getAffiliateSpecialCommissionFlags(affiliateIds = []) {
@@ -1168,11 +1205,13 @@ export async function getAffiliateById(id) {
   params.set("limit", "1");
 
   const rows = await supabaseRequest(`/affiliates?${params.toString()}`);
-  return rows?.[0] || null;
+  return sanitizeAffiliateResponseRecord(rows?.[0] || null);
 }
 
-export async function createAffiliate(input = {}) {
-  const payload = buildAffiliatePayload(input, false);
+export async function createAffiliate(input = {}, options = {}) {
+  const payload = buildAffiliatePayload(input, false, {
+    allowPasswordHash: options.allowPasswordHash === true,
+  });
 
   const created = await supabaseRequest("/affiliates", {
     method: "POST",
@@ -1190,7 +1229,7 @@ export async function createAffiliate(input = {}) {
     );
   }
 
-  return affiliate;
+  return sanitizeAffiliateResponseRecord(affiliate);
 }
 
 export async function updateAffiliate(id, input = {}) {
@@ -1214,7 +1253,7 @@ export async function updateAffiliate(id, input = {}) {
     body: JSON.stringify(payload),
   });
 
-  return updated?.[0] || null;
+  return sanitizeAffiliateResponseRecord(updated?.[0] || null);
 }
 
 export async function listAffiliateConversions(filters = {}) {
@@ -1366,7 +1405,10 @@ export async function listAffiliateApplications(filters = {}) {
     );
   }
 
-  return supabaseRequest(`/affiliate_applications?${params.toString()}`);
+  const rows = await supabaseRequest(
+    `/affiliate_applications?${params.toString()}`
+  );
+  return sanitizeAffiliateResponseRows(rows);
 }
 
 export async function getAffiliateApplicationById(id) {
@@ -1455,10 +1497,13 @@ export async function approveAffiliateApplication(id, input = {}) {
     ),
   };
 
-  const affiliate = await createAffiliate({
-    ...affiliatePayload,
-    skipAffiliateCreatedNotification: true,
-  });
+  const affiliate = await createAffiliate(
+    {
+      ...affiliatePayload,
+      skipAffiliateCreatedNotification: true,
+    },
+    { allowPasswordHash: true }
+  );
 
   if (!affiliate?.id) {
     throw new Error("Não foi possível criar o afiliado aprovado.");
@@ -1495,7 +1540,9 @@ export async function approveAffiliateApplication(id, input = {}) {
   }, 0);
 
   return {
-    application: updatedApplications?.[0] || null,
+    application: sanitizeAffiliateResponseRecord(
+      updatedApplications?.[0] || null
+    ),
     affiliate,
   };
 }
@@ -1531,7 +1578,9 @@ export async function rejectAffiliateApplication(id, input = {}) {
     }
   );
 
-  const rejectedApplication = updatedApplications?.[0] || null;
+  const rejectedApplication = sanitizeAffiliateResponseRecord(
+    updatedApplications?.[0] || null
+  );
 
   if (rejectedApplication) {
     await safeAffiliateNotification("affiliate_rejected", () =>
