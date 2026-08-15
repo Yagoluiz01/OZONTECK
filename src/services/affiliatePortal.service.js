@@ -636,16 +636,20 @@ function signAffiliateToken(affiliate) {
       type: "affiliate",
       affiliate_id: affiliate.id,
       email: affiliate.email,
+      auth_version: Number(affiliate.auth_token_version || 1),
     },
     getJwtSecret(),
     {
+      algorithm: "HS256",
       expiresIn: AFFILIATE_TOKEN_EXPIRES_IN,
     }
   );
 }
 
 export function verifyAffiliateToken(token) {
-  const decoded = jwt.verify(token, getJwtSecret());
+  const decoded = jwt.verify(token, getJwtSecret(), {
+    algorithms: ["HS256"],
+  });
 
   if (!decoded || decoded.type !== "affiliate" || !decoded.affiliate_id) {
     throw new Error("Token de afiliado inválido.");
@@ -665,7 +669,7 @@ export async function loginAffiliate({ email, password }) {
 
   const affiliate = await findAffiliateByEmail(
     normalizedEmail,
-    "id,full_name,email,phone,ref_code,coupon_code,status,commission_rate,password_hash,access_enabled,pix_key,pix_key_type,created_at"
+    "id,full_name,email,phone,ref_code,coupon_code,status,commission_rate,password_hash,access_enabled,pix_key,pix_key_type,auth_token_version,created_at"
   );
 
   if (!affiliate) {
@@ -726,11 +730,11 @@ if (!activeStatuses.includes(normalizedStatus)) {
   };
 }
 
-export async function getAffiliateById(affiliateId) {
+export async function getAffiliateSessionById(affiliateId) {
   const affiliates = await supabaseRequest(
     `/affiliates?id=eq.${encodeURIComponent(
       affiliateId
-    )}&select=id,full_name,email,phone,ref_code,coupon_code,status,commission_rate,access_enabled,pix_key,pix_key_type,created_at&limit=1`
+    )}&select=id,full_name,email,phone,ref_code,coupon_code,status,commission_rate,access_enabled,pix_key,pix_key_type,auth_token_version,created_at&limit=1`
   );
 
   const affiliate = Array.isArray(affiliates) ? affiliates[0] : null;
@@ -755,9 +759,16 @@ export async function getAffiliateById(affiliateId) {
     throw error;
   }
 
-  return buildAffiliatePayload(affiliate);
+  return {
+    affiliate: buildAffiliatePayload(affiliate),
+    authVersion: Number(affiliate.auth_token_version || 1),
+  };
 }
 
+export async function getAffiliateById(affiliateId) {
+  const session = await getAffiliateSessionById(affiliateId);
+  return session.affiliate;
+}
 
 function isActiveRewardClaim(claim = {}) {
   const status = normalizeStatus(claim?.status);

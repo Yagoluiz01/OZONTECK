@@ -1,5 +1,5 @@
 import {
-  getAffiliateById,
+  getAffiliateSessionById,
   verifyAffiliateToken,
 } from "../services/affiliatePortal.service.js";
 
@@ -25,10 +25,20 @@ export async function requireAffiliateAuth(req, res, next) {
     }
 
     const decoded = verifyAffiliateToken(token);
-    const affiliate = await getAffiliateById(decoded.affiliate_id);
+    const session = await getAffiliateSessionById(decoded.affiliate_id);
+    const tokenAuthVersion = Number(decoded.auth_version);
 
-    req.affiliate = affiliate;
-    req.affiliateId = affiliate.id;
+    if (
+      !Number.isInteger(tokenAuthVersion) ||
+      tokenAuthVersion !== session.authVersion
+    ) {
+      const error = new Error("Sessão do afiliado revogada.");
+      error.statusCode = 401;
+      throw error;
+    }
+
+    req.affiliate = session.affiliate;
+    req.affiliateId = session.affiliate.id;
 
     return next();
   } catch (error) {

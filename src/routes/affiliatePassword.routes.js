@@ -20,7 +20,13 @@ function hashToken(token) {
 }
 
 function isStrongPassword(password) {
-  return typeof password === "string" && password.trim().length >= 6;
+  return (
+    typeof password === "string" &&
+    password.length >= 8 &&
+    /[A-Z]/.test(password) &&
+    /[a-z]/.test(password) &&
+    /[0-9]/.test(password)
+  );
 }
 
 function getStoreBaseUrl() {
@@ -254,7 +260,7 @@ router.post("/forgot-password", async (req, res) => {
 router.post("/reset-password", async (req, res) => {
   try {
     const token = String(req.body?.token || "").trim();
-    const newPassword = String(req.body?.password || "").trim();
+    const newPassword = String(req.body?.password || "");
 
     if (!token) {
       return res.status(400).json({
@@ -266,70 +272,47 @@ router.post("/reset-password", async (req, res) => {
     if (!isStrongPassword(newPassword)) {
       return res.status(400).json({
         success: false,
-        message: "A nova senha precisa ter pelo menos 6 caracteres.",
+        message:
+          "A nova senha precisa ter pelo menos 8 caracteres, com letra maiúscula, letra minúscula e número.",
       });
     }
 
     const tokenHash = hashToken(token);
-
-    const { data: resetRow, error: resetError } = await supabaseAdmin
-      .from("affiliate_password_resets")
-      .select("id, affiliate_id, expires_at, used_at")
-      .eq("token_hash", tokenHash)
-      .maybeSingle();
-
-    if (resetError) {
-      console.error("RESET PASSWORD TOKEN QUERY ERROR:", resetError);
-
-      return res.status(500).json({
-        success: false,
-        message: "Erro ao validar token.",
-      });
-    }
-
-    if (!resetRow || resetRow.used_at) {
-      return res.status(400).json({
-        success: false,
-        message: "Link inválido ou já utilizado.",
-      });
-    }
-
-    if (new Date(resetRow.expires_at).getTime() < Date.now()) {
-      return res.status(400).json({
-        success: false,
-        message: "Link expirado. Solicite uma nova redefinição de senha.",
-      });
-    }
-
     const passwordHash = await bcrypt.hash(newPassword, 12);
 
-    const { error: updateError } = await supabaseAdmin
-      .from("affiliates")
-      .update({
-        password_hash: passwordHash,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", resetRow.affiliate_id);
+    const { data, error: resetError } = await supabaseAdmin.rpc(
+      "reset_affiliate_password_atomic",
+      {
+        p_token_hash: tokenHash,
+        p_password_hash: passwordHash,
+      }
+    );
 
-    if (updateError) {
-      console.error("RESET PASSWORD AFFILIATE UPDATE ERROR:", updateError);
+    if (resetError) {
+      console.error("RESET PASSWORD ATOMIC RPC ERROR:", {
+        code: resetError.code,
+        message: resetError.message,
+      });
 
       return res.status(500).json({
         success: false,
-        message: "Erro ao atualizar senha.",
+        message: "Erro ao redefinir senha.",
       });
     }
 
-    await supabaseAdmin
-      .from("affiliate_password_resets")
-      .update({
-        used_at: new Date().toISOString(),
-      })
-      .eq("id", resetRow.id);
+    const result = Array.isArray(data) ? data[0] || null : data;
+
+    if (!result?.affiliate_id) {
+      return res.status(400).json({
+        success: false,
+        message: "Link inválido, expirado ou já utilizado.",
+      });
+    }
 
     return res.json({
       success: true,
-      message: "Senha redefinida com sucesso. Você já pode acessar o painel.",
+      message:
+        "Senha redefinida com sucesso. As sessões anteriores foram encerradas.",
     });
   } catch (error) {
     console.error("RESET PASSWORD ERROR:", error);
