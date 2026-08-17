@@ -8,6 +8,7 @@ import {
 } from "../intelligence/intent.engine.js";
 import { buildLeadScore } from "../intelligence/leadScore.engine.js";
 import { notifyRecoveryReadyLeads } from "../services/leadRecoveryNotification.service.js";
+import { recordLeadTrackingEvent, recordLeadTrackingEventsBatch } from "../services/tracking.service.js";
 
 import { requireAdminAuth } from "../middlewares/auth.middleware.js";
 import { requireMasterAdmin } from "../middlewares/masterAdmin.middleware.js";
@@ -521,6 +522,63 @@ router.post("/checkout-contact", publicTrackingLimiter, async (req, res) => {
   }
 });
 
+router.post("/events/batch", publicTrackingLimiter, async (req, res) => {
+  try {
+    const rawEvents = Array.isArray(req.body?.events) ? req.body.events : [];
+
+    if (!rawEvents.length || rawEvents.length > 25) {
+      return res.status(400).json({
+        success: false,
+        message: "events deve conter entre 1 e 25 eventos.",
+      });
+    }
+
+    const payloads = [];
+    for (const rawEvent of rawEvents) {
+      const sessionId = normalizeText(rawEvent?.session_id);
+      const eventType = normalizeText(rawEvent?.event_type);
+      if (!sessionId || !eventType) continue;
+
+      payloads.push({
+        session_id: sessionId,
+        visitor_id: normalizeText(rawEvent?.visitor_id),
+        event_type: eventType,
+        page: normalizeText(rawEvent?.page),
+        section: normalizeText(rawEvent?.section),
+        duration_ms: Math.max(
+          0,
+          Math.min(Number(rawEvent?.duration_ms) || 0, 24 * 60 * 60 * 1000)
+        ),
+      });
+    }
+
+    if (!payloads.length) {
+      return res.status(400).json({ success: false, message: "Nenhum evento válido." });
+    }
+
+    const result = await recordLeadTrackingEventsBatch(payloads);
+    if (!result.ok) {
+      console.error("TRACKING BATCH ERROR:", result.error);
+      return res.status(500).json({
+        success: false,
+        message: "Erro ao registrar lote de eventos.",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      recorded: result.count,
+      mode: result.mode,
+    });
+  } catch (error) {
+    console.error("TRACKING BATCH INTERNAL ERROR:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Erro interno ao registrar lote de eventos.",
+    });
+  }
+});
+
 router.post("/event", publicTrackingLimiter, async (req, res) => {
   try {
     const {
@@ -545,20 +603,6 @@ router.post("/event", publicTrackingLimiter, async (req, res) => {
       });
     }
 
-    const ensuredSession = await ensureSessionExists({
-      sessionId,
-      visitorId,
-      page: normalizedPage,
-      section: normalizedSection,
-    });
-
-    if (!ensuredSession.ok) {
-      return res.status(500).json({
-        success: false,
-        message: "Erro ao garantir sessão de tracking",
-      });
-    }
-
     const payload = {
       session_id: sessionId,
       visitor_id: visitorId,
@@ -568,13 +612,15 @@ router.post("/event", publicTrackingLimiter, async (req, res) => {
       duration_ms: Math.max(0, Math.min(Number(duration_ms) || 0, 24 * 60 * 60 * 1000)),
     };
 
-    const { error } = await supabaseAdmin.from("lead_events").insert([payload]);
+    const trackingResult = await recordLeadTrackingEvent(payload);
 
-    if (error) {
-      console.error("TRACKING EVENT ERROR:", error);
+    if (!trackingResult.ok) {
+      console.error("TRACKING EVENT ERROR:", trackingResult.error);
       return res.status(500).json({
         success: false,
-        message: "Erro ao registrar evento de navegação.",
+        message: trackingResult.stage === "session"
+          ? "Erro ao garantir sessão de tracking"
+          : "Erro ao registrar evento de navegação.",
       });
     }
 

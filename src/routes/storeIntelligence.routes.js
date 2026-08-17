@@ -30,9 +30,25 @@ const intentLimiter = rateLimit({
 const CATALOG_CACHE_TTL_MS = 90 * 1000;
 const PERFORMANCE_CACHE_TTL_MS = 3 * 60 * 1000;
 const PERFORMANCE_WINDOW_DAYS = 14;
+const SESSION_CACHE_TTL_MS = 2 * 60 * 1000;
+const PROFILE_CACHE_TTL_MS = 45 * 1000;
+const MAX_VISITOR_CACHE_ENTRIES = 5000;
 
 let catalogCache = { expiresAt: 0, rows: [] };
 let performanceCache = { expiresAt: 0, data: new Map(), eventsSampled: 0 };
+let catalogLoadPromise = null;
+let performanceLoadPromise = null;
+const sessionValidationCache = new Map();
+const intentProfileCache = new Map();
+const intentProfileInflight = new Map();
+
+function setBoundedCache(map, key, value) {
+  if (map.size >= MAX_VISITOR_CACHE_ENTRIES) {
+    const firstKey = map.keys().next().value;
+    if (firstKey !== undefined) map.delete(firstKey);
+  }
+  map.set(key, value);
+}
 
 function normalizeId(value, maxLength = 180) {
   const text = String(value || "").trim();
@@ -47,6 +63,10 @@ function clampInt(value, min, max, fallback) {
 }
 
 async function validateVisitorSession(visitorId, sessionId) {
+  const key = `${visitorId}|${sessionId}`;
+  const cached = sessionValidationCache.get(key);
+  if (cached && cached.expiresAt > Date.now()) return cached.valid;
+
   const { data: sessionRow, error: sessionError } = await supabaseAdmin
     .from("lead_sessions")
     .select("id")
@@ -55,7 +75,12 @@ async function validateVisitorSession(visitorId, sessionId) {
     .maybeSingle();
 
   if (sessionError) throw sessionError;
-  return Boolean(sessionRow?.id);
+  const valid = Boolean(sessionRow?.id);
+  setBoundedCache(sessionValidationCache, key, {
+    valid,
+    expiresAt: Date.now() + SESSION_CACHE_TTL_MS,
+  });
+  return valid;
 }
 
 function getIntentDateFrom() {
@@ -68,69 +93,107 @@ function getIntentDateFrom() {
 }
 
 async function loadIntentProfile(visitorId, sessionId) {
-  const { learningStartAt, dateFrom } = getIntentDateFrom();
-  const { data, error } = await supabaseAdmin
-    .from("lead_events")
-    .select("session_id,visitor_id,event_type,page,section,created_at")
-    .eq("visitor_id", visitorId)
-    .in("event_type", INTENT_SIGNAL_EVENT_TYPES)
-    .gte("created_at", dateFrom)
-    .order("created_at", { ascending: true })
-    .limit(1500);
+  const cacheKey = `${visitorId}|${sessionId}`;
+  const cached = intentProfileCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.profile;
+  if (intentProfileInflight.has(cacheKey)) return intentProfileInflight.get(cacheKey);
 
-  if (error) throw error;
+  const loader = (async () => {
+    const { learningStartAt, dateFrom } = getIntentDateFrom();
+    const { data, error } = await supabaseAdmin
+      .from("lead_events")
+      .select("session_id,visitor_id,event_type,page,section,created_at")
+      .eq("visitor_id", visitorId)
+      .in("event_type", INTENT_SIGNAL_EVENT_TYPES)
+      .gte("created_at", dateFrom)
+      .order("created_at", { ascending: true })
+      .limit(1000);
 
-  return buildIntentProfile(data || [], {
-    currentSessionId: sessionId,
-    learningStartAt,
-  });
+    if (error) throw error;
+
+    const profile = buildIntentProfile(data || [], {
+      currentSessionId: sessionId,
+      learningStartAt,
+    });
+    setBoundedCache(intentProfileCache, cacheKey, {
+      profile,
+      expiresAt: Date.now() + PROFILE_CACHE_TTL_MS,
+    });
+    return profile;
+  })();
+
+  intentProfileInflight.set(cacheKey, loader);
+  try {
+    return await loader;
+  } finally {
+    intentProfileInflight.delete(cacheKey);
+  }
 }
 
 async function loadRecommendationCatalog() {
   const now = Date.now();
-  if (catalogCache.rows.length && catalogCache.expiresAt > now) {
-    return catalogCache.rows;
+  if (catalogCache.rows.length && catalogCache.expiresAt > now) return catalogCache.rows;
+  if (catalogLoadPromise) return catalogLoadPromise;
+
+  catalogLoadPromise = (async () => {
+    const { data, error } = await supabaseAdmin
+      .from("products")
+      .select([
+        "id", "name", "sku", "category", "category_id", "price", "sale_price",
+        "compare_at_price", "stock_quantity", "status", "show_on_home", "home_order",
+        "created_at", "updated_at", "video_url", "image_url", "image_url_2",
+        "image_thumb_url", "image_card_url", "image_detail_url", "variant_group",
+        "variant_type", "variant_label", "variant_order", "real_margin_percent"
+      ].join(","))
+      .limit(500);
+
+    if (error) throw error;
+    const rows = Array.isArray(data) ? data : [];
+    catalogCache = { rows, expiresAt: Date.now() + CATALOG_CACHE_TTL_MS };
+    return rows;
+  })();
+
+  try {
+    return await catalogLoadPromise;
+  } finally {
+    catalogLoadPromise = null;
   }
-
-  const { data, error } = await supabaseAdmin
-    .from("products")
-    .select("*")
-    .limit(500);
-
-  if (error) throw error;
-
-  catalogCache = {
-    rows: Array.isArray(data) ? data : [],
-    expiresAt: now + CATALOG_CACHE_TTL_MS,
-  };
-  return catalogCache.rows;
 }
 
 async function loadProductPerformance(catalogRows) {
   const now = Date.now();
   if (performanceCache.expiresAt > now) return performanceCache;
+  if (performanceLoadPromise) return performanceLoadPromise;
 
-  const { learningStartAt } = getIntentDateFrom();
-  const rollingStart = Date.now() - PERFORMANCE_WINDOW_DAYS * 24 * 60 * 60 * 1000;
-  const dateFrom = new Date(Math.max(rollingStart, Date.parse(learningStartAt))).toISOString();
+  performanceLoadPromise = (async () => {
+    const { learningStartAt } = getIntentDateFrom();
+    const rollingStart = Date.now() - PERFORMANCE_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+    const dateFrom = new Date(Math.max(rollingStart, Date.parse(learningStartAt))).toISOString();
 
-  const { data, error } = await supabaseAdmin
-    .from("lead_events")
-    .select("session_id,visitor_id,event_type,section,created_at")
-    .in("event_type", RECOMMENDATION_PRODUCT_EVENT_TYPES)
-    .gte("created_at", dateFrom)
-    .order("created_at", { ascending: false })
-    .limit(5000);
+    const { data, error } = await supabaseAdmin
+      .from("lead_events")
+      .select("session_id,visitor_id,event_type,section,created_at")
+      .in("event_type", RECOMMENDATION_PRODUCT_EVENT_TYPES)
+      .gte("created_at", dateFrom)
+      .order("created_at", { ascending: false })
+      .limit(5000);
 
-  if (error) throw error;
+    if (error) throw error;
 
-  const events = Array.isArray(data) ? data : [];
-  performanceCache = {
-    data: buildProductPerformance(events, catalogRows),
-    eventsSampled: events.length,
-    expiresAt: now + PERFORMANCE_CACHE_TTL_MS,
-  };
-  return performanceCache;
+    const events = Array.isArray(data) ? data : [];
+    performanceCache = {
+      data: buildProductPerformance(events, catalogRows),
+      eventsSampled: events.length,
+      expiresAt: Date.now() + PERFORMANCE_CACHE_TTL_MS,
+    };
+    return performanceCache;
+  })();
+
+  try {
+    return await performanceLoadPromise;
+  } finally {
+    performanceLoadPromise = null;
+  }
 }
 
 router.post("/intent", intentLimiter, async (req, res) => {
