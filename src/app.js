@@ -6,6 +6,7 @@ import adminAffiliateMarketingRoutes from "./routes/adminAffiliateMarketing.rout
 import affiliateMarketingRoutes from './routes/affiliateMarketing.routes.js';
 import express from "express";
 import crypto from "crypto";
+import compression from "compression";
 import cors from "cors";
 import helmet from "helmet";
 import morgan from "morgan";
@@ -25,6 +26,11 @@ import {
   storePaymentWebhookLimiter,
   storeQuoteLimiter,
 } from "./middlewares/rate-limit.middleware.js";
+import {
+  isPublicCachedReadRequest,
+  publicStoreReadLimiter,
+} from "./middlewares/publicStoreReadLimiter.middleware.js";
+import { isAuthorizedLoadTestRequest } from "./middlewares/loadTestBypass.middleware.js";
 import adminNotificationsRoutes from "./routes/adminNotifications.routes.js";
 import adminAuditRoutes from "./routes/adminAudit.routes.js";
 import adminAccessRequestsRoutes from "./routes/adminAccessRequests.routes.js";
@@ -211,12 +217,20 @@ const globalLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   skip(req) {
-    return req.method === "OPTIONS";
+    return req.method === "OPTIONS" || isPublicCachedReadRequest(req) || isAuthorizedLoadTestRequest(req);
   },
   message: {
     success: false,
     message: "Muitas requisições. Tente novamente em alguns minutos.",
   },
+});
+
+app.use((req, res, next) => {
+  if (isPublicCachedReadRequest(req)) {
+    return publicStoreReadLimiter(req, res, next);
+  }
+
+  return next();
 });
 
 app.use(globalLimiter);
@@ -283,6 +297,10 @@ app.use(
 );
 
 app.use(morgan("dev"));
+
+// Compacta respostas JSON e texto maiores que 1 KB. O conteúdo recebido pelo
+// cliente continua igual, mas usa menos banda e termina de carregar mais rápido.
+app.use(compression({ threshold: 1024 }));
 
 // O webhook precisa do corpo bruto para validar a assinatura HMAC.
 // O parser fica isolado para não elevar o limite de todas as demais rotas.

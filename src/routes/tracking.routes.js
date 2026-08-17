@@ -1,5 +1,6 @@
 import express from "express";
 import rateLimit from "express-rate-limit";
+import { isAuthorizedLoadTestRequest } from "../middlewares/loadTestBypass.middleware.js";
 import { supabaseAdmin } from "../config/supabase.js";
 import {
   buildIntentProfile,
@@ -20,6 +21,9 @@ const publicTrackingLimiter = rateLimit({
   max: 240,
   standardHeaders: true,
   legacyHeaders: false,
+  skip(req) {
+    return req.method === "OPTIONS" || isAuthorizedLoadTestRequest(req);
+  },
   message: {
     success: false,
     message: "Muitos eventos de navegação. Tente novamente em alguns minutos.",

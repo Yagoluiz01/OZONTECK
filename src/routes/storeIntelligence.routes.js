@@ -1,5 +1,6 @@
 import express from "express";
 import rateLimit from "express-rate-limit";
+import { isAuthorizedLoadTestRequest } from "../middlewares/loadTestBypass.middleware.js";
 import { supabaseAdmin } from "../config/supabase.js";
 import { calculateProductScore } from "../services/productRanking.service.js";
 import {
@@ -21,6 +22,9 @@ const intentLimiter = rateLimit({
   max: 120,
   standardHeaders: true,
   legacyHeaders: false,
+  skip(req) {
+    return req.method === "OPTIONS" || isAuthorizedLoadTestRequest(req);
+  },
   message: {
     success: false,
     message: "Muitas consultas de inteligência. Tente novamente em alguns minutos.",
