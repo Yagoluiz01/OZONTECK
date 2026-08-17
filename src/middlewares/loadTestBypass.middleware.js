@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 
 const TOKEN_PREFIX = "OZLoadTest/";
+const LANGUAGE_TOKEN_PREFIX = "ozlt=";
 const DEFAULT_TOKEN_TTL_MS = 15 * 60 * 1000;
 const MAX_TOKEN_TTL_MS = 30 * 60 * 1000;
 
@@ -24,12 +25,8 @@ function expectedSignature(secret, timestamp, nonce) {
     .digest("hex");
 }
 
-function readSignedAgentToken(req = {}) {
-  const userAgent = String(req.get?.("user-agent") || req.headers?.["user-agent"] || "");
-  const markerIndex = userAgent.indexOf(TOKEN_PREFIX);
-  if (markerIndex < 0) return null;
-
-  const raw = userAgent.slice(markerIndex + TOKEN_PREFIX.length).split(/\s|;/, 1)[0];
+function parseSignedToken(rawToken) {
+  const raw = String(rawToken || "").trim();
   const [timestampRaw, nonce, signature] = raw.split(".");
   if (!timestampRaw || !nonce || !signature) return null;
 
@@ -41,17 +38,31 @@ function readSignedAgentToken(req = {}) {
   return { timestamp, nonce, signature };
 }
 
-// Desativado por padrão. O bypass só existe quando LOAD_TEST_KEY está definido.
-// Suporta o header legado para chamadas servidor-servidor e, para navegador,
-// um token HMAC curto embutido no User-Agent. Isso evita preflight CORS em cada fetch.
-export function isAuthorizedLoadTestRequest(req = {}) {
-  const secret = String(process.env.LOAD_TEST_KEY || "").trim();
-  if (!secret) return false;
+function readSignedLanguageToken(req = {}) {
+  const language = String(
+    req.get?.("accept-language") || req.headers?.["accept-language"] || ""
+  );
 
-  const receivedHeader = String(req.get?.("x-oz-load-test-key") || "").trim();
-  if (receivedHeader && safeEqual(receivedHeader, secret)) return true;
+  const markerIndex = language.toLowerCase().indexOf(LANGUAGE_TOKEN_PREFIX);
+  if (markerIndex < 0) return null;
 
-  const token = readSignedAgentToken(req);
+  const raw = language
+    .slice(markerIndex + LANGUAGE_TOKEN_PREFIX.length)
+    .split(/[\s,;]/, 1)[0];
+
+  return parseSignedToken(raw);
+}
+
+function readSignedAgentToken(req = {}) {
+  const userAgent = String(req.get?.("user-agent") || req.headers?.["user-agent"] || "");
+  const markerIndex = userAgent.indexOf(TOKEN_PREFIX);
+  if (markerIndex < 0) return null;
+
+  const raw = userAgent.slice(markerIndex + TOKEN_PREFIX.length).split(/\s|;/, 1)[0];
+  return parseSignedToken(raw);
+}
+
+function isValidSignedToken(secret, token) {
   if (!token) return false;
 
   const ageMs = Math.abs(Date.now() - token.timestamp);
@@ -59,4 +70,23 @@ export function isAuthorizedLoadTestRequest(req = {}) {
 
   const expected = expectedSignature(secret, token.timestamp, token.nonce);
   return safeEqual(token.signature, expected);
+}
+
+// Desativado por padrão. Só funciona quando LOAD_TEST_KEY está definido no Render.
+// Ordem de leitura:
+// 1) header legado x-oz-load-test-key (servidor-servidor);
+// 2) token HMAC em Accept-Language, usado apenas contra a API pelo runner;
+// 3) token antigo no User-Agent, mantido para compatibilidade.
+export function isAuthorizedLoadTestRequest(req = {}) {
+  const secret = String(process.env.LOAD_TEST_KEY || "").trim();
+  if (!secret) return false;
+
+  const receivedHeader = String(req.get?.("x-oz-load-test-key") || "").trim();
+  if (receivedHeader && safeEqual(receivedHeader, secret)) return true;
+
+  const languageToken = readSignedLanguageToken(req);
+  if (isValidSignedToken(secret, languageToken)) return true;
+
+  const agentToken = readSignedAgentToken(req);
+  return isValidSignedToken(secret, agentToken);
 }
