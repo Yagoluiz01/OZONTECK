@@ -3,6 +3,7 @@ import { requireAdminAuth } from "../middlewares/auth.middleware.js";
 import { requirePermission } from "../middlewares/permission.middleware.js";
 import {
   createAdminNotification,
+  deleteAllAdminNotifications,
   listAdminNotifications,
   markAdminNotificationAsRead,
   markAllAdminNotificationsAsRead,
@@ -37,6 +38,21 @@ router.post("/", async (req, res, next) => {
     const result = await createAdminNotification(req.body || {});
 
     return res.status(201).json(result);
+  } catch (error) {
+    return next(error);
+  }
+});
+
+
+router.delete("/all", requirePermission("notifications.edit"), async (req, res, next) => {
+  try {
+    const result = await deleteAllAdminNotifications();
+
+    return res.json({
+      success: true,
+      message: "Todas as notificações foram removidas.",
+      ...result,
+    });
   } catch (error) {
     return next(error);
   }

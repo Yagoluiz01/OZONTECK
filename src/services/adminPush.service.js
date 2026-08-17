@@ -155,7 +155,11 @@ function resolveNotificationUrl(notification = {}) {
     return "/customers";
   }
 
-  if (entityType === "product" || type.includes("product") || type.includes("stock")) {
+  if (type.includes("stock")) {
+    return "/stock";
+  }
+
+  if (entityType === "product" || type.includes("product")) {
     return "/products";
   }
 

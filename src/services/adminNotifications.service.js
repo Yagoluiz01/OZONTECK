@@ -134,3 +134,20 @@ export async function markAllAdminNotificationsAsRead() {
 
   return true;
 }
+
+export async function deleteAllAdminNotifications() {
+  const { data, error } = await supabaseAdmin
+    .from("admin_notifications")
+    .delete()
+    .not("id", "is", null)
+    .select("id");
+
+  if (error) {
+    console.error("[ADMIN_NOTIFICATION_DELETE_ALL_ERROR]", error);
+    throw new Error(error.message || "Erro ao limpar notificações.");
+  }
+
+  return {
+    deletedCount: Array.isArray(data) ? data.length : 0,
+  };
+}
