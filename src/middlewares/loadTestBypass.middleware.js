@@ -53,6 +53,35 @@ function readSignedLanguageToken(req = {}) {
   return parseSignedToken(raw);
 }
 
+const SAFE_QUERY_TOKEN_PATHS = new Set([
+  "/api/tracking/events/batch",
+  "/api/tracking/checkout-contact",
+  "/api/tracking/session/end",
+]);
+
+function getRequestPath(req = {}) {
+  const raw = String(req.originalUrl || req.url || req.path || "");
+  return raw.split("?", 1)[0];
+}
+
+function readSignedQueryToken(req = {}) {
+  if (!SAFE_QUERY_TOKEN_PATHS.has(getRequestPath(req))) return null;
+
+  const direct = req.query?.ozlt;
+  if (direct) return parseSignedToken(Array.isArray(direct) ? direct[0] : direct);
+
+  const rawUrl = String(req.originalUrl || req.url || "");
+  const queryIndex = rawUrl.indexOf("?");
+  if (queryIndex < 0) return null;
+
+  try {
+    const params = new URLSearchParams(rawUrl.slice(queryIndex + 1));
+    return parseSignedToken(params.get("ozlt"));
+  } catch {
+    return null;
+  }
+}
+
 function readSignedAgentToken(req = {}) {
   const userAgent = String(req.get?.("user-agent") || req.headers?.["user-agent"] || "");
   const markerIndex = userAgent.indexOf(TOKEN_PREFIX);
@@ -75,14 +104,18 @@ function isValidSignedToken(secret, token) {
 // Desativado por padrão. Só funciona quando LOAD_TEST_KEY está definido no Render.
 // Ordem de leitura:
 // 1) header legado x-oz-load-test-key (servidor-servidor);
-// 2) token HMAC em Accept-Language, usado apenas contra a API pelo runner;
-// 3) token antigo no User-Agent, mantido para compatibilidade.
+// 2) token HMAC temporário na query, aceito APENAS em endpoints públicos de tracking;
+// 3) token HMAC em Accept-Language, mantido para compatibilidade;
+// 4) token antigo no User-Agent, mantido para compatibilidade.
 export function isAuthorizedLoadTestRequest(req = {}) {
   const secret = String(process.env.LOAD_TEST_KEY || "").trim();
   if (!secret) return false;
 
   const receivedHeader = String(req.get?.("x-oz-load-test-key") || "").trim();
   if (receivedHeader && safeEqual(receivedHeader, secret)) return true;
+
+  const queryToken = readSignedQueryToken(req);
+  if (isValidSignedToken(secret, queryToken)) return true;
 
   const languageToken = readSignedLanguageToken(req);
   if (isValidSignedToken(secret, languageToken)) return true;
