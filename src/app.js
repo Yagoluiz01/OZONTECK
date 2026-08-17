@@ -31,6 +31,7 @@ import {
   publicStoreReadLimiter,
 } from "./middlewares/publicStoreReadLimiter.middleware.js";
 import { isAuthorizedLoadTestRequest } from "./middlewares/loadTestBypass.middleware.js";
+import { publicResponseCacheMiddleware } from "./middlewares/publicResponseCache.middleware.js";
 import adminNotificationsRoutes from "./routes/adminNotifications.routes.js";
 import adminAuditRoutes from "./routes/adminAudit.routes.js";
 import adminAccessRequestsRoutes from "./routes/adminAccessRequests.routes.js";
@@ -302,6 +303,9 @@ app.use(morgan("dev"));
 // Compacta respostas JSON e texto maiores que 1 KB. O conteúdo recebido pelo
 // cliente continua igual, mas usa menos banda e termina de carregar mais rápido.
 app.use(compression({ threshold: 1024 }));
+
+// Short cache/coalescing for stable public reads only.
+app.use(publicResponseCacheMiddleware);
 
 // O webhook precisa do corpo bruto para validar a assinatura HMAC.
 // O parser fica isolado para não elevar o limite de todas as demais rotas.
