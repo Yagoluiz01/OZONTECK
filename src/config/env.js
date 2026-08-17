@@ -90,5 +90,7 @@ export const env = {
   smtpPass: process.env.SMTP_PASS || "",
   smtpFromName: process.env.SMTP_FROM_NAME || "OZONTECK",
   smtpFromEmail: process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER || "",
-  notificationsEnabled: process.env.NOTIFICATIONS_ENABLED || "false"
+  notificationsEnabled: process.env.NOTIFICATIONS_ENABLED || "false",
+  stockNotificationsEnabled: process.env.STOCK_NOTIFICATIONS_ENABLED || "true",
+  stockLowAlertThreshold: Number(process.env.STOCK_LOW_ALERT_THRESHOLD || 5)
 };

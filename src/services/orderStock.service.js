@@ -1,4 +1,5 @@
 import { env } from "../config/env.js";
+import { notifyStockTransitionsSafely } from "./stockNotification.service.js";
 
 function getHeaders() {
   return {
@@ -31,10 +32,18 @@ async function callRpc(name, payload) {
 }
 
 export async function createStoreOrderAtomic(order, items) {
-  return callRpc("create_store_order_atomic", {
+  const result = await callRpc("create_store_order_atomic", {
     p_order: order,
     p_items: items,
   });
+
+  await notifyStockTransitionsSafely(result?.stock_changes, {
+    source: "order_creation_reservation",
+    orderId: result?.order?.id || null,
+    orderNumber: result?.order?.order_number || order?.order_number || null,
+  });
+
+  return result;
 }
 
 export async function releaseOrderStock(orderId, reason = "cancelled") {
@@ -45,9 +54,18 @@ export async function releaseOrderStock(orderId, reason = "cancelled") {
 }
 
 export async function ensureOrderStockReserved(orderId) {
-  return callRpc("ensure_order_stock_reserved", {
+  const result = await callRpc("ensure_order_stock_reserved", {
     p_order_id: orderId,
   });
+
+  if (result?.reserved && result?.reason === "reserved_again") {
+    await notifyStockTransitionsSafely(result?.stock_changes, {
+      source: "order_rereservation",
+      orderId,
+    });
+  }
+
+  return result;
 }
 
 export async function releaseExpiredOrderStockReservations(limit = 100) {

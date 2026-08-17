@@ -6,6 +6,7 @@ import sharp from "sharp";
 import { processAndUploadProductImage } from "../services/image-optimizer.service.js";
 import { env } from "../config/env.js";
 import { recordAuditLog } from "../services/audit.service.js";
+import { notifySingleStockTransitionSafely } from "../services/stockNotification.service.js";
 
 const router = express.Router();
 const PRODUCT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -869,6 +870,28 @@ router.put(
           },
         });
       }
+
+      const previousStock = Number(currentProduct.stock_quantity || 0);
+      const currentStock = Number(updated?.stock_quantity || 0);
+      const auditActor = getAuditActor(req);
+
+      await notifySingleStockTransitionSafely(
+        {
+          product_id: updated?.id || id,
+          product_name: updated?.name || currentProduct.name || "Produto",
+          sku: updated?.sku || currentProduct.sku || null,
+          previous_stock: previousStock,
+          current_stock: currentStock,
+          quantity: Math.max(0, previousStock - currentStock),
+        },
+        {
+          source: "admin_product_edit",
+          metadata: {
+            admin_id: auditActor.id,
+            admin_email: auditActor.email,
+          },
+        }
+      );
 
       return res.status(200).json({
         success: true,
