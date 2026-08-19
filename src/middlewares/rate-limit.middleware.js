@@ -13,12 +13,14 @@ function createSecurityLimiter({
   max,
   envMaxKey,
   message,
+  skipSuccessfulRequests = false,
 }) {
   return rateLimit({
     windowMs,
     max: toPositiveNumber(process.env[envMaxKey], max),
     standardHeaders: true,
     legacyHeaders: false,
+    skipSuccessfulRequests,
     skip(req) {
       return req.method === "OPTIONS";
     },
@@ -33,8 +35,9 @@ function createSecurityLimiter({
 // mas ainda confortável para uso real do painel.
 export const adminAuthLimiter = createSecurityLimiter({
   windowMs: 15 * 60 * 1000,
-  max: 20,
+  max: 10,
   envMaxKey: "ADMIN_AUTH_RATE_LIMIT_MAX",
+  skipSuccessfulRequests: true,
   message: "Muitas tentativas de acesso. Aguarde alguns minutos e tente novamente.",
 });
 

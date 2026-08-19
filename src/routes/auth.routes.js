@@ -1,11 +1,27 @@
 import express from "express";
-import jwt from "jsonwebtoken";
-
 import { supabaseAdmin, supabaseAuth } from "../config/supabase.js";
 import { env } from "../config/env.js";
 import { recordAuditLog } from "../services/audit.service.js";
 import { getAdminPermissions } from "../repositories/permission.repository.js";
 import { isMasterAdmin } from "../services/permissions/permission.service.js";
+import { requireAdminAuth } from "../middlewares/auth.middleware.js";
+import {
+  clearAdminSessionCookie,
+  createAdminSession,
+  getAdminSessionTokenFromRequest,
+  revokeAdminSessionToken,
+  revokeAllAdminSessions,
+  getAdminSessionCsrfToken,
+  invalidateAdminSessionsAfterPasswordReset,
+  setAdminSessionCookie,
+} from "../services/adminSession.service.js";
+import {
+  checkAdminLoginGuard,
+  enforceMinimumAdminLoginDuration,
+  registerAdminLoginFailure,
+  registerAdminLoginSuccess,
+  setLoginRetryAfter,
+} from "../services/adminLoginGuard.service.js";
 
 const router = express.Router();
 
@@ -152,8 +168,12 @@ function validateAdminResetPassword(password, confirmPassword) {
     return "Nova senha é obrigatória.";
   }
 
-  if (value.length < 8) {
-    return "A nova senha precisa ter pelo menos 8 caracteres.";
+  if (value.length < 15) {
+    return "A nova senha precisa ter pelo menos 15 caracteres.";
+  }
+
+  if (value.length > 128) {
+    return "A nova senha pode ter no máximo 128 caracteres.";
   }
 
   if (confirm && value !== confirm) {
@@ -161,6 +181,32 @@ function validateAdminResetPassword(password, confirmPassword) {
   }
 
   return null;
+}
+
+async function getSupabaseUserFromAccessToken(accessToken) {
+  const response = await fetch(`${env.supabaseUrl}/auth/v1/user`, {
+    method: "GET",
+    headers: {
+      apikey: env.supabaseServiceRoleKey,
+      Authorization: `Bearer ${accessToken}`,
+      Accept: "application/json",
+    },
+  });
+
+  const text = await response.text();
+  let data = null;
+
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = text;
+  }
+
+  return {
+    ok: response.ok,
+    status: response.status,
+    data,
+  };
 }
 
 async function updateSupabaseUserPassword(accessToken, password) {
@@ -301,6 +347,38 @@ router.post("/reset-password", async (req, res) => {
       });
     }
 
+    const recoveryUserResult = await getSupabaseUserFromAccessToken(accessToken);
+
+    if (!recoveryUserResult.ok || !recoveryUserResult.data?.id) {
+      return res.status(401).json({
+        success: false,
+        message: "Link de recuperação inválido ou expirado. Solicite um novo e-mail de recuperação.",
+      });
+    }
+
+    const recoveryUserEmail = normalizeEmail(recoveryUserResult.data?.email);
+    const recoveryAdminLookup = await findAdminByEmail(recoveryUserEmail);
+    const recoveryAdmin = Array.isArray(recoveryAdminLookup.data)
+      ? recoveryAdminLookup.data[0]
+      : recoveryAdminLookup.data;
+
+    if (
+      !recoveryAdminLookup.ok ||
+      !recoveryAdmin ||
+      recoveryAdmin.is_active !== true ||
+      (recoveryAdmin.auth_user_id &&
+        String(recoveryAdmin.auth_user_id) !== String(recoveryUserResult.data.id))
+    ) {
+      console.warn("[ADMIN_RESET_PASSWORD_ACCESS_REJECTED]", {
+        auth_user_id: recoveryUserResult.data?.id || null,
+        email: maskEmail(recoveryUserEmail),
+      });
+      return res.status(401).json({
+        success: false,
+        message: "Link de recuperação inválido ou expirado. Solicite um novo e-mail de recuperação.",
+      });
+    }
+
     const updateResult = await updateSupabaseUserPassword(accessToken, password);
 
     if (!updateResult.ok) {
@@ -325,36 +403,124 @@ router.post("/reset-password", async (req, res) => {
       });
     }
 
+    const updatedAuthUserId = String(recoveryUserResult.data.id).trim();
+    await invalidateAdminSessionsAfterPasswordReset(updatedAuthUserId);
+    clearAdminSessionCookie(res);
+
     return res.status(200).json({
       success: true,
-      message: "Senha redefinida com sucesso. Faça login novamente.",
+      message: "Senha redefinida com sucesso. Todas as sessões anteriores foram encerradas.",
     });
   } catch (error) {
     console.error("[ADMIN_RESET_PASSWORD_ERROR]", {
       message: error?.message,
       name: error?.name,
+      code: error?.code,
     });
 
-    return res.status(500).json({
+    const statusCode = Number(error?.statusCode || 500);
+    if (String(error?.code || "").startsWith("ADMIN_SESSION_PASSWORD_RESET_")) {
+      clearAdminSessionCookie(res);
+    }
+
+    return res.status(statusCode).json({
       success: false,
-      message: "Erro ao redefinir senha.",
+      message:
+        statusCode === 503
+          ? "A senha foi alterada, mas não foi possível concluir a invalidação de segurança. Tente recuperar a senha novamente antes de entrar."
+          : "Erro ao redefinir senha.",
     });
   }
 });
 
 router.post("/login", async (req, res) => {
-  try {
-    const { email, password } = req.body;
+  const startedAtMs = Date.now();
+  const normalizedEmail = normalizeEmail(req.body?.email);
+  const password = String(req.body?.password || "");
 
-    if (!email || !password) {
-      recordLoginAuditSafely({ req, email, status: "failure", reason: "missing_credentials" });
+  async function respondCredentialFailure({ reason, admin = null, statusCode = 401 }) {
+    let guardResult = null;
+
+    try {
+      guardResult = await registerAdminLoginFailure(normalizedEmail);
+    } catch (guardError) {
+      console.error("[ADMIN_LOGIN_GUARD_RECORD_FAILURE]", {
+        message: guardError?.message || String(guardError),
+      });
+      await enforceMinimumAdminLoginDuration(startedAtMs);
+      return res.status(503).json({
+        success: false,
+        message: "Não foi possível validar o acesso administrativo agora. Tente novamente.",
+      });
+    }
+
+    recordLoginAuditSafely({
+      req,
+      admin,
+      email: normalizedEmail,
+      status: "failure",
+      reason,
+    });
+
+    await enforceMinimumAdminLoginDuration(startedAtMs);
+
+    if (guardResult?.blocked) {
+      setLoginRetryAfter(res, guardResult.retryAfterSeconds);
+      return res.status(429).json({
+        success: false,
+        message: "Muitas tentativas de acesso. Aguarde alguns minutos e tente novamente.",
+      });
+    }
+
+    return res.status(statusCode).json({
+      success: false,
+      message: "Credenciais inválidas",
+    });
+  }
+
+  try {
+    if (!normalizedEmail || !password) {
+      recordLoginAuditSafely({
+        req,
+        email: normalizedEmail,
+        status: "failure",
+        reason: "missing_credentials",
+      });
+      await enforceMinimumAdminLoginDuration(startedAtMs);
       return res.status(400).json({
         success: false,
         message: "E-mail e senha são obrigatórios",
       });
     }
 
-    const normalizedEmail = normalizeEmail(email);
+    let guardStatus;
+    try {
+      guardStatus = await checkAdminLoginGuard(normalizedEmail);
+    } catch (guardError) {
+      console.error("[ADMIN_LOGIN_GUARD_CHECK_FAILED]", {
+        message: guardError?.message || String(guardError),
+      });
+      await enforceMinimumAdminLoginDuration(startedAtMs);
+      return res.status(503).json({
+        success: false,
+        message: "Não foi possível validar o acesso administrativo agora. Tente novamente.",
+      });
+    }
+
+    if (guardStatus.blocked) {
+      recordLoginAuditSafely({
+        req,
+        email: normalizedEmail,
+        status: "failure",
+        reason: "rate_limited_account",
+      });
+      await enforceMinimumAdminLoginDuration(startedAtMs);
+      setLoginRetryAfter(res, guardStatus.retryAfterSeconds);
+      return res.status(429).json({
+        success: false,
+        message: "Muitas tentativas de acesso. Aguarde alguns minutos e tente novamente.",
+      });
+    }
 
     const { data: authData, error: authError } =
       await supabaseAuth.auth.signInWithPassword({
@@ -363,31 +529,33 @@ router.post("/login", async (req, res) => {
       });
 
     if (authError || !authData?.user) {
-      recordLoginAuditSafely({ req, email: normalizedEmail, status: "failure", reason: "invalid_credentials" });
       console.warn("[ADMIN_LOGIN_AUTH_ERROR]", {
         email: maskEmail(normalizedEmail),
         message: authError?.message,
         status: authError?.status,
       });
 
-      return res.status(401).json({
-        success: false,
-        message: "Credenciais inválidas",
-      });
+      return respondCredentialFailure({ reason: "invalid_credentials" });
     }
 
     const adminLookup = await findAdminByEmail(normalizedEmail);
 
     if (!adminLookup.ok) {
-      recordLoginAuditSafely({ req, email: normalizedEmail, status: "failure", reason: "admin_lookup_failed" });
+      recordLoginAuditSafely({
+        req,
+        email: normalizedEmail,
+        status: "failure",
+        reason: "admin_lookup_failed",
+      });
       console.error("[ADMIN_LOGIN_LOOKUP_ERROR]", {
         email: maskEmail(normalizedEmail),
         status: adminLookup.status,
       });
 
-      return res.status(500).json({
+      await enforceMinimumAdminLoginDuration(startedAtMs);
+      return res.status(503).json({
         success: false,
-        message: "Erro ao consultar admins",
+        message: "Não foi possível validar o acesso administrativo agora. Tente novamente.",
       });
     }
 
@@ -395,53 +563,51 @@ router.post("/login", async (req, res) => {
       ? adminLookup.data[0]
       : adminLookup.data;
 
+    // Não diferenciamos "conta não é admin" de "senha inválida" para reduzir
+    // enumeração de contas e vazamento de estado administrativo.
     if (!admin) {
-      recordLoginAuditSafely({ req, email: normalizedEmail, status: "failure", reason: "no_panel_access" });
       console.warn("[ADMIN_LOGIN_NO_PANEL_ACCESS]", {
         email: maskEmail(normalizedEmail),
       });
-
-      return res.status(403).json({
-        success: false,
-        message: "Usuário autenticado, mas sem acesso ao painel",
-      });
+      return respondCredentialFailure({ reason: "no_panel_access" });
     }
 
     if (!admin.is_active) {
-      recordLoginAuditSafely({ req, admin, email: normalizedEmail, status: "failure", reason: "inactive_admin" });
       console.warn("[ADMIN_LOGIN_INACTIVE]", {
         email: maskEmail(normalizedEmail),
         admin_id: admin.id,
       });
-
-      return res.status(403).json({
-        success: false,
-        message: "Usuário inativo no painel administrativo",
+      return respondCredentialFailure({
+        reason: "inactive_admin",
+        admin,
       });
     }
 
-    recordLoginAuditSafely({ req, admin, email: normalizedEmail, status: "success" });
+    // Limpa o contador de falhas ANTES de emitir a sessão. Se esse controle
+    // persistente estiver indisponível, o login falha fechado e nenhuma sessão nasce.
+    await registerAdminLoginSuccess(normalizedEmail);
 
-    const token = jwt.sign(
-      {
-        sub: authData.user.id,
-        admin_id: admin.id,
-        email: admin.email,
-        role: admin.role,
-        supabase_access_token: authData.session?.access_token || null,
-      },
-      env.jwtSecret,
-      { expiresIn: "8h" }
-    );
-
-    // Busca permissões efetivas do admin (vazio para master)
     const adminIsMaster = isMasterAdmin(admin);
     const adminPermissions = adminIsMaster ? [] : await getAdminPermissions(admin.id);
+
+    const { token: opaqueSessionToken, csrfToken, session: opaqueSession } =
+      await createAdminSession({
+        req,
+        admin,
+        authUserId: authData.user.id,
+      });
+
+    setAdminSessionCookie(res, opaqueSessionToken);
+    recordLoginAuditSafely({
+      req,
+      admin,
+      email: normalizedEmail,
+      status: "success",
+    });
 
     return res.status(200).json({
       success: true,
       message: "Login realizado com sucesso",
-      token,
       user: {
         id: admin.id,
         full_name: admin.full_name,
@@ -450,16 +616,17 @@ router.post("/login", async (req, res) => {
         is_master: admin.is_master,
         permissions: adminPermissions,
       },
-      session: {
-        access_token: authData.session?.access_token || null,
-        refresh_token: authData.session?.refresh_token || null,
-        expires_at: authData.session?.expires_at || null,
+      secure_session: {
+        id: opaqueSession.id,
+        expires_at: opaqueSession.expires_at,
+        idle_expires_at: opaqueSession.idle_expires_at,
+        csrf_token: csrfToken,
       },
     });
   } catch (error) {
     recordLoginAuditSafely({
       req,
-      email: req.body?.email,
+      email: normalizedEmail,
       status: "failure",
       reason: "unexpected_login_error",
     });
@@ -467,71 +634,88 @@ router.post("/login", async (req, res) => {
     console.error("[ADMIN_LOGIN_ERROR]", {
       message: error?.message,
       name: error?.name,
+      code: error?.code,
     });
 
-    return res.status(500).json({
+    await enforceMinimumAdminLoginDuration(startedAtMs);
+
+    const statusCode = Number(error?.statusCode || 500);
+    return res.status(statusCode).json({
       success: false,
-      message: "Erro ao realizar login",
+      message:
+        statusCode === 503
+          ? "Não foi possível iniciar uma sessão segura agora. Tente novamente."
+          : "Erro ao realizar login",
     });
   }
 });
 
-router.get("/me", async (req, res) => {
+router.post("/logout", requireAdminAuth, async (req, res) => {
+  const sessionToken = getAdminSessionTokenFromRequest(req);
+
   try {
-    const authHeader = req.headers.authorization;
-
-    if (!authHeader || !authHeader.startsWith("Bearer ")) {
-      return res.status(401).json({
-        success: false,
-        message: "Token não enviado",
-      });
+    if (sessionToken) {
+      await revokeAdminSessionToken(sessionToken, "logout");
     }
 
-    const token = authHeader.split(" ")[1];
-    const decoded = jwt.verify(token, env.jwtSecret);
+    clearAdminSessionCookie(res);
 
-    if (!decoded.supabase_access_token) {
-      return res.status(401).json({
-        success: false,
-        message: "Sessão Supabase ausente",
-      });
-    }
+    return res.status(200).json({
+      success: true,
+      message: "Sessão encerrada com sucesso.",
+    });
+  } catch (error) {
+    // Mesmo se o banco estiver temporariamente indisponível, removemos o cookie local.
+    // A revogação no servidor é fail-closed nas rotas autenticadas quando o banco volta.
+    clearAdminSessionCookie(res);
 
-    const { data: userData, error: userError } =
-      await supabaseAuth.auth.getUser(decoded.supabase_access_token);
-
-    if (userError || !userData?.user) {
-      console.warn("[ADMIN_ME_SUPABASE_SESSION_ERROR]", {
-        message: userError?.message,
-        status: userError?.status,
-      });
-
-      return res.status(401).json({
-        success: false,
-        message: "Sessão inválida ou expirada",
-      });
-    }
-
-    const normalizedEmail = String(userData.user.email || "")
-      .trim()
-      .toLowerCase();
-
-    const adminLookup = await findAdminByEmail(normalizedEmail);
-
-    console.info("[ADMIN_ME_LOOKUP]", {
-      status: adminLookup.status,
-      email: maskEmail(normalizedEmail),
+    console.error("[ADMIN_LOGOUT_ERROR]", {
+      message: error?.message || String(error),
     });
 
+    return res.status(Number(error?.statusCode || 503)).json({
+      success: false,
+      message: "Não foi possível concluir a revogação da sessão agora.",
+    });
+  }
+});
+
+router.post("/logout-all", requireAdminAuth, async (req, res) => {
+  try {
+    const revoked = await revokeAllAdminSessions(req.admin.id, "logout_all");
+    clearAdminSessionCookie(res);
+
+    return res.status(200).json({
+      success: true,
+      message: "Todas as sessões administrativas foram encerradas.",
+      revoked_sessions: revoked,
+    });
+  } catch (error) {
+    console.error("[ADMIN_LOGOUT_ALL_ERROR]", {
+      admin_id: req.admin?.id || null,
+      message: error?.message || String(error),
+    });
+
+    return res.status(Number(error?.statusCode || 503)).json({
+      success: false,
+      message: "Não foi possível encerrar todas as sessões agora.",
+    });
+  }
+});
+
+router.get("/me", requireAdminAuth, async (req, res) => {
+  try {
+    const adminLookup = await findAdminByEmail(req.admin.email);
+
     if (!adminLookup.ok) {
-      console.error("[ADMIN_LOGIN_LOOKUP_ERROR]", {
-        email: maskEmail(normalizedEmail),
+      console.error("[ADMIN_ME_LOOKUP_ERROR]", {
+        admin_id: req.admin.id,
         status: adminLookup.status,
       });
 
-      return res.status(500).json({
+      return res.status(503).json({
         success: false,
-        message: "Erro ao consultar admins",
+        message: "Não foi possível consultar o administrador agora.",
       });
     }
 
@@ -539,43 +723,46 @@ router.get("/me", async (req, res) => {
       ? adminLookup.data[0]
       : adminLookup.data;
 
-    if (!admin) {
+    if (!admin || !admin.is_active) {
       return res.status(403).json({
         success: false,
-        message: "Usuário sem acesso ao painel",
+        message: "Usuário sem acesso ativo ao painel.",
       });
     }
 
-    if (!admin.is_active) {
-      return res.status(403).json({
-        success: false,
-        message: "Usuário inativo",
-      });
+    const adminIsMaster = isMasterAdmin(admin);
+    const adminPermissions = adminIsMaster ? [] : await getAdminPermissions(admin.id);
+
+    let secureSession = null;
+    if (req.adminAuth?.mode === "opaque_session" && req.adminAuth?.sessionId) {
+      const rotated = await getAdminSessionCsrfToken(req.adminAuth.sessionId);
+      secureSession = {
+        id: rotated.session.id,
+        expires_at: rotated.session.expires_at,
+        idle_expires_at: rotated.session.idle_expires_at,
+        csrf_token: rotated.csrfToken,
+      };
     }
-
-    // Garante que is_master esteja presente mesmo se a RPC não retornar
-    const isMaster = admin.is_master === true;
-
-    // Busca permissões efetivas do admin (vazio para master)
-    const adminPermissions = isMaster ? [] : await getAdminPermissions(admin.id);
 
     return res.status(200).json({
       success: true,
+      auth_mode: req.adminAuth?.mode || "unknown",
+      ...(secureSession ? { secure_session: secureSession } : {}),
       user: {
         ...admin,
-        is_master: isMaster,
+        is_master: adminIsMaster,
         permissions: adminPermissions,
       },
     });
   } catch (error) {
-    console.warn("[ADMIN_ME_TOKEN_ERROR]", {
-      message: error?.message,
-      name: error?.name,
+    console.error("[ADMIN_ME_ERROR]", {
+      admin_id: req.admin?.id || null,
+      message: error?.message || String(error),
     });
 
-    return res.status(401).json({
+    return res.status(500).json({
       success: false,
-      message: "Token inválido ou expirado",
+      message: "Erro ao consultar a sessão administrativa.",
     });
   }
 });

@@ -182,6 +182,7 @@ const corsMiddleware = cors({
     "X-Request-Id",
     "X-Order-Access-Token",
     "X-CSRF-Token",
+    "X-Admin-Session-Mode",
     "X-ME-Attempt",
     "X-ME-Topic",
     "X-ME-Event-ID",

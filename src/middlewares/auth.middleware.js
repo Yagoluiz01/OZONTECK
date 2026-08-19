@@ -1,61 +1,21 @@
-import jwt from "jsonwebtoken";
-
-import { env } from "../config/env.js";
 import { supabaseAdmin } from "../config/supabase.js";
+import {
+  assertAdminCsrfProtection,
+  clearAdminSessionCookie,
+  getAdminSessionTokenFromRequest,
+  revokeAdminSessionId,
+  validateAdminSessionToken,
+} from "../services/adminSession.service.js";
 
-function normalizeEmail(value) {
-  return String(value || "").trim().toLowerCase();
-}
+async function loadActiveAdmin(identity) {
+  const adminId = identity?.admin_id;
 
-function getBearerToken(req) {
-  const authHeader = String(req.headers.authorization || "");
-
-  if (!authHeader.startsWith("Bearer ")) {
-    return null;
+  if (!adminId) {
+    const identityError = new Error("Sessão administrativa inválida.");
+    identityError.statusCode = 401;
+    throw identityError;
   }
 
-  return authHeader.slice("Bearer ".length).trim() || null;
-}
-
-function getJwtVerifyOptions() {
-  const options = {
-    algorithms: ["HS256"],
-  };
-
-  const issuer = String(process.env.JWT_ISSUER || "").trim();
-  const audience = String(process.env.JWT_AUDIENCE || "").trim();
-
-  if (issuer) {
-    options.issuer = issuer;
-  }
-
-  if (audience) {
-    options.audience = audience;
-  }
-
-  return options;
-}
-
-function sanitizeJwtErrorMessage(error) {
-  const errorName = String(error?.name || "");
-  const message = String(error?.message || "").toLowerCase();
-
-  if (errorName === "TokenExpiredError" || message.includes("expired")) {
-    return "Token expirado.";
-  }
-
-  if (
-    errorName === "JsonWebTokenError" ||
-    errorName === "NotBeforeError" ||
-    message.includes("jwt")
-  ) {
-    return "Token inválido ou expirado.";
-  }
-
-  return "Token inválido ou expirado.";
-}
-
-async function loadActiveAdmin(decoded) {
   const { data, error } = await supabaseAdmin
     .from("admins")
     .select(`
@@ -65,14 +25,15 @@ email,
 role,
 is_active,
 is_master,
-auth_user_id
+auth_user_id,
+session_version
 `)
-    .eq("id", decoded.admin_id)
+    .eq("id", adminId)
     .maybeSingle();
 
   if (error) {
     console.error("[ADMIN_AUTH_DATABASE_ERROR]", {
-      admin_id: decoded.admin_id,
+      admin_id: adminId,
       message: error.message,
     });
 
@@ -87,13 +48,11 @@ auth_user_id
     throw inactiveError;
   }
 
-  if (normalizeEmail(data.email) !== normalizeEmail(decoded.email)) {
-    const identityError = new Error("Sessão administrativa inválida.");
-    identityError.statusCode = 401;
-    throw identityError;
-  }
-
-  if (data.auth_user_id && decoded.sub && String(data.auth_user_id) !== String(decoded.sub)) {
+  if (
+    data.auth_user_id &&
+    identity?.auth_user_id &&
+    String(data.auth_user_id) !== String(identity.auth_user_id)
+  ) {
     const identityError = new Error("Sessão administrativa inválida.");
     identityError.statusCode = 401;
     throw identityError;
@@ -102,66 +61,90 @@ auth_user_id
   return data;
 }
 
+function attachAdmin(req, currentAdmin, session) {
+  req.admin = {
+    id: currentAdmin.id,
+    userId: currentAdmin.auth_user_id || session?.auth_user_id || null,
+    email: currentAdmin.email,
+    fullName: currentAdmin.full_name || null,
+    role: currentAdmin.role,
+    is_master: currentAdmin.is_master,
+  };
+
+  req.adminAuth = {
+    mode: "opaque_session",
+    sessionId: session?.id || null,
+  };
+}
+
 export async function requireAdminAuth(req, res, next) {
+  const sessionToken = getAdminSessionTokenFromRequest(req);
+
+  if (!sessionToken) {
+    return res.status(401).json({
+      success: false,
+      message: "Sessão administrativa não enviada.",
+    });
+  }
+
   try {
-    const token = getBearerToken(req);
+    const session = await validateAdminSessionToken(sessionToken, { req });
+    assertAdminCsrfProtection(req, session);
 
-    if (!token) {
-      return res.status(401).json({
-        success: false,
-        message: "Token não enviado.",
-      });
+    const currentAdmin = await loadActiveAdmin({
+      admin_id: session.admin_id,
+      auth_user_id: session.auth_user_id,
+    });
+
+    const sessionVersion = Number(session?.session_version || 0);
+    const currentSessionVersion = Number(currentAdmin?.session_version || 0);
+
+    if (
+      !Number.isSafeInteger(sessionVersion) ||
+      !Number.isSafeInteger(currentSessionVersion) ||
+      sessionVersion < 1 ||
+      currentSessionVersion < 1 ||
+      sessionVersion !== currentSessionVersion
+    ) {
+      await revokeAdminSessionId(session.id, "session_version_mismatch");
+      const versionError = new Error(
+        "A sessão administrativa foi invalidada por uma alteração de segurança."
+      );
+      versionError.statusCode = 401;
+      versionError.code = "ADMIN_SESSION_VERSION_MISMATCH";
+      throw versionError;
     }
 
-    const decoded = jwt.verify(token, env.jwtSecret, getJwtVerifyOptions());
-
-    if (!decoded?.admin_id || !decoded?.email || !decoded?.role) {
-      return res.status(401).json({
-        success: false,
-        message: "Token inválido.",
-      });
-    }
-
-    // Não confia apenas no JWT: reconsulta o administrador em toda rota protegida.
-    // Assim, bloqueio, exclusão ou troca de função passa a valer imediatamente.
-    const currentAdmin = await loadActiveAdmin(decoded);
-
-    req.admin = {
-      id: currentAdmin.id,
-      userId: currentAdmin.auth_user_id || decoded.sub || null,
-      email: currentAdmin.email,
-      fullName: currentAdmin.full_name || null,
-      role: currentAdmin.role,
-      is_master: currentAdmin.is_master,
-    };
-
-
-
+    attachAdmin(req, currentAdmin, session);
     return next();
   } catch (error) {
-    const isJwtError =
-      error?.name === "TokenExpiredError" ||
-      error?.name === "JsonWebTokenError" ||
-      error?.name === "NotBeforeError";
-
     const statusCode = Number(error?.statusCode || 401);
+    const isCsrfError = String(error?.code || "").startsWith("ADMIN_CSRF_");
 
-    if (isJwtError) {
-      console.warn("[ADMIN_AUTH_JWT_INVALID]", {
-        path: req.originalUrl,
-        method: req.method,
-        reason: error?.name || "JWT_ERROR",
-      });
+    // Erros de CSRF não invalidam a sessão legítima. Para qualquer outro erro de
+    // autenticação, removemos o cookie local para impedir loops de sessão inválida.
+    if (statusCode !== 503 && !isCsrfError) {
+      clearAdminSessionCookie(res);
     }
+
+    console.warn("[ADMIN_AUTH_SESSION_INVALID]", {
+      path: req.originalUrl,
+      method: req.method,
+      reason: error?.code || error?.message || "SESSION_ERROR",
+    });
+
+    const safeSessionCode =
+      statusCode === 401 || statusCode === 419
+        ? String(error?.code || "ADMIN_SESSION_INVALID")
+        : undefined;
 
     return res.status(statusCode).json({
       success: false,
+      ...(safeSessionCode ? { code: safeSessionCode } : {}),
       message:
         statusCode === 503
           ? "Não foi possível validar a sessão agora. Tente novamente."
-          : isJwtError
-            ? sanitizeJwtErrorMessage(error)
-            : error?.message || "Token inválido ou expirado.",
+          : error?.message || "Sessão inválida ou expirada.",
     });
   }
 }
