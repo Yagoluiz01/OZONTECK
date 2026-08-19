@@ -54,10 +54,19 @@ export async function sendPushToAdmins(notification = {}) {
     };
   }
 
-  const { data, error } = await supabaseAdmin
+  let subscriptionsQuery = supabaseAdmin
     .from("admin_push_subscriptions")
     .select("*")
     .eq("is_active", true);
+
+  if (notification?.recipient_admin_id) {
+    subscriptionsQuery = subscriptionsQuery.eq(
+      "admin_id",
+      String(notification.recipient_admin_id)
+    );
+  }
+
+  const { data, error } = await subscriptionsQuery;
 
   if (error) {
     console.error("[ADMIN_PUSH_LIST_ERROR]", error);

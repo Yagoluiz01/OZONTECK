@@ -31,6 +31,7 @@ export async function createAdminNotification(payload = {}) {
     entity_type: payload.entity_type || null,
     entity_id: payload.entity_id || null,
     priority: normalizePriority(payload.priority),
+    recipient_admin_id: payload.recipient_admin_id || null,
     is_read: false,
     metadata:
       payload.metadata && typeof payload.metadata === "object"
@@ -68,12 +69,19 @@ export async function createAdminNotification(payload = {}) {
 export async function listAdminNotifications(options = {}) {
   const limit = Math.min(Number(options.limit || 20), 50);
   const onlyUnread = Boolean(options.onlyUnread);
+  const recipientAdminId = String(options.recipientAdminId || "").trim();
 
   let query = supabaseAdmin
     .from("admin_notifications")
     .select("*")
     .order("created_at", { ascending: false })
     .limit(limit);
+
+  if (recipientAdminId) {
+    query = query.or(
+      `recipient_admin_id.is.null,recipient_admin_id.eq.${recipientAdminId}`
+    );
+  }
 
   if (onlyUnread) {
     query = query.eq("is_read", false);
@@ -86,10 +94,18 @@ export async function listAdminNotifications(options = {}) {
     throw new Error(error.message || "Erro ao buscar notificações.");
   }
 
-  const { count, error: countError } = await supabaseAdmin
+  let countQuery = supabaseAdmin
     .from("admin_notifications")
     .select("id", { count: "exact", head: true })
     .eq("is_read", false);
+
+  if (recipientAdminId) {
+    countQuery = countQuery.or(
+      `recipient_admin_id.is.null,recipient_admin_id.eq.${recipientAdminId}`
+    );
+  }
+
+  const { count, error: countError } = await countQuery;
 
   if (countError) {
     console.error("[ADMIN_NOTIFICATION_COUNT_ERROR]", countError);

@@ -22,6 +22,7 @@ import {
   registerAdminLoginSuccess,
   setLoginRetryAfter,
 } from "../services/adminLoginGuard.service.js";
+import { recordAdminLoginSecurityAttempt } from "../services/adminIntrusionDetection.service.js";
 
 const router = express.Router();
 
@@ -462,6 +463,15 @@ router.post("/login", async (req, res) => {
       reason,
     });
 
+    recordAdminLoginSecurityAttempt({
+      req,
+      email: normalizedEmail,
+      admin,
+      success: false,
+      reason,
+      rateLimited: guardResult?.blocked === true,
+    });
+
     await enforceMinimumAdminLoginDuration(startedAtMs);
 
     if (guardResult?.blocked) {
@@ -513,6 +523,13 @@ router.post("/login", async (req, res) => {
         email: normalizedEmail,
         status: "failure",
         reason: "rate_limited_account",
+      });
+      recordAdminLoginSecurityAttempt({
+        req,
+        email: normalizedEmail,
+        success: false,
+        reason: "rate_limited_account",
+        rateLimited: true,
       });
       await enforceMinimumAdminLoginDuration(startedAtMs);
       setLoginRetryAfter(res, guardStatus.retryAfterSeconds);
@@ -603,6 +620,14 @@ router.post("/login", async (req, res) => {
       admin,
       email: normalizedEmail,
       status: "success",
+    });
+    recordAdminLoginSecurityAttempt({
+      req,
+      email: normalizedEmail,
+      admin,
+      success: true,
+      reason: "success",
+      rateLimited: false,
     });
 
     return res.status(200).json({

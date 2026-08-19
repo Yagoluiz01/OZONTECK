@@ -3,9 +3,9 @@ import crypto from "crypto";
 import { env } from "../config/env.js";
 import { supabaseAdmin } from "../config/supabase.js";
 
-const DEFAULT_MAX_FAILURES = 12;
+const DEFAULT_MAX_FAILURES = 8;
 const DEFAULT_WINDOW_MINUTES = 15;
-const DEFAULT_BLOCK_MINUTES = 10;
+const DEFAULT_BLOCK_MINUTES = 15;
 const DEFAULT_MIN_RESPONSE_MS = 550;
 
 function toPositiveInt(value, fallback) {

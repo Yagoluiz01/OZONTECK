@@ -22,6 +22,7 @@ router.get("/", async (req, res, next) => {
     const result = await listAdminNotifications({
       limit,
       onlyUnread,
+      recipientAdminId: req.admin?.id,
     });
 
     return res.json({
@@ -33,7 +34,7 @@ router.get("/", async (req, res, next) => {
   }
 });
 
-router.post("/", async (req, res, next) => {
+router.post("/", requirePermission("notifications.edit"), async (req, res, next) => {
   try {
     const result = await createAdminNotification(req.body || {});
 
