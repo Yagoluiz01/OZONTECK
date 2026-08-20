@@ -6160,35 +6160,28 @@ router.get("/melhor-envio/authorize-url", requireAdminAuth, requireMasterAdmin, 
 
 router.post("/affiliates/apply", async (req, res) => {
   try {
-    const result = await createAffiliateApplication(req.body || {});
+    await createAffiliateApplication(req.body || {});
 
-    if (result.alreadyExists) {
-      return res.status(200).json({
-        success: true,
-        alreadyExists: true,
-        message:
-          "VocÃª jÃ¡ possui uma solicitaÃ§Ã£o de afiliado pendente. Aguarde a anÃ¡lise da equipe OZONTECK.",
-        application: toPublicAffiliateApplication(result.application),
-      });
-    }
-
-    return res.status(201).json({
+    return res.status(202).json({
       success: true,
-      alreadyExists: false,
+      accepted: true,
       message:
-        "SolicitaÃ§Ã£o enviada com sucesso. Nossa equipe vai analisar seu cadastro de afiliado.",
-      application: toPublicAffiliateApplication(result.application),
+        "Solicita\u00e7\u00e3o recebida. Se os dados forem eleg\u00edveis, nossa equipe dar\u00e1 continuidade \u00e0 an\u00e1lise.",
     });
   } catch (error) {
-    console.error("ERRO AO CRIAR SOLICITAÃ‡ÃƒO DE AFILIADO:", error);
+    console.error("ERRO AO CRIAR SOLICITACAO DE AFILIADO:", error);
 
-    return res.status(400).json({
+    const statusCode = Number(error?.statusCode) || 400;
+
+    return res.status(statusCode).json({
       success: false,
-      message: error.message || "Erro ao enviar solicitaÃ§Ã£o de afiliado.",
+      message:
+        statusCode >= 500
+          ? "N\u00e3o foi poss\u00edvel processar a solicita\u00e7\u00e3o agora. Tente novamente mais tarde."
+          : error.message || "N\u00e3o foi poss\u00edvel processar a solicita\u00e7\u00e3o.",
     });
   }
 });
-
 router.get("/health", async (req, res) => {
   return res.status(200).json({
     success: true,
