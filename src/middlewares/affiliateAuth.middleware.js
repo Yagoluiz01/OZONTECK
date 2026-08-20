@@ -92,9 +92,17 @@ export async function requireAffiliateAuth(req, res, next) {
 
     return next();
   } catch (error) {
-    clearAffiliateSessionCookie(res);
+    const statusCode = Number(error?.statusCode || 401);
 
-    return res.status(Number(error?.statusCode || 401)).json({
+    // Uma falha de CSRF (403) nao torna a sessao autentica invalida.
+    // Limpar o cookie aqui causaria logout forcado apos uma requisicao
+    // malformada. Apenas falhas de autenticacao da propria sessao (401)
+    // devem remover o cookie local.
+    if (statusCode === 401) {
+      clearAffiliateSessionCookie(res);
+    }
+
+    return res.status(statusCode).json({
       success: false,
       code: error?.code || "AFFILIATE_SESSION_INVALID",
       message:
