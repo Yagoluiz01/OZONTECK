@@ -55,11 +55,35 @@ export const adminAccessRequestLimiter = createSecurityLimiter({
   message: "Muitas solicitações de acesso administrativo. Aguarde e tente novamente mais tarde.",
 });
 
-export const affiliateAuthLimiter = createSecurityLimiter({
+export const affiliateLoginLimiter = createSecurityLimiter({
   windowMs: 15 * 60 * 1000,
-  max: 25,
-  envMaxKey: "AFFILIATE_AUTH_RATE_LIMIT_MAX",
+  // Este limiter é por IP. O guard persistente por conta continua em 8 falhas;
+  // uma margem maior aqui evita bloquear toda uma rede compartilhada/CGNAT.
+  max: 20,
+  envMaxKey: "AFFILIATE_LOGIN_RATE_LIMIT_MAX",
+  skipSuccessfulRequests: true,
   message: "Muitas tentativas de acesso do afiliado. Aguarde alguns minutos e tente novamente.",
+});
+
+export const affiliateEmailStatusLimiter = createSecurityLimiter({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  envMaxKey: "AFFILIATE_EMAIL_STATUS_RATE_LIMIT_MAX",
+  message: "Muitas consultas de cadastro. Aguarde alguns minutos e tente novamente.",
+});
+
+export const affiliateApplicationLimiter = createSecurityLimiter({
+  windowMs: 60 * 60 * 1000,
+  max: 10,
+  envMaxKey: "AFFILIATE_APPLICATION_RATE_LIMIT_MAX",
+  message: "Muitas solicitações de cadastro. Aguarde e tente novamente mais tarde.",
+});
+
+export const affiliatePasswordRecoveryLimiter = createSecurityLimiter({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  envMaxKey: "AFFILIATE_PASSWORD_RECOVERY_RATE_LIMIT_MAX",
+  message: "Muitas solicitações de recuperação. Aguarde alguns minutos e tente novamente.",
 });
 
 export const storeCustomerAuthLimiter = createSecurityLimiter({

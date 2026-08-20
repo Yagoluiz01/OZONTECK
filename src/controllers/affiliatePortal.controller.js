@@ -1,3 +1,5 @@
+import crypto from "crypto";
+
 import {
   checkAffiliateAccessByEmail,
   getAffiliateOrders,
@@ -15,6 +17,33 @@ import {
 } from "../services/affiliatePortal.service.js";
 import { syncAffiliateLevelAchievement } from "../services/affiliateCommunityAchievements.service.js";
 import { buildPublicApiError } from "../utils/publicApiError.js";
+import {
+  clearAffiliateSessionCookie,
+  createAffiliateSession,
+  revokeAffiliateSessionToken,
+  setAffiliateSessionCookie,
+} from "../services/affiliateSession.service.js";
+import {
+  checkAffiliateLoginGuard,
+  enforceMinimumAffiliateLoginDuration,
+  registerAffiliateLoginFailure,
+  registerAffiliateLoginSuccess,
+  setAffiliateLoginRetryAfter,
+} from "../services/affiliateLoginGuard.service.js";
+import { recordAffiliateLoginAttempt } from "../services/affiliateIntrusionDetection.service.js";
+import { signAffiliateLegacyBridgeToken } from "../services/affiliateLegacyBridge.service.js";
+
+const AFFILIATE_PASSWORD_RESET_MIN_RESPONSE_MS = 700;
+
+async function enforceAffiliatePasswordResetResponseDuration(startedAtMs) {
+  const jitterMs = crypto.randomInt(0, 121);
+  const targetMs = AFFILIATE_PASSWORD_RESET_MIN_RESPONSE_MS + jitterMs;
+  const elapsed = Date.now() - startedAtMs;
+  const remaining = Math.max(0, targetMs - elapsed);
+  if (remaining > 0) {
+    await new Promise((resolve) => setTimeout(resolve, remaining));
+  }
+}
 
 function sendError(res, error) {
   const publicError = buildPublicApiError(error, {
@@ -27,32 +56,154 @@ function sendError(res, error) {
 }
 
 export async function login(req, res) {
+  const startedAtMs = Date.now();
+  const email = String(req.body?.email || "").trim().toLowerCase();
+
   try {
+    const guard = await checkAffiliateLoginGuard({ email, req });
+
+    if (guard.blocked) {
+      recordAffiliateLoginAttempt({
+        req,
+        email,
+        success: false,
+        reason: "rate_limited",
+      });
+      await enforceMinimumAffiliateLoginDuration(startedAtMs);
+      setAffiliateLoginRetryAfter(res, guard.retryAfterSeconds);
+      return res.status(429).json({
+        success: false,
+        message: "Muitas tentativas de acesso. Aguarde alguns minutos e tente novamente.",
+      });
+    }
+
     const result = await loginAffiliate(req.body || {});
+
+    // Fail closed: nenhuma sessão nasce se o guard persistente não puder ser limpo.
+    await registerAffiliateLoginSuccess({ email });
+
+    const secureSession = await createAffiliateSession({
+      req,
+      affiliate: result.affiliate,
+    });
+
+    setAffiliateSessionCookie(res, secureSession.token);
+
+    recordAffiliateLoginAttempt({
+      req,
+      email,
+      success: true,
+      reason: "success",
+    });
+
+    const legacyBridgeToken = signAffiliateLegacyBridgeToken({
+      ...result.affiliate,
+      authVersion: result.authVersion,
+    });
 
     return res.json({
       success: true,
       message: "Login realizado com sucesso.",
-      token: result.token,
+      ...(legacyBridgeToken ? { token: legacyBridgeToken } : {}),
       affiliate: result.affiliate,
+      secure_session: {
+        csrf_token: secureSession.csrfToken,
+        expires_at: secureSession.session.expires_at,
+        idle_expires_at: secureSession.session.idle_expires_at,
+        replaced_sessions: secureSession.revokedSessions,
+      },
     });
   } catch (error) {
+    if (Number(error?.statusCode) === 401) {
+      try {
+        const failure = await registerAffiliateLoginFailure({ email, req });
+        recordAffiliateLoginAttempt({
+          req,
+          email,
+          success: false,
+          reason: "invalid_credentials",
+        });
+
+        await enforceMinimumAffiliateLoginDuration(startedAtMs);
+
+        if (failure.blocked) {
+          setAffiliateLoginRetryAfter(res, failure.retryAfterSeconds);
+          return res.status(429).json({
+            success: false,
+            message: "Muitas tentativas de acesso. Aguarde alguns minutos e tente novamente.",
+          });
+        }
+
+        return res.status(401).json({
+          success: false,
+          message: "E-mail ou senha inválidos.",
+        });
+      } catch (guardError) {
+        await enforceMinimumAffiliateLoginDuration(startedAtMs);
+        return sendError(res, guardError);
+      }
+    }
+
+    if (Number(error?.statusCode) >= 500) {
+      await enforceMinimumAffiliateLoginDuration(startedAtMs);
+    }
+
+    return sendError(res, error);
+  }
+}
+
+export async function logout(req, res) {
+  try {
+    const token = req.affiliateSessionToken;
+    if (token) {
+      await revokeAffiliateSessionToken(token, "logout");
+    }
+
+    clearAffiliateSessionCookie(res);
+
+    return res.json({
+      success: true,
+      message: "Sessão encerrada com sucesso.",
+    });
+  } catch (error) {
+    clearAffiliateSessionCookie(res);
     return sendError(res, error);
   }
 }
 
 export async function forgotPassword(req, res) {
-  try {
-    await requestAffiliatePasswordReset(req.body || {});
+  const startedAtMs = Date.now();
+  const email = String(req.body?.email || "").trim().toLowerCase();
+  const genericMessage =
+    "Se este e-mail estiver cadastrado e apto, enviaremos um link para redefinir sua senha.";
 
-    return res.json({
-      success: true,
-      message:
-        "Se o Gmail estiver cadastrado e ativo, enviaremos uma nova senha temporária.",
+  if (!email || !email.includes("@")) {
+    return res.status(400).json({
+      success: false,
+      message: "Informe um e-mail válido.",
+    });
+  }
+
+  try {
+    await requestAffiliatePasswordReset({
+      email,
+      ipAddress: req.ip || req.socket?.remoteAddress || null,
+      userAgent: req.get?.("user-agent") || req.headers?.["user-agent"] || null,
     });
   } catch (error) {
-    return sendError(res, error);
+    // Não transforma falha de SMTP/DB em oráculo de existência da conta.
+    console.error("[AFFILIATE_PASSWORD_RESET_REQUEST_ERROR]", {
+      message: error?.message || String(error),
+      code: error?.code || null,
+    });
   }
+
+  await enforceAffiliatePasswordResetResponseDuration(startedAtMs);
+
+  return res.json({
+    success: true,
+    message: genericMessage,
+  });
 }
 
 export async function checkEmail(req, res) {
@@ -73,6 +224,11 @@ export async function me(req, res) {
     return res.json({
       success: true,
       affiliate: req.affiliate,
+      secure_session: {
+        csrf_token: req.affiliateCsrfToken || null,
+        expires_at: req.affiliateSession?.expires_at || null,
+        idle_expires_at: req.affiliateSession?.idle_expires_at || null,
+      },
     });
   } catch (error) {
     return sendError(res, error);

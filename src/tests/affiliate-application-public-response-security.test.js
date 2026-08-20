@@ -72,16 +72,15 @@ test("status desconhecido falha fechado como pending", () => {
   assert.equal(result.status, "pending");
 });
 
-test("rota pública sanitiza respostas novas e duplicadas", () => {
+test("rota pública de inscrição não revela se cadastro já existia", () => {
   const routeBlock = storeRoutesSource.slice(
     storeRoutesSource.indexOf('router.post("/affiliates/apply"'),
     storeRoutesSource.indexOf('router.get("/health"')
   );
 
-  const usesSanitizer = routeBlock.match(
-    /application:\s*toPublicAffiliateApplication\(result\.application\)/g
-  ) || [];
-
-  assert.equal(usesSanitizer.length, 2);
-  assert.doesNotMatch(routeBlock, /application:\s*result\.application/);
+  assert.match(routeBlock, /status\(202\)/);
+  assert.match(routeBlock, /accepted:\s*true/);
+  assert.doesNotMatch(routeBlock, /alreadyExists/);
+  assert.doesNotMatch(routeBlock, /application:/);
+  assert.doesNotMatch(routeBlock, /toPublicAffiliateApplication/);
 });

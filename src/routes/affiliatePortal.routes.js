@@ -4,6 +4,7 @@ import {
   checkEmail,
   forgotPassword,
   login,
+  logout,
   me,
   orders,
   payouts,
@@ -32,6 +33,7 @@ import {
 const router = express.Router();
 
 router.post("/auth/login", login);
+router.post("/auth/logout", requireAffiliateAuth, logout);
 router.post("/auth/forgot-password", forgotPassword);
 router.post("/auth/check-email", checkEmail);
 

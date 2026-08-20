@@ -43,20 +43,58 @@ import {
   sendCustomerOrderPushForPaymentApproved,
   sendCustomerOrderPushForTracking
 } from "../services/customerOrderPush.service.js";
-import { toPublicAffiliateApplication } from "../utils/publicAffiliateApplication.js";
 import { buildTrustedShippingQuoteSnapshot } from "../utils/shippingQuoteSnapshot.js";
+import {
+  fetchWithTimeout,
+  normalizeTimeoutMs,
+  withTimeout,
+} from "../utils/upstreamTimeout.js";
 
 const router = express.Router();
+const PUBLIC_ORIGIN_TIMEOUT_MS = normalizeTimeoutMs(
+  process.env.PUBLIC_ORIGIN_TIMEOUT_MS,
+  8_000,
+);
 
 const HOME_PRODUCTS_SERVER_CACHE_TTL_MS = 60 * 1000;
 const HOME_PRODUCTS_SERVER_CACHE_STALE_MS = 15 * 60 * 1000;
 const HOME_PRODUCTS_SERVER_CACHE_LIMIT = 24;
+const PUBLIC_PRODUCTS_SERVER_CACHE_TTL_MS = 30 * 1000;
+const PUBLIC_PRODUCTS_SERVER_CACHE_STALE_MS = 5 * 60 * 1000;
+const PUBLIC_PRODUCTS_CACHE_CONTROL =
+  "public, max-age=15, s-maxage=30, stale-while-revalidate=300";
+const ACTIVE_CATEGORIES_SERVER_CACHE_TTL_MS = 60 * 1000;
+const ACTIVE_CATEGORIES_SERVER_CACHE_STALE_MS = 15 * 60 * 1000;
+const ACTIVE_CATEGORIES_CACHE_CONTROL =
+  "public, max-age=30, s-maxage=60, stale-while-revalidate=300";
+const MARKETING_PIXELS_SERVER_CACHE_TTL_MS = 5 * 60 * 1000;
+const MARKETING_PIXELS_SERVER_CACHE_STALE_MS = 30 * 60 * 1000;
+const MARKETING_PIXELS_CACHE_CONTROL =
+  "public, max-age=60, s-maxage=300, stale-while-revalidate=900";
 
 let homeProductsServerCache = {
   createdAt: 0,
   products: [],
 };
 let homeProductsLoadPromise = null;
+let publicProductsServerCache = {
+  createdAt: 0,
+  normalizedProducts: [],
+  rankedProducts: [],
+  searchMap: new Map(),
+  listPayload: "",
+};
+let publicProductsLoadPromise = null;
+let activeCategoriesServerCache = {
+  createdAt: 0,
+  categories: [],
+};
+let activeCategoriesLoadPromise = null;
+let marketingPixelsServerCache = {
+  createdAt: 0,
+  pixels: [],
+};
+let marketingPixelsLoadPromise = null;
 
 function getMarketingPixelSupabaseHeaders() {
   return {
@@ -950,6 +988,36 @@ function isValidEmail(value) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizeEmail(value));
 }
 
+async function findAffiliateAccountByEmail(email) {
+  const cleanEmail = normalizeEmail(email);
+
+  if (!cleanEmail) {
+    return null;
+  }
+
+  const url = new URL(`${env.supabaseUrl}/rest/v1/affiliates`);
+  url.searchParams.set("select", "id,email,status,access_enabled,created_at");
+  url.searchParams.set("email", `eq.${cleanEmail}`);
+  url.searchParams.set("limit", "1");
+
+  const response = await fetch(url.toString(), {
+    method: "GET",
+    headers: {
+      apikey: env.supabaseServiceRoleKey,
+      Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+  });
+
+  const data = await response.json().catch(() => []);
+  if (!response.ok) {
+    throw new Error("Não foi possível validar a solicitação de afiliado.");
+  }
+
+  return Array.isArray(data) ? data[0] || null : null;
+}
+
 async function findAffiliateApplicationByEmail(email) {
   const cleanEmail = normalizeEmail(email);
 
@@ -975,7 +1043,13 @@ async function findAffiliateApplicationByEmail(email) {
 
   const data = await response.json().catch(() => []);
 
-  if (!response.ok || !Array.isArray(data) || !data[0]?.id) {
+  if (!response.ok) {
+    const error = new Error("Não foi possível validar a solicitação de afiliado.");
+    error.statusCode = 503;
+    throw error;
+  }
+
+  if (!Array.isArray(data) || !data[0]?.id) {
     return null;
   }
 
@@ -1193,8 +1267,12 @@ async function createAffiliateApplication(input = {}) {
     throw new Error("Senha é obrigatória.");
   }
 
-  if (password.length < 8) {
-    throw new Error("A senha precisa ter pelo menos 8 caracteres.");
+  if (password.length < 12) {
+    throw new Error("A senha precisa ter pelo menos 12 caracteres.");
+  }
+
+  if (Buffer.byteLength(password, "utf8") > 72) {
+    throw new Error("A senha não pode ultrapassar 72 bytes.");
   }
 
   if (!/[A-Z]/.test(password)) {
@@ -1221,31 +1299,34 @@ async function createAffiliateApplication(input = {}) {
       input.indicado_por
   );
 
-  const existingPending = await findAffiliateApplicationByEmail(email);
+  // Executa as consultas relevantes em paralelo e valida o recrutador antes de
+  // decidir se a conta já existe. Assim, um código de recrutador inválido não
+  // vira um canal lateral para descobrir a existência do e-mail.
+  const [existingAffiliate, existingPending, recruiterAffiliate] = await Promise.all([
+    findAffiliateAccountByEmail(email),
+    findAffiliateApplicationByEmail(email),
+    recruiterRefCode ? findActiveAffiliateByRef(recruiterRefCode) : Promise.resolve(null),
+  ]);
 
-  if (existingPending) {
+  if (recruiterRefCode && !recruiterAffiliate?.id) {
+    throw new Error("Código do afiliado recrutador não encontrado ou inativo.");
+  }
+
+  if (recruiterAffiliate && normalizeEmail(recruiterAffiliate.email) === email) {
+    throw new Error("Você não pode usar seu próprio código como recrutador.");
+  }
+
+  // Resposta externa será idêntica para conta existente e solicitação pendente.
+  // Internamente, apenas evitamos criar registros/senhas duplicados.
+  if (existingAffiliate || existingPending) {
     return {
-      alreadyExists: true,
-      application: existingPending,
+      accepted: true,
+      created: false,
     };
   }
 
-  let recruiterAffiliate = null;
-
-  if (recruiterRefCode) {
-    recruiterAffiliate = await findActiveAffiliateByRef(recruiterRefCode);
-
-    if (!recruiterAffiliate?.id) {
-      throw new Error("Código do afiliado recrutador não encontrado ou inativo.");
-    }
-
-    if (normalizeEmail(recruiterAffiliate.email) === email) {
-      throw new Error("Você não pode usar seu próprio código como recrutador.");
-    }
-  }
-
   const [passwordHash, generatedCodes] = await Promise.all([
-    bcrypt.hash(password, 10),
+    bcrypt.hash(password, 12),
     generateUniqueAffiliateCodes({
       fullName,
       email,
@@ -1302,7 +1383,8 @@ async function createAffiliateApplication(input = {}) {
   }, 0);
 
   return {
-    alreadyExists: false,
+    accepted: true,
+    created: true,
     application,
   };
 }

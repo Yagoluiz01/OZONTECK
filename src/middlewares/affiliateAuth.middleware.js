@@ -1,55 +1,106 @@
 import {
-  getAffiliateSessionById,
-  verifyAffiliateToken,
-} from "../services/affiliatePortal.service.js";
+  assertAffiliateCsrfProtection,
+  clearAffiliateSessionCookie,
+  getAffiliateSessionTokenFromRequest,
+  revokeAffiliateSessionById,
+  validateAffiliateSessionToken,
+} from "../services/affiliateSession.service.js";
+import { getAffiliateSessionById } from "../services/affiliatePortal.service.js";
+import {
+  isAffiliateLegacyBridgeEnabled,
+  verifyAffiliateLegacyBridgeToken,
+} from "../services/affiliateLegacyBridge.service.js";
 
 function getBearerToken(req) {
-  const authorization = req.headers.authorization || "";
+  const authorization = String(
+    req.get?.("authorization") || req.headers?.authorization || ""
+  ).trim();
+  const match = authorization.match(/^Bearer\s+([^\s]+)$/i);
+  return match?.[1] || null;
+}
 
-  if (!authorization.startsWith("Bearer ")) {
-    return null;
+async function authenticateLegacyBridge(req) {
+  if (!isAffiliateLegacyBridgeEnabled()) return null;
+
+  const bearerToken = getBearerToken(req);
+  if (!bearerToken) return null;
+
+  const decoded = verifyAffiliateLegacyBridgeToken(bearerToken);
+  const affiliateSession = await getAffiliateSessionById(decoded.affiliate_id);
+
+  if (Number(decoded.auth_version) !== Number(affiliateSession.authVersion)) {
+    const error = new Error("Token legado de afiliado revogado.");
+    error.statusCode = 401;
+    error.code = "AFFILIATE_LEGACY_BRIDGE_TOKEN_REVOKED";
+    throw error;
   }
 
-  return authorization.replace("Bearer ", "").trim();
+  console.warn("[AFFILIATE_LEGACY_AUTH_BRIDGE_REQUEST]", {
+    affiliate_id: affiliateSession.affiliate.id,
+    method: req.method,
+    path: req.originalUrl || req.url || null,
+  });
+
+  return {
+    affiliateSession,
+    bearerToken,
+  };
 }
 
 export async function requireAffiliateAuth(req, res, next) {
   try {
-    const token = getBearerToken(req);
+    const token = getAffiliateSessionTokenFromRequest(req);
 
     if (!token) {
+      const legacy = await authenticateLegacyBridge(req);
+      if (!legacy) {
+        clearAffiliateSessionCookie(res);
+        return res.status(401).json({
+          success: false,
+          code: "AFFILIATE_SESSION_MISSING",
+          message: "Sessão do afiliado não enviada.",
+        });
+      }
+
+      req.affiliate = legacy.affiliateSession.affiliate;
+      req.affiliateId = legacy.affiliateSession.affiliate.id;
+      req.affiliateLegacyBridge = true;
+      req.affiliateLegacyBearerToken = legacy.bearerToken;
+      return next();
+    }
+
+    const session = await validateAffiliateSessionToken(token, { req });
+    const affiliateSession = await getAffiliateSessionById(session.affiliate_id);
+
+    if (Number(session.session_version) !== Number(affiliateSession.authVersion)) {
+      await revokeAffiliateSessionById(session.id, "auth_version_changed");
+      clearAffiliateSessionCookie(res);
       return res.status(401).json({
         success: false,
-        message: "Token do afiliado não enviado.",
+        code: "AFFILIATE_SESSION_REVOKED",
+        message: "Sessão do afiliado revogada.",
       });
     }
 
-    const decoded = verifyAffiliateToken(token);
-    const session = await getAffiliateSessionById(decoded.affiliate_id);
-    const tokenAuthVersion = Number(decoded.auth_version);
+    assertAffiliateCsrfProtection(req, session);
 
-    if (
-      !Number.isInteger(tokenAuthVersion) ||
-      tokenAuthVersion !== session.authVersion
-    ) {
-      const error = new Error("Sessão do afiliado revogada.");
-      error.statusCode = 401;
-      throw error;
-    }
-
-    req.affiliate = session.affiliate;
-    req.affiliateId = session.affiliate.id;
+    req.affiliate = affiliateSession.affiliate;
+    req.affiliateId = affiliateSession.affiliate.id;
+    req.affiliateSession = session;
+    req.affiliateSessionToken = token;
+    req.affiliateCsrfToken = session.csrfToken;
 
     return next();
   } catch (error) {
-    console.warn("[AFFILIATE_AUTH_ERROR]", {
-      message: error?.message,
-      name: error?.name,
-    });
+    clearAffiliateSessionCookie(res);
 
-    return res.status(401).json({
+    return res.status(Number(error?.statusCode || 401)).json({
       success: false,
-      message: "Sessão do afiliado inválida ou expirada.",
+      code: error?.code || "AFFILIATE_SESSION_INVALID",
+      message:
+        error?.code === "AFFILIATE_SESSION_REPLACED"
+          ? "Um novo login foi realizado nesta conta. Esta sessão foi encerrada."
+          : "Sessão do afiliado inválida ou expirada.",
     });
   }
 }

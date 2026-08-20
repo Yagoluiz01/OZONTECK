@@ -1,11 +1,10 @@
 import bcrypt from "bcryptjs";
-import jwt from "jsonwebtoken";
 import crypto from "crypto";
 import { env } from "../config/env.js";
 import { supabaseAdmin } from "../config/supabase.js";
 import { notifyAffiliatePasswordReset } from "./affiliateNotification.service.js";
+import { getAffiliateSecurityKey } from "./affiliateSecurityKey.service.js";
 
-const AFFILIATE_TOKEN_EXPIRES_IN = "7d";
 const AFFILIATE_RECEIPTS_BUCKET = "affiliate-receipts";
 const AFFILIATE_RECEIPT_SIGNED_URL_TTL_SECONDS = 15 * 60;
 const AFFILIATE_PROFILE_PHOTOS_BUCKET =
@@ -17,6 +16,11 @@ const AFFILIATE_PROFILE_PHOTO_ALLOWED_MIMES = new Set([
   "image/webp",
   "image/gif",
 ]);
+
+// Hash bcrypt fixo para equalizar o custo de autenticação quando a conta não existe
+// ou não está apta ao login. Nunca corresponde a uma senha real do sistema.
+const DUMMY_AFFILIATE_PASSWORD_HASH =
+  "$2b$12$afxAjc9lPuKLmnYsLX.BQ.l9J3RG7DlheY/WJ49QOETTjU8hVj9hG";
 
 
 
@@ -251,15 +255,6 @@ async function uploadAffiliateProfilePhoto({ affiliateId, file }) {
 }
 
 
-function getJwtSecret() {
-  const secret = process.env.JWT_SECRET || process.env.jwtSecret;
-
-  if (!secret) {
-    throw new Error("JWT_SECRET não configurado no backend.");
-  }
-
-  return secret;
-}
 
 function normalizeEmail(email) {
   return String(email || "").trim().toLowerCase();
@@ -267,6 +262,22 @@ function normalizeEmail(email) {
 
 function hashPasswordResetToken(token) {
   return crypto.createHash("sha256").update(token).digest("hex");
+}
+
+function hashAffiliateResetTelemetry(value, label) {
+  const normalized = String(value || "").trim();
+  if (!normalized) return null;
+
+  return crypto
+    .createHmac(
+      "sha256",
+      getAffiliateSecurityKey(
+        "password-reset-telemetry",
+        "AFFILIATE_INTRUSION_SECRET"
+      )
+    )
+    .update(`${label}:${normalized}`, "utf8")
+    .digest("hex");
 }
 
 function getAffiliateResetStoreBaseUrl() {
@@ -631,33 +642,6 @@ function buildAffiliatePayload(affiliate) {
   };
 }
 
-function signAffiliateToken(affiliate) {
-  return jwt.sign(
-    {
-      type: "affiliate",
-      affiliate_id: affiliate.id,
-      email: affiliate.email,
-      auth_version: Number(affiliate.auth_token_version || 1),
-    },
-    getJwtSecret(),
-    {
-      algorithm: "HS256",
-      expiresIn: AFFILIATE_TOKEN_EXPIRES_IN,
-    }
-  );
-}
-
-export function verifyAffiliateToken(token) {
-  const decoded = jwt.verify(token, getJwtSecret(), {
-    algorithms: ["HS256"],
-  });
-
-  if (!decoded || decoded.type !== "affiliate" || !decoded.affiliate_id) {
-    throw new Error("Token de afiliado inválido.");
-  }
-
-  return decoded;
-}
 
 export async function loginAffiliate({ email, password }) {
   const normalizedEmail = normalizeEmail(email);
@@ -673,61 +657,65 @@ export async function loginAffiliate({ email, password }) {
     "id,full_name,email,phone,ref_code,coupon_code,status,commission_rate,password_hash,access_enabled,pix_key,pix_key_type,auth_token_version,created_at"
   );
 
-  if (!affiliate) {
-    const error = new Error("E-mail ou senha inválidos.");
-    error.statusCode = 401;
-    throw error;
-  }
-
-  if (affiliate.access_enabled === false) {
-    const error = new Error("Acesso do afiliado desativado.");
-    error.statusCode = 403;
-    throw error;
-  }
-
-  const normalizedStatus = String(affiliate.status || "active")
-  .trim()
-  .toLowerCase();
-
-const activeStatuses = ["active", "ativo"];
-
-if (!activeStatuses.includes(normalizedStatus)) {
-  const error = new Error("Afiliado não está ativo.");
-  error.statusCode = 403;
-  throw error;
-}
-
-  if (!affiliate.password_hash) {
-    const error = new Error(
-      "Afiliado ainda não possui senha cadastrada. Solicite ao administrador."
-    );
-    error.statusCode = 403;
-    throw error;
-  }
-
-  const passwordMatches = await bcrypt.compare(
-    String(password),
-    affiliate.password_hash
+  const normalizedStatus = String(affiliate?.status || "")
+    .trim()
+    .toLowerCase();
+  const activeStatuses = ["active", "ativo"];
+  const accountCanAuthenticate = Boolean(
+    affiliate?.id &&
+      affiliate?.password_hash &&
+      affiliate.access_enabled !== false &&
+      activeStatuses.includes(normalizedStatus)
   );
 
-  if (!passwordMatches) {
+  // Executa bcrypt mesmo quando a conta não existe/inativa. Isso evita que
+  // o tempo de resposta revele a existência ou o estado do e-mail.
+  let passwordMatches = false;
+  try {
+    passwordMatches = await bcrypt.compare(
+      String(password),
+      accountCanAuthenticate
+        ? affiliate.password_hash
+        : DUMMY_AFFILIATE_PASSWORD_HASH
+    );
+  } catch (error) {
+    console.error("[AFFILIATE_LOGIN_BCRYPT_ERROR]", {
+      affiliate_id: affiliate?.id || null,
+      message: error?.message || String(error),
+    });
+  }
+
+  if (!accountCanAuthenticate || !passwordMatches) {
     const error = new Error("E-mail ou senha inválidos.");
     error.statusCode = 401;
     throw error;
+  }
+
+  const loginPatch = {
+    last_login_at: new Date().toISOString(),
+  };
+
+  // Migração gradual sem forçar troca de senha: cadastros antigos usavam cost 10,
+  // enquanto resets novos usam cost 12. Um login válido atualiza o hash em silêncio.
+  try {
+    if (bcrypt.getRounds(affiliate.password_hash) < 12) {
+      loginPatch.password_hash = await bcrypt.hash(String(password), 12);
+    }
+  } catch (error) {
+    console.error("[AFFILIATE_PASSWORD_REHASH_WARN]", {
+      affiliate_id: affiliate.id,
+      message: error?.message || String(error),
+    });
   }
 
   await supabaseRequest(`/affiliates?id=eq.${affiliate.id}`, {
     method: "PATCH",
-    body: {
-      last_login_at: new Date().toISOString(),
-    },
+    body: loginPatch,
   });
 
-  const token = signAffiliateToken(affiliate);
-
   return {
-    token,
     affiliate: buildAffiliatePayload(affiliate),
+    authVersion: Number(affiliate.auth_token_version || 1),
   };
 }
 
@@ -2237,11 +2225,15 @@ function isAffiliateActive(affiliate = {}) {
   return activeStatuses.includes(normalizedStatus) && affiliate.access_enabled !== false;
 }
 
-export async function requestAffiliatePasswordReset({ email } = {}) {
+export async function requestAffiliatePasswordReset({
+  email,
+  ipAddress = null,
+  userAgent = null,
+} = {}) {
   const normalizedEmail = normalizeEmail(email);
 
-  if (!normalizedEmail) {
-    const error = new Error("Informe o Gmail cadastrado.");
+  if (!normalizedEmail || !normalizedEmail.includes("@")) {
+    const error = new Error("Informe um e-mail válido.");
     error.statusCode = 400;
     throw error;
   }
@@ -2251,23 +2243,13 @@ export async function requestAffiliatePasswordReset({ email } = {}) {
     "id,full_name,email,phone,ref_code,coupon_code,status,commission_rate,password_hash,access_enabled,pix_key,pix_key_type,created_at"
   );
 
-  /*
-    Resposta propositalmente genérica:
-    evita expor se um e-mail existe ou não no sistema.
-  */
-  if (!affiliate) {
+  // Não diferencia conta inexistente, inativa ou apta. O controller mantém
+  // a mesma resposta pública em todos os casos.
+  if (!affiliate || !isAffiliateActive(affiliate)) {
     return {
       sent: false,
       skipped: true,
-      reason: "affiliate_not_found",
-    };
-  }
-
-  if (!isAffiliateActive(affiliate)) {
-    return {
-      sent: false,
-      skipped: true,
-      reason: "affiliate_not_active",
+      reason: affiliate ? "affiliate_not_active" : "affiliate_not_found",
     };
   }
 
@@ -2275,142 +2257,86 @@ export async function requestAffiliatePasswordReset({ email } = {}) {
   const tokenHash = hashPasswordResetToken(rawToken);
   const expiresInMinutes = 30;
   const expiresAt = new Date(Date.now() + expiresInMinutes * 60 * 1000).toISOString();
-  const now = new Date().toISOString();
 
-  await supabaseRequest(
-    `/affiliate_password_resets?affiliate_id=eq.${encodeURIComponent(
-      affiliate.id
-    )}&used_at=is.null`,
+  const { data: resetData, error: resetError } = await supabaseAdmin.rpc(
+    "create_affiliate_password_reset_atomic",
     {
-      method: "PATCH",
-      body: {
-        used_at: now,
-      },
+      p_affiliate_id: affiliate.id,
+      p_email: normalizedEmail,
+      p_token_hash: tokenHash,
+      p_expires_at: expiresAt,
+      p_ip_hash: hashAffiliateResetTelemetry(ipAddress, "ip"),
+      p_user_agent_hash: hashAffiliateResetTelemetry(
+        String(userAgent || "").slice(0, 512),
+        "ua"
+      ),
     }
   );
 
-  await supabaseRequest("/affiliate_password_resets", {
-    method: "POST",
-    body: {
-      affiliate_id: affiliate.id,
-      email: normalizedEmail,
-      token_hash: tokenHash,
-      expires_at: expiresAt,
-    },
-  });
-
-  const resetLink = `${getAffiliateResetStoreBaseUrl()}/pages-html/afiliado-redefinir-senha.html?token=${rawToken}`;
-
-  const notification = await notifyAffiliatePasswordReset(affiliate, {
-    resetLink,
-    expiresInMinutes,
-  });
-
-  if (!notification?.sent) {
-    const error = new Error(
-      "Não foi possível enviar o link de redefinição pelo Brevo. Verifique as variáveis SMTP no Render."
-    );
-    error.statusCode = 502;
-    error.details = notification;
+  const resetRow = Array.isArray(resetData) ? resetData[0] : resetData;
+  if (resetError || !resetRow?.id) {
+    const error = new Error("Não foi possível criar o pedido de redefinição.");
+    error.statusCode = 503;
+    error.code = "AFFILIATE_PASSWORD_RESET_CREATE_FAILED";
+    error.details = resetError?.message || null;
     throw error;
   }
 
+  const resetLink = `${getAffiliateResetStoreBaseUrl()}/pages-html/afiliado-redefinir-senha.html?token=${rawToken}`;
+
+  // O envio externo é desacoplado da latência da resposta pública para que o
+  // tempo de SMTP não revele se o e-mail existe. O token já está persistido de
+  // forma atômica; falhas de entrega ficam apenas na observabilidade interna.
+  void notifyAffiliatePasswordReset(affiliate, {
+    resetLink,
+    expiresInMinutes,
+  })
+    .then((notification) => {
+      if (!notification?.sent) {
+        console.error("[AFFILIATE_PASSWORD_RESET_DELIVERY_FAILED]", {
+          affiliate_id: affiliate.id,
+          reason: notification?.reason || "unknown",
+        });
+      }
+    })
+    .catch((error) => {
+      console.error("[AFFILIATE_PASSWORD_RESET_DELIVERY_ERROR]", {
+        affiliate_id: affiliate.id,
+        message: error?.message || String(error),
+      });
+    });
+
   return {
-    sent: true,
+    sent: null,
+    scheduled: true,
     skipped: false,
-    notification,
   };
 }
 
 export async function checkAffiliateAccessByEmail({ email } = {}) {
   const normalizedEmail = normalizeEmail(email);
 
-  if (!normalizedEmail) {
-    const error = new Error("Informe o Gmail.");
+  if (!normalizedEmail || !normalizedEmail.includes("@")) {
+    const error = new Error("Informe um e-mail válido.");
     error.statusCode = 400;
     throw error;
   }
 
-  const affiliate = await findAffiliateByEmail(
-    normalizedEmail,
-    "id,full_name,email,status,access_enabled,password_hash,ref_code"
-  );
+  /*
+    Compatibilidade temporária com páginas antigas da loja.
+    Esta rota NÃO consulta tabelas de conta ou solicitação e, portanto,
+    não funciona como oráculo de existência/estado da conta.
 
-  if (affiliate) {
-    const active = isAffiliateActive(affiliate);
-
-    if (active) {
-      return {
-        exists: true,
-        type: "affiliate",
-        status: "approved",
-        shouldRedirectToLogin: true,
-        email: normalizedEmail,
-        message: "Seu cadastro já foi aprovado. Faça login para acessar seu painel.",
-      };
-    }
-
-    return {
-      exists: true,
-      type: "affiliate",
-      status: affiliate.status || "inactive",
-      shouldRedirectToLogin: false,
-      email: normalizedEmail,
-      message: "Seu cadastro existe, mas o acesso ao painel ainda não está ativo.",
-    };
-  }
-
-  const applications = await supabaseRequest(
-    `/affiliate_applications?email=eq.${encodeURIComponent(
-      normalizedEmail
-    )}&select=id,email,status,affiliate_id,created_at&order=created_at.desc&limit=1`
-  );
-
-  const application = Array.isArray(applications) ? applications[0] : null;
-
-  if (application) {
-    const status = String(application.status || "").toLowerCase();
-
-    if (status === "pending") {
-      return {
-        exists: true,
-        type: "application",
-        status: "pending",
-        shouldRedirectToLogin: false,
-        email: normalizedEmail,
-        message: "Seu cadastro de afiliado ainda está em análise.",
-      };
-    }
-
-    if (status === "approved") {
-      return {
-        exists: true,
-        type: "application",
-        status: "approved",
-        shouldRedirectToLogin: true,
-        email: normalizedEmail,
-        message: "Seu cadastro já foi aprovado. Faça login para acessar seu painel.",
-      };
-    }
-
-    if (status === "rejected") {
-      return {
-        exists: true,
-        type: "application",
-        status: "rejected",
-        shouldRedirectToLogin: false,
-        email: normalizedEmail,
-        message: "Sua solicitação de afiliado não foi aprovada.",
-      };
-    }
-  }
-
+    A loja nova ignora esta rota no login e no cadastro. Depois que a
+    migração do frontend estiver consolidada, ela pode ser removida.
+  */
   return {
-    exists: false,
-    type: "none",
-    status: "not_found",
+    exists: null,
+    type: "unknown",
+    status: null,
     shouldRedirectToLogin: false,
     email: normalizedEmail,
-    message: "Nenhum cadastro encontrado para este Gmail.",
+    message:
+      "Por segurança, o status do cadastro não é informado por esta consulta. Continue pelo login ou envie sua solicitação normalmente.",
   };
 }

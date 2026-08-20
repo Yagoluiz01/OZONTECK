@@ -17,7 +17,10 @@ import {
   adminAccessRequestLimiter,
   adminAuthLimiter,
   adminPasswordRecoveryLimiter,
-  affiliateAuthLimiter,
+  affiliateApplicationLimiter,
+  affiliateEmailStatusLimiter,
+  affiliateLoginLimiter,
+  affiliatePasswordRecoveryLimiter,
   storeCheckoutLimiter,
   storeCustomerAuthLimiter,
   storeInstallmentsLimiter,
@@ -41,6 +44,8 @@ import adminStoreThemeRoutes from "./routes/adminStoreTheme.routes.js";
 import storeThemeRoutes from "./routes/storeTheme.routes.js";
 
 import { env } from "./config/env.js";
+import { assertAffiliateSecurityConfiguration } from "./services/affiliateSecurityKey.service.js";
+import { assertAffiliateLegacyBridgeConfiguration } from "./services/affiliateLegacyBridge.service.js";
 import authRoutes from "./routes/auth.routes.js";
 import productsRoutes from "./routes/products.routes.js";
 import stockRoutes from "./routes/stock.routes.js";
@@ -72,6 +77,11 @@ import { captureAdminMutationAudit } from "./middlewares/audit.middleware.js";
 
 const app = express();
 app.disable("x-powered-by");
+
+// Falha fechada em produção se os segredos da sessão/CSRF/telemetria do
+// afiliado não estiverem configurados com entropia suficiente.
+assertAffiliateSecurityConfiguration();
+assertAffiliateLegacyBridgeConfiguration();
 
 // A API roda atrás do proxy reverso do Render.
 // Confiar em exatamente um salto permite que req.ip e o express-rate-limit
@@ -245,10 +255,12 @@ app.post("/api/auth/login", adminAuthLimiter);
 app.post("/api/auth/forgot-password", adminPasswordRecoveryLimiter);
 app.post("/api/auth/reset-password", adminPasswordRecoveryLimiter);
 app.post("/api/auth/admin-register-request", adminAccessRequestLimiter);
-app.post("/api/affiliate/auth/login", affiliateAuthLimiter);
-app.post("/api/affiliate/auth/forgot-password", affiliateAuthLimiter);
-app.post("/api/public/affiliates/password/forgot-password", affiliateAuthLimiter);
-app.post("/api/public/affiliates/password/reset-password", affiliateAuthLimiter);
+app.post("/api/affiliate/auth/login", affiliateLoginLimiter);
+app.post("/api/affiliate/auth/check-email", affiliateEmailStatusLimiter);
+app.post("/api/affiliate/auth/forgot-password", affiliatePasswordRecoveryLimiter);
+app.post("/api/public/affiliates/password/forgot-password", affiliatePasswordRecoveryLimiter);
+app.post("/api/public/affiliates/password/reset-password", affiliatePasswordRecoveryLimiter);
+app.post("/api/store/affiliates/apply", affiliateApplicationLimiter);
 app.post("/api/store/customer/login", storeCustomerAuthLimiter);
 app.post("/api/store/customer/register", storeCustomerAuthLimiter);
 app.post("/api/store/shipping/quote", storeQuoteLimiter);
@@ -267,6 +279,8 @@ app.use((req, res, next) => {
   const sensitiveApiPath =
     req.path.startsWith("/api/auth") ||
     req.path.startsWith("/api/admin") ||
+    req.path.startsWith("/api/affiliate") ||
+    req.path.startsWith("/api/public/affiliates/password") ||
     req.path.startsWith("/api/ai") ||
     req.path.startsWith("/api/store/orders") ||
     req.path.startsWith("/api/store/payments");

@@ -1,260 +1,88 @@
 import express from "express";
 import crypto from "crypto";
 import bcrypt from "bcryptjs";
-import nodemailer from "nodemailer";
-import { createClient } from "@supabase/supabase-js";
+
+import { supabaseAdmin } from "../config/supabase.js";
+import { requestAffiliatePasswordReset } from "../services/affiliatePortal.service.js";
 
 const router = express.Router();
 
-const supabaseAdmin = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
+const RESET_TOKEN_PATTERN = /^[a-f0-9]{64}$/i;
+const BCRYPT_MAX_PASSWORD_BYTES = 72;
+
+const PASSWORD_RESET_MIN_RESPONSE_MS = 700;
+
+async function enforcePasswordResetRequestDuration(startedAtMs) {
+  const jitterMs = crypto.randomInt(0, 121);
+  const targetMs = PASSWORD_RESET_MIN_RESPONSE_MS + jitterMs;
+  const elapsed = Date.now() - startedAtMs;
+  const remaining = Math.max(0, targetMs - elapsed);
+  if (remaining > 0) {
+    await new Promise((resolve) => setTimeout(resolve, remaining));
+  }
+}
 
 function normalizeEmail(email) {
   return String(email || "").trim().toLowerCase();
 }
 
 function hashToken(token) {
-  return crypto.createHash("sha256").update(token).digest("hex");
+  return crypto.createHash("sha256").update(String(token || ""), "utf8").digest("hex");
+}
+
+function passwordByteLength(password) {
+  return Buffer.byteLength(String(password || ""), "utf8");
 }
 
 function isStrongPassword(password) {
   return (
     typeof password === "string" &&
-    password.length >= 8 &&
+    password.length >= 12 &&
+    passwordByteLength(password) <= BCRYPT_MAX_PASSWORD_BYTES &&
     /[A-Z]/.test(password) &&
     /[a-z]/.test(password) &&
     /[0-9]/.test(password)
   );
 }
 
-function getStoreBaseUrl() {
-  return (
-    process.env.STORE_PUBLIC_URL ||
-    process.env.STORE_BASE_URL ||
-    "https://ozonteck-loja.onrender.com"
-  ).replace(/\/+$/, "");
-}
-
-function getMailConfig() {
-  const smtpHost =
-    process.env.BREVO_SMTP_HOST ||
-    process.env.SMTP_HOST ||
-    "smtp-relay.brevo.com";
-
-  const smtpPort = Number(
-    process.env.BREVO_SMTP_PORT ||
-      process.env.SMTP_PORT ||
-      587
-  );
-
-  const smtpUser =
-    process.env.BREVO_SMTP_USER ||
-    process.env.SMTP_USER;
-
-  const smtpPass =
-    process.env.BREVO_SMTP_PASS ||
-    process.env.SMTP_PASS;
-
-  const fromEmail =
-    process.env.MAIL_FROM_EMAIL ||
-    process.env.SMTP_FROM_EMAIL ||
-    process.env.BREVO_FROM_EMAIL ||
-    smtpUser;
-
-  const fromName =
-    process.env.MAIL_FROM_NAME ||
-    process.env.SMTP_FROM_NAME ||
-    "OZONTECK";
-
-  return {
-    smtpHost,
-    smtpPort,
-    smtpUser,
-    smtpPass,
-    fromEmail,
-    fromName,
-  };
-}
-
-function getMailTransporter() {
-  const { smtpHost, smtpPort, smtpUser, smtpPass } = getMailConfig();
-
-  return nodemailer.createTransport({
-    host: smtpHost,
-    port: smtpPort,
-    secure: smtpPort === 465,
-    auth: {
-      user: smtpUser,
-      pass: smtpPass,
-    },
-  });
-}
-
-async function sendResetEmail({ to, name, resetLink }) {
-  const { smtpUser, smtpPass, fromEmail, fromName } = getMailConfig();
-
-  if (!smtpUser || !smtpPass) {
-    console.warn("RESET PASSWORD EMAIL: credenciais SMTP/Brevo ausentes.");
-    return;
-  }
-
-  if (!fromEmail) {
-    console.warn("RESET PASSWORD EMAIL: remetente ausente.");
-    return;
-  }
-
-  const transporter = getMailTransporter();
-
-  const safeName = String(name || "").trim();
-
-  const html = `
-    <div style="font-family: Arial, sans-serif; background: #f3f4f6; padding: 24px;">
-      <div style="max-width: 560px; margin: auto; background: #ffffff; border-radius: 18px; padding: 28px; border: 1px solid #e5e7eb;">
-        <div style="text-align:center; margin-bottom: 22px;">
-          <h1 style="margin:0; color:#111827; font-size:24px;">OZONTECK</h1>
-          <p style="margin:8px 0 0; color:#6b7280; font-size:14px;">
-            Painel de Afiliados
-          </p>
-        </div>
-
-        <h2 style="margin: 0 0 12px; color: #111827; font-size: 22px;">
-          Redefinição de senha
-        </h2>
-
-        <p style="font-size: 15px; color: #374151; line-height: 1.6;">
-          Olá${safeName ? `, <strong>${safeName}</strong>` : ""}.
-        </p>
-
-        <p style="font-size: 15px; color: #374151; line-height: 1.6;">
-          Recebemos uma solicitação para redefinir a senha do seu painel de afiliado OZONTECK.
-        </p>
-
-        <div style="text-align: center; margin: 28px 0;">
-          <a href="${resetLink}"
-             style="display:inline-block; background:#111827; color:#ffffff; text-decoration:none; padding:14px 24px; border-radius:12px; font-weight:700;">
-            Redefinir minha senha
-          </a>
-        </div>
-
-        <p style="font-size: 14px; color: #6b7280; line-height: 1.6;">
-          Este link expira em 30 minutos. Se você não solicitou essa alteração, ignore este e-mail.
-        </p>
-
-        <p style="font-size: 13px; color: #9ca3af; margin-top: 22px;">
-          OZONTECK — Sistema de Afiliados
-        </p>
-      </div>
-    </div>
-  `;
-
-  await transporter.sendMail({
-    from: `"${fromName}" <${fromEmail}>`,
-    to,
-    subject: "Redefinição de senha - Painel de Afiliados OZONTECK",
-    html,
-  });
+function passwordPolicyMessage() {
+  return "A nova senha precisa ter pelo menos 12 caracteres, com letra maiúscula, letra minúscula e número, sem ultrapassar 72 bytes.";
 }
 
 router.post("/forgot-password", async (req, res) => {
-  try {
-    const email = normalizeEmail(req.body?.email);
+  const startedAtMs = Date.now();
+  const email = normalizeEmail(req.body?.email);
+  const genericMessage =
+    "Se este e-mail estiver cadastrado, enviaremos um link para redefinir sua senha.";
 
-    if (!email || !email.includes("@")) {
-      return res.status(400).json({
-        success: false,
-        message: "Informe um e-mail válido.",
-      });
-    }
-
-    const genericMessage =
-      "Se este e-mail estiver cadastrado, enviaremos um link para redefinir sua senha.";
-
-    const { data: affiliate, error: affiliateError } = await supabaseAdmin
-      .from("affiliates")
-      .select("id, full_name, email, status")
-      .eq("email", email)
-      .maybeSingle();
-
-    if (affiliateError) {
-      console.error("FORGOT PASSWORD AFFILIATE QUERY ERROR:", affiliateError);
-
-      return res.status(500).json({
-        success: false,
-        message: "Erro ao solicitar redefinição de senha.",
-      });
-    }
-
-    // Segurança: não revela se o e-mail existe ou não.
-    if (!affiliate) {
-      return res.json({
-        success: true,
-        message: genericMessage,
-      });
-    }
-
-    const rawToken = crypto.randomBytes(32).toString("hex");
-    const tokenHash = hashToken(rawToken);
-    const expiresAt = new Date(Date.now() + 30 * 60 * 1000).toISOString();
-
-    await supabaseAdmin
-      .from("affiliate_password_resets")
-      .update({
-        used_at: new Date().toISOString(),
-      })
-      .eq("affiliate_id", affiliate.id)
-      .is("used_at", null);
-
-    const { error: insertError } = await supabaseAdmin
-      .from("affiliate_password_resets")
-      .insert({
-        affiliate_id: affiliate.id,
-        email,
-        token_hash: tokenHash,
-        expires_at: expiresAt,
-        ip_address: req.ip || null,
-        user_agent: req.get("user-agent") || null,
-      });
-
-    if (insertError) {
-      console.error("FORGOT PASSWORD TOKEN INSERT ERROR:", insertError);
-
-      return res.status(500).json({
-        success: false,
-        message: "Erro ao gerar link de redefinição.",
-      });
-    }
-
-    const resetLink = `${getStoreBaseUrl()}/pages-html/afiliado-redefinir-senha.html?token=${rawToken}`;
-
-    try {
-      await sendResetEmail({
-        to: email,
-        name: affiliate.full_name,
-        resetLink,
-      });
-    } catch (emailError) {
-      console.error("RESET PASSWORD SEND EMAIL ERROR:", emailError);
-
-      return res.status(500).json({
-        success: false,
-        message: "Erro ao enviar e-mail de redefinição.",
-      });
-    }
-
-    return res.json({
-      success: true,
-      message: genericMessage,
-    });
-  } catch (error) {
-    console.error("FORGOT PASSWORD ERROR:", error);
-
-    return res.status(500).json({
+  if (!email || !email.includes("@")) {
+    return res.status(400).json({
       success: false,
-      message: "Erro interno ao solicitar redefinição de senha.",
+      message: "Informe um e-mail válido.",
     });
   }
+
+  try {
+    await requestAffiliatePasswordReset({
+      email,
+      ipAddress: req.ip || req.socket?.remoteAddress || null,
+      userAgent: req.get?.("user-agent") || req.headers?.["user-agent"] || null,
+    });
+  } catch (error) {
+    // Resposta pública permanece igual para impedir enumeração de conta por
+    // falhas de SMTP, banco ou geração do token.
+    console.error("[AFFILIATE_PUBLIC_PASSWORD_RESET_REQUEST_ERROR]", {
+      message: error?.message || String(error),
+      code: error?.code || null,
+    });
+  }
+
+  await enforcePasswordResetRequestDuration(startedAtMs);
+
+  return res.json({
+    success: true,
+    message: genericMessage,
+  });
 });
 
 router.post("/reset-password", async (req, res) => {
@@ -262,18 +90,17 @@ router.post("/reset-password", async (req, res) => {
     const token = String(req.body?.token || "").trim();
     const newPassword = String(req.body?.password || "");
 
-    if (!token) {
+    if (!RESET_TOKEN_PATTERN.test(token)) {
       return res.status(400).json({
         success: false,
-        message: "Token não enviado.",
+        message: "Link inválido, expirado ou já utilizado.",
       });
     }
 
     if (!isStrongPassword(newPassword)) {
       return res.status(400).json({
         success: false,
-        message:
-          "A nova senha precisa ter pelo menos 8 caracteres, com letra maiúscula, letra minúscula e número.",
+        message: passwordPolicyMessage(),
       });
     }
 
@@ -324,4 +151,4 @@ router.post("/reset-password", async (req, res) => {
   }
 });
 
-export default router;  
+export default router;
