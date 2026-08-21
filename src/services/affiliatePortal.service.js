@@ -322,6 +322,77 @@ function normalizeMoney(value) {
   return number;
 }
 
+function normalizeCommissionPercent(value) {
+  const number = Number(value);
+
+  if (!Number.isFinite(number)) {
+    return null;
+  }
+
+  return Math.min(Math.max(number, 0), 100);
+}
+
+export async function getAffiliateCommissionPolicy(affiliate = {}) {
+  const fallback = {
+    direct: {
+      source: "affiliate",
+      global_enabled: false,
+      percent: normalizeCommissionPercent(affiliate?.commission_rate),
+    },
+    recruitment: {
+      source: "configured_policy",
+      global_enabled: false,
+      percent: null,
+    },
+    updated_at: null,
+  };
+
+  try {
+    const { data: row, error } = await supabaseAdmin
+      .from("affiliate_commission_settings")
+      .select(
+        "fixed_commission_enabled,fixed_commission_percent,fixed_recruitment_commission_enabled,fixed_recruitment_commission_percent,updated_at"
+      )
+      .eq("id", "global")
+      .maybeSingle();
+
+    if (error) {
+      throw error;
+    }
+
+    if (!row) {
+      return fallback;
+    }
+
+    const directGlobalEnabled = row.fixed_commission_enabled === true;
+    const recruitmentGlobalEnabled =
+      row.fixed_recruitment_commission_enabled === true;
+
+    return {
+      direct: {
+        source: directGlobalEnabled ? "global" : "affiliate",
+        global_enabled: directGlobalEnabled,
+        percent: directGlobalEnabled
+          ? normalizeCommissionPercent(row.fixed_commission_percent)
+          : fallback.direct.percent,
+      },
+      recruitment: {
+        source: recruitmentGlobalEnabled ? "global" : "configured_policy",
+        global_enabled: recruitmentGlobalEnabled,
+        percent: recruitmentGlobalEnabled
+          ? normalizeCommissionPercent(row.fixed_recruitment_commission_percent)
+          : null,
+      },
+      updated_at: row.updated_at || null,
+    };
+  } catch (error) {
+    console.warn("AFFILIATE COMMISSION POLICY LOAD WARN:", {
+      affiliate_id: affiliate?.id || null,
+      message: error?.message || String(error),
+    });
+    return fallback;
+  }
+}
 
 function normalizeStatus(value) {
   return String(value || "")
@@ -831,6 +902,7 @@ export async function getAffiliateSummary(affiliateId) {
     affiliateOrdersTableRows,
     activeLevelRows,
     rewardClaimRows,
+    commissionPolicy,
   ] = await Promise.all([
     supabaseRequest(
       `/affiliate_conversions?affiliate_id=eq.${encodeURIComponent(
@@ -861,6 +933,7 @@ export async function getAffiliateSummary(affiliateId) {
         affiliateId
       )}&select=id,affiliate_id,affiliate_level_id,level_order,level_name,winning_path,target_id,product_id,completion_id,product_conversion_id,standard_bonus_id,status,won_at,updated_at&order=level_order.asc`
     ).catch(() => []),
+    getAffiliateCommissionPolicy(affiliate),
   ]);
 
   const safeConversions = Array.isArray(conversions) ? conversions : [];
@@ -993,6 +1066,19 @@ export async function getAffiliateSummary(affiliateId) {
     0
   );
 
+  summary.global_direct_commission_enabled =
+    commissionPolicy?.direct?.global_enabled === true;
+  summary.global_direct_commission_percent =
+    commissionPolicy?.direct?.global_enabled === true
+      ? commissionPolicy.direct.percent
+      : null;
+  summary.global_recruitment_commission_enabled =
+    commissionPolicy?.recruitment?.global_enabled === true;
+  summary.global_recruitment_commission_percent =
+    commissionPolicy?.recruitment?.global_enabled === true
+      ? commissionPolicy.recruitment.percent
+      : null;
+
   const goalLevelOrder = Number(goal?.current_level_order || 1);
   const legacyCurrentLevel =
     safeActiveLevels.find((level) => Number(level.level_order || 0) === goalLevelOrder) ||
@@ -1111,6 +1197,7 @@ export async function getAffiliateSummary(affiliateId) {
     level_goal,
     level_bonuses,
     levels,
+    commission_policy: commissionPolicy,
   };
 }
 

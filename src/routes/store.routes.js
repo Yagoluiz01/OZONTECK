@@ -121,26 +121,183 @@ function normalizeMarketingPixel(row = {}) {
   };
 }
 
+async function fetchActiveMarketingPixels() {
+  const url = new URL(`${env.supabaseUrl}/rest/v1/marketing_pixels`);
+
+  url.searchParams.set("is_active", "eq.true");
+  url.searchParams.set(
+    "select",
+    "id,provider,name,pixel_id,is_active,enabled_events,page_rules,extra_config,created_at,updated_at"
+  );
+  url.searchParams.set("order", "created_at.asc");
+
+  const response = await fetchWithTimeout(
+    url.toString(),
+    {
+      method: "GET",
+      headers: getMarketingPixelSupabaseHeaders(),
+    },
+    {
+      timeoutMs: PUBLIC_ORIGIN_TIMEOUT_MS,
+      label: "Pixels públicos de marketing",
+    },
+  );
+
+  const data = await response.json().catch(() => []);
+
+  if (!response.ok) {
+    const error = new Error("Erro ao buscar pixels de marketing");
+    error.status = response.status;
+    error.details = data;
+    throw error;
+  }
+
+  return Array.isArray(data)
+    ? data
+        .map(normalizeMarketingPixel)
+        .filter((pixel) => pixel.provider && pixel.pixelId && pixel.isActive)
+    : [];
+}
+
+function startMarketingPixelsLoad() {
+  if (!marketingPixelsLoadPromise) {
+    marketingPixelsLoadPromise = fetchActiveMarketingPixels()
+      .then((pixels) => {
+        marketingPixelsServerCache = {
+          createdAt: Date.now(),
+          pixels,
+        };
+
+        return {
+          pixels,
+          source: "origin",
+        };
+      })
+      .finally(() => {
+        marketingPixelsLoadPromise = null;
+      });
+  }
+
+  return marketingPixelsLoadPromise;
+}
+
+async function getMarketingPixelsSnapshot() {
+  const now = Date.now();
+  const cacheAge = now - Number(marketingPixelsServerCache.createdAt || 0);
+
+  if (
+    marketingPixelsServerCache.createdAt &&
+    cacheAge <= MARKETING_PIXELS_SERVER_CACHE_TTL_MS
+  ) {
+    return {
+      pixels: marketingPixelsServerCache.pixels,
+      source: "memory",
+    };
+  }
+
+  if (
+    marketingPixelsServerCache.createdAt &&
+    cacheAge <= MARKETING_PIXELS_SERVER_CACHE_STALE_MS
+  ) {
+    void startMarketingPixelsLoad().catch((error) => {
+      console.warn("PIXELS DE MARKETING: falha ao atualizar cache em segundo plano.", {
+        error: error?.message || String(error),
+        cacheAge,
+      });
+    });
+
+    return {
+      pixels: marketingPixelsServerCache.pixels,
+      source: "stale-revalidate",
+    };
+  }
+
+  return startMarketingPixelsLoad();
+}
+
+function startActiveCategoriesLoad() {
+  if (!activeCategoriesLoadPromise) {
+    activeCategoriesLoadPromise = (async () => {
+      const { supabaseAdmin } = await import("../config/supabase.js");
+      const { data, error } = await withTimeout(
+        supabaseAdmin.rpc("get_active_categories"),
+        {
+          timeoutMs: PUBLIC_ORIGIN_TIMEOUT_MS,
+          label: "Categorias públicas",
+        },
+      );
+
+      if (error) {
+        const loadError = new Error("Erro ao buscar categorias ativas");
+        loadError.details = error;
+        throw loadError;
+      }
+
+      activeCategoriesServerCache = {
+        createdAt: Date.now(),
+        categories: Array.isArray(data) ? data : [],
+      };
+
+      return {
+        categories: activeCategoriesServerCache.categories,
+        source: "origin",
+      };
+    })().finally(() => {
+      activeCategoriesLoadPromise = null;
+    });
+  }
+
+  return activeCategoriesLoadPromise;
+}
+
+async function getActiveCategoriesSnapshot() {
+  const now = Date.now();
+  const cacheAge = now - Number(activeCategoriesServerCache.createdAt || 0);
+
+  if (
+    activeCategoriesServerCache.createdAt &&
+    cacheAge <= ACTIVE_CATEGORIES_SERVER_CACHE_TTL_MS
+  ) {
+    return {
+      categories: activeCategoriesServerCache.categories,
+      source: "memory",
+    };
+  }
+
+  if (
+    activeCategoriesServerCache.createdAt &&
+    cacheAge <= ACTIVE_CATEGORIES_SERVER_CACHE_STALE_MS
+  ) {
+    void startActiveCategoriesLoad().catch((error) => {
+      console.warn("CATEGORIAS ATIVAS: falha ao atualizar cache em segundo plano.", {
+        error: error?.message || String(error),
+        cacheAge,
+      });
+    });
+
+    return {
+      categories: activeCategoriesServerCache.categories,
+      source: "stale-revalidate",
+    };
+  }
+
+  return startActiveCategoriesLoad();
+}
+
 router.get("/categories/active", async (req, res) => {
   try {
-    const { supabaseAdmin } = await import("../config/supabase.js");
-    const { data, error } = await supabaseAdmin.rpc("get_active_categories");
+    const snapshot = await getActiveCategoriesSnapshot();
 
-    if (error) {
-      console.error("ERRO AO BUSCAR CATEGORIAS ATIVAS:", error);
-      return res.status(500).json({
-        success: false,
-        message: "Erro ao buscar categorias ativas",
-        categories: [],
-      });
-    }
+    res.set("Cache-Control", ACTIVE_CATEGORIES_CACHE_CONTROL);
+    res.set("X-Ozonteck-Categories-Cache", snapshot.source);
 
     return res.json({
       success: true,
-      categories: data || [],
+      categories: snapshot.categories,
     });
   } catch (error) {
     console.error("ERRO GERAL AO BUSCAR CATEGORIAS ATIVAS:", error);
+    res.set("Cache-Control", "no-store");
     return res.status(500).json({
       success: false,
       message: "Erro ao buscar categorias ativas",
@@ -206,47 +363,18 @@ router.get("/categories/:idOrSlug", async (req, res) => {
 
 router.get("/marketing/pixels", async (req, res) => {
   try {
-    const url = new URL(`${env.supabaseUrl}/rest/v1/marketing_pixels`);
+    const snapshot = await getMarketingPixelsSnapshot();
 
-    url.searchParams.set("is_active", "eq.true");
-    url.searchParams.set(
-      "select",
-      "id,provider,name,pixel_id,is_active,enabled_events,page_rules,extra_config,created_at,updated_at"
-    );
-    url.searchParams.set("order", "created_at.asc");
-
-    const response = await fetch(url.toString(), {
-      method: "GET",
-      headers: getMarketingPixelSupabaseHeaders(),
-    });
-
-    const data = await response.json().catch(() => []);
-
-    if (!response.ok) {
-      console.error("ERRO AO BUSCAR PIXELS DE MARKETING:", {
-        status: response.status,
-        message: data?.message || data?.error || null,
-      });
-
-      return res.status(500).json({
-        success: false,
-        message: "Erro ao buscar pixels de marketing",
-        pixels: [],
-      });
-    }
-
-    const pixels = Array.isArray(data)
-      ? data
-          .map(normalizeMarketingPixel)
-          .filter((pixel) => pixel.provider && pixel.pixelId && pixel.isActive)
-      : [];
+    res.set("Cache-Control", MARKETING_PIXELS_CACHE_CONTROL);
+    res.set("X-Ozonteck-Marketing-Cache", snapshot.source);
 
     return res.json({
       success: true,
-      pixels,
+      pixels: snapshot.pixels,
     });
   } catch (error) {
     console.error("ERRO GERAL AO BUSCAR PIXELS DE MARKETING:", error);
+    res.set("Cache-Control", "no-store");
 
     return res.status(500).json({
       success: false,
@@ -532,11 +660,59 @@ async function fetchProductPricingMap(productIds = []) {
   }
 }
 
+async function fetchGlobalAffiliateCommissionOverrides() {
+  const fallback = { sellerRate: null, recruitmentRate: null };
+
+  try {
+    const url = new URL(`${env.supabaseUrl}/rest/v1/affiliate_commission_settings`);
+    url.searchParams.set(
+      "select",
+      "fixed_commission_enabled,fixed_commission_percent,fixed_recruitment_commission_enabled,fixed_recruitment_commission_percent"
+    );
+    url.searchParams.set("id", "eq.global");
+    url.searchParams.set("limit", "1");
+
+    const response = await fetch(url.toString(), {
+      method: "GET",
+      headers: {
+        apikey: env.supabaseServiceRoleKey,
+        Authorization: `Bearer ${env.supabaseServiceRoleKey}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+    });
+
+    const rows = await response.json().catch(() => []);
+    if (!response.ok || !Array.isArray(rows) || !rows[0]) {
+      return fallback;
+    }
+
+    const row = rows[0];
+    return {
+      sellerRate:
+        row.fixed_commission_enabled === true
+          ? normalizePercentValue(row.fixed_commission_percent, 0)
+          : null,
+      recruitmentRate:
+        row.fixed_recruitment_commission_enabled === true
+          ? normalizePercentValue(row.fixed_recruitment_commission_percent, 0)
+          : null,
+    };
+  } catch (error) {
+    console.warn("CONFIGURAÇÃO GLOBAL DE COMISSÃO INDISPONÍVEL; USANDO REGRAS EXISTENTES:", {
+      message: error?.message || String(error),
+    });
+    return fallback;
+  }
+}
+
 function calculateCommissionPolicyFromCartItems({
   items = [],
   discountAmount = 0,
   fallbackSellerRate = 0,
   fallbackRecruitmentRate = 0,
+  globalSellerRate = null,
+  globalRecruitmentRate = null,
   pricingMap = new Map(),
 } = {}) {
   const subtotal = roundMoney(
@@ -556,6 +732,7 @@ function calculateCommissionPolicyFromCartItems({
   let sellerCommissionAmount = 0;
   let recruitmentCommissionAmount = 0;
   let goalFundReserveAmount = 0;
+  let goalBonusProvisionAmount = 0;
   let estimatedBaseCost = 0;
   let estimatedGatewayCost = 0;
   let estimatedTaxCost = 0;
@@ -588,11 +765,15 @@ function calculateCommissionPolicyFromCartItems({
     commissionBase += itemBase;
 
     const sellerRate = normalizePercentValue(
-      pricing.affiliate_commission_percent ?? fallbackSellerRate,
+      globalSellerRate !== null && globalSellerRate !== undefined
+        ? globalSellerRate
+        : pricing.affiliate_commission_percent ?? fallbackSellerRate,
       fallbackSellerRate
     );
     const recruitmentRate = normalizePercentValue(
-      pricing.network_commission_percent ?? fallbackRecruitmentRate,
+      globalRecruitmentRate !== null && globalRecruitmentRate !== undefined
+        ? globalRecruitmentRate
+        : pricing.network_commission_percent ?? fallbackRecruitmentRate,
       fallbackRecruitmentRate
     );
     const protectionMode = String(
@@ -644,7 +825,19 @@ function calculateCommissionPolicyFromCartItems({
       goalFundingMode === "legacy_unit_provision"
         ? 0
         : normalizePercentValue(pricing.goal_fund_reserve_percent ?? 3, 3);
-    const reserveAmount = roundMoney((itemBase * reservePercent) / 100);
+    const goalBonusProvisionPerUnit =
+      goalFundingMode === "legacy_unit_provision"
+        ? roundMoney(
+            pricing.goal_bonus_per_sale ??
+              pricing.worst_goal_bonus_per_sale ??
+              pricing.goal_bonus_value ??
+              0
+          )
+        : 0;
+    const reserveAmount =
+      goalFundingMode === "legacy_unit_provision"
+        ? roundMoney(goalBonusProvisionPerUnit * quantity)
+        : roundMoney((itemBase * reservePercent) / 100);
     const itemBaseCost = roundMoney(
       Number(pricing.cost_total || 0) * quantity
     );
@@ -665,6 +858,9 @@ function calculateCommissionPolicyFromCartItems({
     sellerCommissionAmount += sellerItemCommission;
     recruitmentCommissionAmount += networkItemCommission;
     goalFundReserveAmount += reserveAmount;
+    if (goalFundingMode === "legacy_unit_provision") {
+      goalBonusProvisionAmount += reserveAmount;
+    }
     estimatedBaseCost += itemBaseCost;
     estimatedGatewayCost += itemGatewayCost;
     estimatedTaxCost += itemTaxCost;
@@ -685,6 +881,9 @@ function calculateCommissionPolicyFromCartItems({
       goal_funding_mode: goalFundingMode,
       goal_fund_reserve_percent: reservePercent,
       goal_fund_reserve_amount: reserveAmount,
+      goal_bonus_provision_per_unit: goalBonusProvisionPerUnit,
+      goal_bonus_provision_amount:
+        goalFundingMode === "legacy_unit_provision" ? reserveAmount : 0,
       estimated_base_cost: itemBaseCost,
       estimated_gateway_cost: itemGatewayCost,
       estimated_tax_cost: itemTaxCost,
@@ -696,6 +895,7 @@ function calculateCommissionPolicyFromCartItems({
   sellerCommissionAmount = roundMoney(sellerCommissionAmount);
   recruitmentCommissionAmount = roundMoney(recruitmentCommissionAmount);
   goalFundReserveAmount = roundMoney(goalFundReserveAmount);
+  goalBonusProvisionAmount = roundMoney(goalBonusProvisionAmount);
   commissionBase = roundMoney(commissionBase);
   estimatedBaseCost = roundMoney(estimatedBaseCost);
   estimatedGatewayCost = roundMoney(estimatedGatewayCost);
@@ -736,6 +936,7 @@ function calculateCommissionPolicyFromCartItems({
     recruitmentRate,
     recruitmentCommissionAmount,
     goalFundReserveAmount,
+    goalBonusProvisionAmount,
     estimatedBaseCost,
     estimatedGatewayCost,
     estimatedTaxCost,
@@ -781,6 +982,9 @@ async function recordAffiliateGoalFundReserveForPaidOrder(
       ),
       network_commission_amount: roundMoney(
         commissionPolicy.recruitmentCommissionAmount || 0
+      ),
+      goal_bonus_provision_amount: roundMoney(
+        commissionPolicy.goalBonusProvisionAmount || 0
       ),
       estimated_profit: roundMoney(
         commissionPolicy.estimatedProfit || 0
@@ -886,13 +1090,18 @@ async function calculateCommissionPolicyForOrder(order = {}, sellerAffiliate = n
     };
   }
 
-  const pricingMap = await fetchProductPricingMap(items.map((item) => item.product_id));
+  const [pricingMap, globalCommissionOverrides] = await Promise.all([
+    fetchProductPricingMap(items.map((item) => item.product_id)),
+    fetchGlobalAffiliateCommissionOverrides(),
+  ]);
 
   return calculateCommissionPolicyFromCartItems({
     items,
     discountAmount: order.discount_amount || 0,
     fallbackSellerRate,
     fallbackRecruitmentRate,
+    globalSellerRate: globalCommissionOverrides.sellerRate,
+    globalRecruitmentRate: globalCommissionOverrides.recruitmentRate,
     pricingMap,
   });
 }
@@ -2588,10 +2797,10 @@ async function quoteShippingWithFrenet({ zipCode, items, subtotal }) {
   };
 }
 
-async function fetchProductsTable() {
+async function fetchProductsTable({ timeoutMs = null } = {}) {
   const url = `${env.supabaseUrl}/rest/v1/products?select=*`;
 
-  const response = await fetch(url, {
+  const options = {
     method: "GET",
     headers: {
       apikey: env.supabaseServiceRoleKey,
@@ -2599,7 +2808,13 @@ async function fetchProductsTable() {
       "Content-Type": "application/json",
       Accept: "application/json"
     }
-  });
+  };
+  const response = timeoutMs
+    ? await fetchWithTimeout(url, options, {
+        timeoutMs,
+        label: "Produtos públicos",
+      })
+    : await fetch(url, options);
 
   const text = await response.text();
   let data = [];
@@ -2618,16 +2833,99 @@ async function fetchProductsTable() {
   };
 }
 
-function buildHomeProductsSnapshot(rows = []) {
+function startPublicProductsLoad() {
+  if (!publicProductsLoadPromise) {
+    publicProductsLoadPromise = (async () => {
+      const response = await fetchProductsTable({
+        timeoutMs: PUBLIC_ORIGIN_TIMEOUT_MS,
+      });
+
+      if (!response.ok) {
+        const error = new Error("Erro ao buscar produtos públicos da loja");
+        error.status = response.status;
+        error.details = response.raw;
+        throw error;
+      }
+
+      const normalizedProducts = response.data
+        .map(normalizeProduct)
+        .filter((product) => product.id && product.name);
+      const rankedProducts = rankStorefrontProducts(normalizedProducts);
+
+      publicProductsServerCache = {
+        createdAt: Date.now(),
+        normalizedProducts,
+        rankedProducts,
+        searchMap: buildProductSearchMap(normalizedProducts),
+        listPayload: JSON.stringify({
+          success: true,
+          products: rankedProducts,
+        }),
+      };
+
+      return {
+        normalizedProducts: publicProductsServerCache.normalizedProducts,
+        rankedProducts: publicProductsServerCache.rankedProducts,
+        searchMap: publicProductsServerCache.searchMap,
+        listPayload: publicProductsServerCache.listPayload,
+        source: "origin",
+      };
+    })().finally(() => {
+      publicProductsLoadPromise = null;
+    });
+  }
+
+  return publicProductsLoadPromise;
+}
+
+async function getPublicProductsTableSnapshot() {
+  const now = Date.now();
+  const cacheAge = now - Number(publicProductsServerCache.createdAt || 0);
+
+  if (
+    publicProductsServerCache.createdAt &&
+    cacheAge <= PUBLIC_PRODUCTS_SERVER_CACHE_TTL_MS
+  ) {
+    return {
+      normalizedProducts: publicProductsServerCache.normalizedProducts,
+      rankedProducts: publicProductsServerCache.rankedProducts,
+      searchMap: publicProductsServerCache.searchMap,
+      listPayload: publicProductsServerCache.listPayload,
+      source: "memory",
+    };
+  }
+
+  if (
+    publicProductsServerCache.createdAt &&
+    cacheAge <= PUBLIC_PRODUCTS_SERVER_CACHE_STALE_MS
+  ) {
+    void startPublicProductsLoad().catch((error) => {
+      console.warn("PRODUTOS PÚBLICOS: falha ao atualizar cache em segundo plano.", {
+        error: error?.message || String(error),
+        cacheAge,
+      });
+    });
+
+    return {
+      normalizedProducts: publicProductsServerCache.normalizedProducts,
+      rankedProducts: publicProductsServerCache.rankedProducts,
+      searchMap: publicProductsServerCache.searchMap,
+      listPayload: publicProductsServerCache.listPayload,
+      source: "stale-revalidate",
+    };
+  }
+
+  return startPublicProductsLoad();
+}
+
+function buildHomeProductsSnapshot(products = []) {
   return rankHomeProducts(
     filterKitChildrenForStorefront(
-      rows
-        .map(normalizeProduct)
-        .filter((product) => {
-          const isActive = String(product.status || "").toLowerCase() === "active";
-          const hasStock = Number(product.stockQuantity || 0) > 0;
-          return product.id && product.name && isActive && hasStock;
-        })
+      products.filter((product) => {
+        const isActive = String(product.status || "").toLowerCase() === "active";
+        const hasStock = Number(product.stockQuantity || 0) > 0;
+        return product.id && product.name && isActive && hasStock;
+      })
     ).filter((product) => product.showOnHome || product.show_on_home || product.showHome)
   ).slice(0, HOME_PRODUCTS_SERVER_CACHE_LIMIT);
 }
@@ -2648,16 +2946,8 @@ async function getHomeProductsSnapshot() {
 
   if (!homeProductsLoadPromise) {
     homeProductsLoadPromise = (async () => {
-      const response = await fetchProductsTable();
-
-      if (!response.ok) {
-        const error = new Error("Erro ao buscar produtos da página inicial");
-        error.status = response.status;
-        error.details = response.raw;
-        throw error;
-      }
-
-      const products = buildHomeProductsSnapshot(response.data);
+      const snapshot = await getPublicProductsTableSnapshot();
+      const products = buildHomeProductsSnapshot(snapshot.normalizedProducts);
 
       homeProductsServerCache = {
         createdAt: Date.now(),
@@ -2666,7 +2956,7 @@ async function getHomeProductsSnapshot() {
 
       return {
         products,
-        source: "origin",
+        source: snapshot.source,
       };
     })();
   }
@@ -4015,30 +4305,26 @@ router.get("/products/home", async (req, res) => {
 
 router.get("/products", async (req, res) => {
   try {
-    const response = await fetchProductsTable();
-
-    if (!response.ok) {
-      return res.status(500).json({
-        success: false,
-        message: "Erro ao buscar produtos da loja",
-        details: response.raw
-      });
-    }
-
-    let products = response.data
-      .map(normalizeProduct)
-      .filter((product) => product.id && product.name);
+    const snapshot = await getPublicProductsTableSnapshot();
 
     // Filtro por category_id quando passado na query string
     const categoryId = String(req.query.category_id || "").trim();
-    if (categoryId) {
-      products = products.filter((product) => {
+    const products = categoryId
+      ? snapshot.rankedProducts.filter((product) => {
         const productCategoryId = String(product.category_id || product.categoryId || "").trim();
         return productCategoryId === categoryId;
-      });
-    }
+      })
+      : snapshot.rankedProducts;
 
-    products = rankStorefrontProducts(products);
+    res.set("Cache-Control", PUBLIC_PRODUCTS_CACHE_CONTROL);
+    res.set("X-Ozonteck-Products-Cache", snapshot.source);
+
+    if (!categoryId) {
+      return res
+        .status(200)
+        .type("application/json")
+        .send(snapshot.listPayload);
+    }
 
     return res.status(200).json({
       success: true,
@@ -4059,23 +4345,11 @@ router.get("/products", async (req, res) => {
 router.get("/products/:ref", async (req, res) => {
   try {
     const rawRef = String(req.params.ref || "").trim();
-
-    const response = await fetchProductsTable();
-
-    if (!response.ok) {
-      return res.status(500).json({
-        success: false,
-        message: "Erro ao buscar produto da loja",
-        details: response.raw
-      });
-    }
-
-    const products = response.data
-      .map(normalizeProduct)
-      .filter((product) => product.id && product.name);
-
-    const map = buildProductSearchMap(products);
-    const product = map.get(rawRef) || map.get(slugify(rawRef)) || null;
+    const snapshot = await getPublicProductsTableSnapshot();
+    const product =
+      snapshot.searchMap.get(rawRef) ||
+      snapshot.searchMap.get(slugify(rawRef)) ||
+      null;
 
     if (!product) {
       return res.status(404).json({
@@ -4083,6 +4357,9 @@ router.get("/products/:ref", async (req, res) => {
         message: "Produto nÃ£o encontrado"
       });
     }
+
+    res.set("Cache-Control", PUBLIC_PRODUCTS_CACHE_CONTROL);
+    res.set("X-Ozonteck-Products-Cache", snapshot.source);
 
     return res.status(200).json({
       success: true,
@@ -4773,11 +5050,14 @@ router.post("/orders", async (req, res) => {
       normalizedItems,
       productPricingMap
     );
+    const globalCommissionOverrides = await fetchGlobalAffiliateCommissionOverrides();
     const orderCommissionPolicy = calculateCommissionPolicyFromCartItems({
       items: normalizedItems,
       discountAmount,
       fallbackSellerRate: affiliate?.commission_rate || 0,
       fallbackRecruitmentRate: getRecruitmentCommissionRate(affiliate || {}),
+      globalSellerRate: globalCommissionOverrides.sellerRate,
+      globalRecruitmentRate: globalCommissionOverrides.recruitmentRate,
       pricingMap: productPricingMap,
     });
 

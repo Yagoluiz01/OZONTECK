@@ -5,6 +5,8 @@ import {
   getAffiliateOrders,
   getAffiliatePayouts,
   getAffiliateSummary,
+  getAffiliateById,
+  getAffiliateCommissionPolicy,
   getAffiliateNetwork,
   getAffiliatePromotionalProducts,
   getAffiliateStorefront,
@@ -264,7 +266,29 @@ export async function summary(req, res) {
       level_goal: result.level_goal,
       level_bonuses: result.level_bonuses,
       levels: result.levels || [],
+      commission_policy: result.commission_policy || null,
       achievement,
+      refreshed_at: new Date().toISOString(),
+    });
+  } catch (error) {
+    return sendError(res, error);
+  }
+}
+
+export async function commissionPolicy(req, res) {
+  try {
+    res.set({
+      "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+      Pragma: "no-cache",
+      Expires: "0",
+    });
+
+    const affiliate = await getAffiliateById(req.affiliateId);
+    const policy = await getAffiliateCommissionPolicy(affiliate);
+
+    return res.json({
+      success: true,
+      commission_policy: policy || null,
       refreshed_at: new Date().toISOString(),
     });
   } catch (error) {

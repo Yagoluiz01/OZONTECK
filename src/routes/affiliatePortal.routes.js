@@ -9,6 +9,7 @@ import {
   orders,
   payouts,
   summary,
+  commissionPolicy,
   network,
   products,
   storefront,
@@ -39,6 +40,7 @@ router.post("/auth/check-email", checkEmail);
 
 router.get("/me", requireAffiliateAuth, me);
 router.get("/summary", requireAffiliateAuth, summary);
+router.get("/commission-policy", requireAffiliateAuth, commissionPolicy);
 router.get("/orders", requireAffiliateAuth, orders);
 router.get("/payouts", requireAffiliateAuth, payouts);
 router.get("/network", requireAffiliateAuth, network);

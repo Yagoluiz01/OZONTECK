@@ -9,6 +9,8 @@ import {
   getProductGoalTargets,
   getPricingByProductId,
   getPricingHistoryByProductId,
+  getAffiliateCommissionSettings,
+  updateAffiliateCommissionSettings,
   listPaymentFeeRules,
   listPricingRecords,
   listProductsForPricing,
@@ -49,6 +51,10 @@ function buildPricingSnapshot(record = {}) {
     affiliate_commission_percent: toMoney(record.affiliate_commission_percent),
     network_commission_percent: toMoney(record.network_commission_percent),
     affiliate_program_enabled: record.affiliate_program_enabled !== false,
+    goal_funding_mode: record.goal_funding_mode || null,
+    goal_bonus_per_sale: toMoney(record.goal_bonus_per_sale),
+    worst_goal_bonus_per_sale: toMoney(record.worst_goal_bonus_per_sale),
+    worst_goal_level_name: record.worst_goal_level_name || null,
     safe_price: toMoney(record.safe_price),
     suggested_price: toMoney(record.suggested_price),
     status: record.status || null,
@@ -103,6 +109,58 @@ router.get("/", requirePricingView, async (req, res) => {
     return ok(res, { records });
   } catch (error) {
     return fail(res, error);
+  }
+});
+
+router.get("/affiliate-settings", requirePricingView, async (req, res) => {
+  try {
+    const settings = await getAffiliateCommissionSettings();
+    return ok(
+      res,
+      { settings },
+      "Configurações globais de comissão carregadas com sucesso."
+    );
+  } catch (error) {
+    return fail(res, error);
+  }
+});
+
+router.patch("/affiliate-settings", requirePricingEdit, async (req, res) => {
+  try {
+    const previousSettings = await getAffiliateCommissionSettings();
+    const settings = await updateAffiliateCommissionSettings(
+      req.body || {},
+      req.admin?.id || req.admin?.userId || null
+    );
+
+    await recordAuditSafely({
+      req,
+      action: "affiliate_global_commission_updated",
+      module: "pricing",
+      entityType: "affiliate_commission_settings",
+      entityId: "global",
+      description: [
+        settings.fixed_commission_enabled
+          ? `Comissão direta global: ${settings.fixed_commission_percent}%.`
+          : "Comissão direta global desativada.",
+        settings.fixed_recruitment_commission_enabled
+          ? `Comissão global de recrutamento: ${settings.fixed_recruitment_commission_percent}%.`
+          : "Comissão global de recrutamento desativada.",
+      ].join(" "),
+      oldValues: previousSettings,
+      newValues: settings,
+      metadata: {
+        source: "admin_pricing_affiliate_settings",
+      },
+    });
+
+    return ok(
+      res,
+      { settings },
+      "Configurações globais de comissão atualizadas com sucesso."
+    );
+  } catch (error) {
+    return fail(res, error, 400);
   }
 });
 

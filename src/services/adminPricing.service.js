@@ -93,6 +93,70 @@ function getConfiguredNumber(value, fallback = 0) {
   return Number.isFinite(number) ? number : fallback;
 }
 
+const AFFILIATE_COMMISSION_SETTINGS_ID = "global";
+
+function normalizeNullablePercent(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Number(normalizePercent(parsed).toFixed(2)) : null;
+}
+
+function normalizeAffiliateCommissionSettings(row = null) {
+  return {
+    id: AFFILIATE_COMMISSION_SETTINGS_ID,
+    fixed_commission_enabled: normalizeBoolean(row?.fixed_commission_enabled, false),
+    fixed_commission_percent: normalizeNullablePercent(row?.fixed_commission_percent),
+    fixed_recruitment_commission_enabled: normalizeBoolean(
+      row?.fixed_recruitment_commission_enabled,
+      false
+    ),
+    fixed_recruitment_commission_percent: normalizeNullablePercent(
+      row?.fixed_recruitment_commission_percent
+    ),
+    updated_by_admin_id: row?.updated_by_admin_id || null,
+    updated_at: row?.updated_at || null,
+  };
+}
+
+export function resolveAffiliateCommissionPercentForPricing(
+  payload = {},
+  settings = {}
+) {
+  const normalizedSettings = normalizeAffiliateCommissionSettings(settings);
+
+  if (
+    normalizedSettings.fixed_commission_enabled &&
+    normalizedSettings.fixed_commission_percent !== null
+  ) {
+    return normalizePercent(normalizedSettings.fixed_commission_percent);
+  }
+
+  return normalizePercent(
+    getConfiguredNumber(payload.affiliate_commission_percent, 10)
+  );
+}
+
+export function resolveRecruitmentCommissionPercentForPricing(
+  payload = {},
+  settings = {}
+) {
+  const normalizedSettings = normalizeAffiliateCommissionSettings(settings);
+
+  if (
+    normalizedSettings.fixed_recruitment_commission_enabled &&
+    normalizedSettings.fixed_recruitment_commission_percent !== null
+  ) {
+    return normalizePercent(normalizedSettings.fixed_recruitment_commission_percent);
+  }
+
+  return normalizePercent(
+    getConfiguredNumber(
+      payload.network_commission_percent ?? payload.recruitment_commission_rate,
+      0
+    )
+  );
+}
+
 function resolveShippingCostInPrice(averageShippingCost, shippingPolicy = "customer_paid") {
   const cost = roundMoney(averageShippingCost);
   const policy = String(shippingPolicy || "customer_paid").trim().toLowerCase();
@@ -536,7 +600,7 @@ function buildRiskStatus({
   };
 }
 
-function calculatePricing(input) {
+export function calculatePricing(input) {
   const affiliateProgramEnabled = normalizeBoolean(
     input.affiliate_program_enabled ?? input.affiliateProgramEnabled,
     true
@@ -595,6 +659,19 @@ function calculatePricing(input) {
         worstGoalLevelName: null,
       };
   const goalBonusPerSale = goalAnalysis.worstGoalBonusPerSale;
+  const requestedGoalFundingMode = String(
+    input.goal_funding_mode || "legacy_unit_provision"
+  )
+    .trim()
+    .toLowerCase();
+  const goalFundingMode =
+    requestedGoalFundingMode === "collective_fund"
+      ? "collective_fund"
+      : "legacy_unit_provision";
+  const goalFundReservePercent =
+    goalFundingMode === "collective_fund"
+      ? normalizePercent(getConfiguredNumber(input.goal_fund_reserve_percent, 3))
+      : 0;
 
   const configuredAffiliateCommissionPercent = normalizePercent(
     getConfiguredNumber(input.affiliate_commission_percent, 10)
@@ -840,6 +917,13 @@ function calculatePricing(input) {
     network_commission_percent: roundMoney(
       configuredNetworkCommissionPercent
     ),
+    goal_funding_mode: goalFundingMode,
+    goal_fund_reserve_percent: roundMoney(goalFundReservePercent),
+    goal_fund_reserve_value: roundMoney(
+      goalFundingMode === "legacy_unit_provision" ? goalBonusPerSale : 0
+    ),
+    goal_bonus_liability_value: roundMoney(goalBonusPerSale),
+    goal_fund_unfunded_gap_value: 0,
     goal_bonus_per_sale: roundMoney(goalBonusPerSale),
     worst_goal_bonus_per_sale: roundMoney(goalBonusPerSale),
     worst_goal_level_name: goalAnalysis.worstGoalLevelName,
@@ -1001,6 +1085,20 @@ async function createPricingHistory({
     ),
     network_commission_percent: roundMoney(
       pricingData.network_commission_percent
+    ),
+    goal_funding_mode:
+      pricingData.goal_funding_mode || "legacy_unit_provision",
+    goal_fund_reserve_percent: roundMoney(
+      pricingData.goal_fund_reserve_percent
+    ),
+    goal_fund_reserve_value: roundMoney(
+      pricingData.goal_fund_reserve_value
+    ),
+    goal_bonus_liability_value: roundMoney(
+      pricingData.goal_bonus_liability_value ?? pricingData.goal_bonus_per_sale
+    ),
+    goal_fund_unfunded_gap_value: roundMoney(
+      pricingData.goal_fund_unfunded_gap_value
     ),
     goal_bonus_per_sale: roundMoney(pricingData.goal_bonus_per_sale),
     worst_goal_bonus_per_sale: roundMoney(
@@ -1180,6 +1278,99 @@ export async function getPricingHistoryByProductId(productId) {
   );
 }
 
+export async function getAffiliateCommissionSettings() {
+  const rows = await supabaseFetch(
+    `affiliate_commission_settings?select=id,fixed_commission_enabled,fixed_commission_percent,fixed_recruitment_commission_enabled,fixed_recruitment_commission_percent,updated_by_admin_id,updated_at&id=eq.${AFFILIATE_COMMISSION_SETTINGS_ID}&limit=1`,
+    { method: "GET" }
+  );
+
+  return normalizeAffiliateCommissionSettings(rows?.[0] || null);
+}
+
+export async function updateAffiliateCommissionSettings(
+  payload = {},
+  actorId = null
+) {
+  const current = await getAffiliateCommissionSettings().catch(() =>
+    normalizeAffiliateCommissionSettings(null)
+  );
+
+  const directEnabled = normalizeBoolean(
+    payload.fixed_commission_enabled ?? payload.enabled ?? current.fixed_commission_enabled,
+    current.fixed_commission_enabled
+  );
+  const recruitmentEnabled = normalizeBoolean(
+    payload.fixed_recruitment_commission_enabled ??
+      payload.recruitment_enabled ??
+      current.fixed_recruitment_commission_enabled,
+    current.fixed_recruitment_commission_enabled
+  );
+
+  const rawDirectPercent =
+    payload.fixed_commission_percent ??
+    payload.commission_percent ??
+    payload.affiliate_commission_percent ??
+    current.fixed_commission_percent;
+  const rawRecruitmentPercent =
+    payload.fixed_recruitment_commission_percent ??
+    payload.recruitment_commission_percent ??
+    payload.network_commission_percent ??
+    payload.recruitment_commission_rate ??
+    current.fixed_recruitment_commission_percent;
+
+  function validatePercent(rawValue, enabled, label) {
+    if (enabled && (rawValue === undefined || rawValue === null || rawValue === "")) {
+      throw new Error(`Informe a porcentagem da ${label} antes de ativar a configuração.`);
+    }
+    if (rawValue === undefined || rawValue === null || rawValue === "") return null;
+    const parsed = Number(rawValue);
+    if (!Number.isFinite(parsed) || parsed < 0 || parsed > 100) {
+      throw new Error(`A ${label} deve estar entre 0% e 100%.`);
+    }
+    return Number(parsed.toFixed(2));
+  }
+
+  const directPercent = validatePercent(
+    rawDirectPercent,
+    directEnabled,
+    "comissão fixa"
+  );
+  const recruitmentPercent = validatePercent(
+    rawRecruitmentPercent,
+    recruitmentEnabled,
+    "comissão global de recrutamento"
+  );
+
+  const now = new Date().toISOString();
+  const rows = await supabaseFetch(
+    "affiliate_commission_settings?on_conflict=id",
+    {
+      method: "POST",
+      headers: {
+        Prefer: "resolution=merge-duplicates,return=representation",
+      },
+      body: JSON.stringify({
+        id: AFFILIATE_COMMISSION_SETTINGS_ID,
+        fixed_commission_enabled: directEnabled,
+        fixed_commission_percent: directPercent,
+        fixed_recruitment_commission_enabled: recruitmentEnabled,
+        fixed_recruitment_commission_percent: recruitmentPercent,
+        updated_by_admin_id: actorId ? String(actorId) : null,
+        updated_at: now,
+      }),
+    }
+  );
+
+  return normalizeAffiliateCommissionSettings(rows?.[0] || {
+    fixed_commission_enabled: directEnabled,
+    fixed_commission_percent: directPercent,
+    fixed_recruitment_commission_enabled: recruitmentEnabled,
+    fixed_recruitment_commission_percent: recruitmentPercent,
+    updated_by_admin_id: actorId ? String(actorId) : null,
+    updated_at: now,
+  });
+}
+
 export async function calculateProductPricing(payload) {
   const productId = payload.product_id || payload.productId;
 
@@ -1192,12 +1383,37 @@ export async function calculateProductPricing(payload) {
     true
   );
 
-  const latestAffiliateLevels = affiliateProgramEnabled
-    ? await listActiveAffiliateLevelsForProductGoals()
-    : [];
+  const [latestAffiliateLevels, affiliateCommissionSettings] = await Promise.all([
+    affiliateProgramEnabled
+      ? listActiveAffiliateLevelsForProductGoals()
+      : Promise.resolve([]),
+    affiliateProgramEnabled
+      ? getAffiliateCommissionSettings().catch((error) => {
+          console.warn("[PRICING_FIXED_COMMISSION_SETTINGS_FALLBACK]", {
+            message: error?.message || String(error),
+          });
+          return normalizeAffiliateCommissionSettings(null);
+        })
+      : Promise.resolve(normalizeAffiliateCommissionSettings(null)),
+  ]);
+
+  const affiliateCommissionPercent = resolveAffiliateCommissionPercentForPricing(
+    payload,
+    affiliateCommissionSettings
+  );
+  const recruitmentCommissionPercent = resolveRecruitmentCommissionPercentForPricing(
+    payload,
+    affiliateCommissionSettings
+  );
 
   const pricing = calculatePricing({
     ...payload,
+    // A precificação administrativa usa provisionamento unitário: o bônus
+    // monetário das metas é diluído pela quantidade mínima de vendas.
+    goal_funding_mode: "legacy_unit_provision",
+    goal_fund_reserve_percent: 0,
+    affiliate_commission_percent: affiliateCommissionPercent,
+    network_commission_percent: recruitmentCommissionPercent,
     affiliate_program_enabled: affiliateProgramEnabled,
     affiliate_goal_levels: latestAffiliateLevels,
     goal_levels: latestAffiliateLevels,
@@ -1674,6 +1890,10 @@ export default {
   listPricingRecords,
   getPricingByProductId,
   getPricingHistoryByProductId,
+  getAffiliateCommissionSettings,
+  updateAffiliateCommissionSettings,
+  resolveAffiliateCommissionPercentForPricing,
+  resolveRecruitmentCommissionPercentForPricing,
   calculateProductPricing,
   saveProductPricing,
   getProductGoalTargets,
