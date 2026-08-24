@@ -1,4 +1,82 @@
 import { supabaseAdmin } from "../config/supabase.js";
+import {
+  normalizeTimeoutMs,
+  withTimeout,
+} from "../utils/upstreamTimeout.js";
+
+const BANNER_TRACKING_RPC = "record_banner_tracking_event";
+const PUBLIC_ORIGIN_TIMEOUT_MS = normalizeTimeoutMs(
+  process.env.PUBLIC_ORIGIN_TIMEOUT_MS,
+  8_000,
+);
+
+function isMissingBannerTrackingRpc(error) {
+  const code = String(error?.code || "").toUpperCase();
+  const message = String(error?.message || "").toLowerCase();
+
+  return (
+    code === "PGRST202" ||
+    code === "42883" ||
+    (
+      message.includes(BANNER_TRACKING_RPC) &&
+      (message.includes("could not find the function") || message.includes("does not exist"))
+    )
+  );
+}
+
+// Usa uma única transação no banco. Enquanto a migration ainda não tiver sido
+// aplicada, mantém o comportamento antigo para permitir uma publicação segura.
+export async function recordBannerTrackingEvent(payload, client = supabaseAdmin) {
+  const { error: atomicError } = await client.rpc(BANNER_TRACKING_RPC, {
+    p_banner_id: payload.banner_id,
+    p_event_type: payload.event_type,
+    p_click_type: payload.click_type,
+    p_view_duration_ms: payload.view_duration_ms,
+    p_session_id: payload.session_id,
+    p_timestamp: payload.timestamp,
+    p_user_agent: payload.user_agent,
+    p_screen_width: payload.screen_width,
+    p_screen_height: payload.screen_height,
+    p_viewport_width: payload.viewport_width,
+    p_viewport_height: payload.viewport_height,
+    p_device_type: payload.device_type,
+    p_browser: payload.browser,
+    p_os: payload.os,
+    p_ip_address: payload.ip_address,
+  });
+
+  if (!atomicError) {
+    return { mode: "atomic" };
+  }
+
+  // Não repete a gravação em erros de rede ou execução, pois a primeira
+  // tentativa pode ter sido concluída no banco. O fallback é exclusivo para
+  // quando a função nova ainda não existe.
+  if (!isMissingBannerTrackingRpc(atomicError)) {
+    throw atomicError;
+  }
+
+  const { error: trackingError } = await client
+    .from("banner_tracking")
+    .insert(payload);
+
+  if (trackingError) {
+    throw trackingError;
+  }
+
+  let counterError = null;
+  if (payload.event_type === "impression") {
+    ({ error: counterError } = await client.rpc("increment_banner_views", {
+      p_banner_id: payload.banner_id,
+    }));
+  } else if (payload.event_type === "click") {
+    ({ error: counterError } = await client.rpc("increment_banner_clicks", {
+      p_banner_id: payload.banner_id,
+    }));
+  }
+
+  return { mode: "fallback", counterError };
+}
 
 export async function getAllBanners() {
   const { data, error } = await supabaseAdmin.rpc("get_all_banners");
@@ -11,7 +89,13 @@ export async function getAllBanners() {
 }
 
 export async function getActiveBanners() {
-  const { data, error } = await supabaseAdmin.rpc("get_active_banners");
+  const { data, error } = await withTimeout(
+    supabaseAdmin.rpc("get_active_banners"),
+    {
+      timeoutMs: PUBLIC_ORIGIN_TIMEOUT_MS,
+      label: "Banners públicos",
+    },
+  );
 
   if (error) {
     throw new Error(error.message || "Erro ao buscar banners ativos");

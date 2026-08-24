@@ -1,18 +1,25 @@
 import express from "express";
-import { getPublicStoreTheme } from "../services/storeTheme.service.js";
+import { getPublicStoreThemeSnapshot } from "../services/storeTheme.service.js";
 
 const router = express.Router();
 
 router.get("/theme", async (req, res) => {
   try {
-    const data = await getPublicStoreTheme();
+    const snapshot = await getPublicStoreThemeSnapshot();
+
+    res.set(
+      "Cache-Control",
+      "public, max-age=60, s-maxage=300, stale-while-revalidate=900",
+    );
+    res.set("X-Ozonteck-Theme-Cache", snapshot.source);
 
     return res.status(200).json({
       success: true,
-      ...data,
+      ...snapshot.data,
     });
   } catch (error) {
     console.error("ERRO AO BUSCAR TEMA PÚBLICO DA LOJA:", error);
+    res.set("Cache-Control", "no-store");
 
     return res.status(200).json({
       success: false,

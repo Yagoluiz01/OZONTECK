@@ -1,8 +1,43 @@
 import { env } from "../config/env.js";
+import {
+  fetchWithTimeout,
+  normalizeTimeoutMs,
+} from "../utils/upstreamTimeout.js";
 
 const SETTINGS_TABLE = "store_theme_settings";
 const PALETTES_TABLE = "store_color_palettes";
 const SETTINGS_ID = "main";
+const PUBLIC_ORIGIN_TIMEOUT_MS = normalizeTimeoutMs(
+  process.env.PUBLIC_ORIGIN_TIMEOUT_MS,
+  8_000,
+);
+
+const PUBLIC_THEME_CACHE_TTL_MS = Math.max(
+  1_000,
+  Number(process.env.PUBLIC_THEME_CACHE_TTL_MS || 5 * 60 * 1_000) ||
+    5 * 60 * 1_000,
+);
+const PUBLIC_THEME_CACHE_STALE_MS = Math.max(
+  PUBLIC_THEME_CACHE_TTL_MS,
+  Number(process.env.PUBLIC_THEME_CACHE_STALE_MS || 30 * 60 * 1_000) ||
+    30 * 60 * 1_000,
+);
+
+let publicThemeCache = {
+  data: null,
+  createdAt: 0,
+};
+let publicThemeLoadPromise = null;
+let publicThemeCacheGeneration = 0;
+
+export function invalidatePublicStoreThemeCache() {
+  publicThemeCache = {
+    data: null,
+    createdAt: 0,
+  };
+  publicThemeCacheGeneration += 1;
+  publicThemeLoadPromise = null;
+}
 
 export const DEFAULT_THEME_COLORS = {
   primaryColor: "#11d1b2",
@@ -218,8 +253,11 @@ function isMissingTableError(payload) {
   );
 }
 
-async function requestSupabase(path, options = {}) {
-  const response = await fetch(`${env.supabaseUrl}/rest/v1/${path}`, options);
+async function requestSupabase(path, options = {}, timeoutOptions = null) {
+  const url = `${env.supabaseUrl}/rest/v1/${path}`;
+  const response = timeoutOptions
+    ? await fetchWithTimeout(url, options, timeoutOptions)
+    : await fetch(url, options);
   const data = await response.json().catch(() => null);
 
   if (!response.ok) {
@@ -242,6 +280,9 @@ async function fetchSettingsRow() {
   const rows = await requestSupabase(`${SETTINGS_TABLE}?${params.toString()}`, {
     method: "GET",
     headers: supabaseHeaders(),
+  }, {
+    timeoutMs: PUBLIC_ORIGIN_TIMEOUT_MS,
+    label: "Tema público",
   });
 
   return Array.isArray(rows) ? rows[0] || null : null;
@@ -277,11 +318,18 @@ function normalizePublicStoreSettings(row = {}) {
 
 async function fetchPublicStoreSettings() {
   try {
-    const response = await fetch(`${env.supabaseUrl}/rest/v1/rpc/get_store_settings`, {
-      method: "POST",
-      headers: supabaseHeaders(),
-      body: JSON.stringify({}),
-    });
+    const response = await fetchWithTimeout(
+      `${env.supabaseUrl}/rest/v1/rpc/get_store_settings`,
+      {
+        method: "POST",
+        headers: supabaseHeaders(),
+        body: JSON.stringify({}),
+      },
+      {
+        timeoutMs: PUBLIC_ORIGIN_TIMEOUT_MS,
+        label: "Configurações públicas da loja",
+      },
+    );
 
     const data = await response.json().catch(() => null);
 
@@ -307,6 +355,9 @@ async function fetchCustomPaletteRows() {
   const rows = await requestSupabase(`${PALETTES_TABLE}?${params.toString()}`, {
     method: "GET",
     headers: supabaseHeaders(),
+  }, {
+    timeoutMs: PUBLIC_ORIGIN_TIMEOUT_MS,
+    label: "Paletas públicas da loja",
   });
 
   return Array.isArray(rows) ? rows : [];
@@ -347,7 +398,7 @@ export async function getStoreThemeBundle() {
   }
 }
 
-export async function getPublicStoreTheme() {
+async function loadPublicStoreTheme() {
   const [bundle, publicSettings] = await Promise.all([
     getStoreThemeBundle(),
     fetchPublicStoreSettings(),
@@ -365,6 +416,68 @@ export async function getPublicStoreTheme() {
     setupRequired: bundle.setupRequired,
     setupMessage: bundle.setupMessage,
   };
+}
+
+function startPublicStoreThemeLoad() {
+  if (!publicThemeLoadPromise) {
+    const loadGeneration = publicThemeCacheGeneration;
+    const request = loadPublicStoreTheme()
+      .then((data) => {
+        if (loadGeneration === publicThemeCacheGeneration) {
+          publicThemeCache = {
+            data,
+            createdAt: Date.now(),
+          };
+        }
+
+        return {
+          data,
+          source: "origin",
+        };
+      })
+      .finally(() => {
+        if (publicThemeLoadPromise === request) {
+          publicThemeLoadPromise = null;
+        }
+      });
+
+    publicThemeLoadPromise = request;
+  }
+
+  return publicThemeLoadPromise;
+}
+
+export async function getPublicStoreThemeSnapshot() {
+  const now = Date.now();
+  const cacheAge = now - Number(publicThemeCache.createdAt || 0);
+
+  if (publicThemeCache.data && cacheAge <= PUBLIC_THEME_CACHE_TTL_MS) {
+    return {
+      data: publicThemeCache.data,
+      source: "memory",
+    };
+  }
+
+  if (publicThemeCache.data && cacheAge <= PUBLIC_THEME_CACHE_STALE_MS) {
+    void startPublicStoreThemeLoad().catch((error) => {
+      console.warn("TEMA DA LOJA: falha ao atualizar cache em segundo plano.", {
+        error: error?.message || String(error),
+        cacheAge,
+      });
+    });
+
+    return {
+      data: publicThemeCache.data,
+      source: "stale-revalidate",
+    };
+  }
+
+  return startPublicStoreThemeLoad();
+}
+
+export async function getPublicStoreTheme() {
+  const snapshot = await getPublicStoreThemeSnapshot();
+  return snapshot.data;
 }
 
 export async function saveStoreTheme(payload = {}) {
@@ -399,6 +512,7 @@ export async function saveStoreTheme(payload = {}) {
   });
 
   const saved = Array.isArray(rows) ? rows[0] : rows;
+  invalidatePublicStoreThemeCache();
   return settingRowToTheme(saved || row);
 }
 
@@ -432,6 +546,7 @@ export async function createCustomPalette(payload = {}) {
     body: JSON.stringify(row),
   });
 
+  invalidatePublicStoreThemeCache();
   return rowToPalette(Array.isArray(rows) ? rows[0] : rows);
 }
 
@@ -465,6 +580,7 @@ export async function updateCustomPalette(id, payload = {}) {
     body: JSON.stringify(row),
   });
 
+  invalidatePublicStoreThemeCache();
   return rowToPalette(Array.isArray(rows) ? rows[0] : rows);
 }
 
@@ -480,5 +596,6 @@ export async function deleteCustomPalette(id) {
     headers: supabaseHeaders(),
   });
 
+  invalidatePublicStoreThemeCache();
   return true;
 }

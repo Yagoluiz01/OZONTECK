@@ -1,36 +1,90 @@
 import * as bannersService from "../services/banners.service.js";
 import { supabaseAdmin } from "../config/supabase.js";
 
-const ACTIVE_BANNERS_CACHE_TTL_MS = 60_000;
-let activeBannersCache = { banners: null, expiresAt: 0 };
+const ACTIVE_BANNERS_CACHE_TTL_MS = Math.max(
+  1_000,
+  Number(process.env.ACTIVE_BANNERS_CACHE_TTL_MS || 60_000) || 60_000,
+);
+const ACTIVE_BANNERS_CACHE_STALE_MS = Math.max(
+  ACTIVE_BANNERS_CACHE_TTL_MS,
+  Number(process.env.ACTIVE_BANNERS_CACHE_STALE_MS || 10 * 60_000) ||
+    10 * 60_000,
+);
+const ACTIVE_BANNERS_CACHE_CONTROL =
+  "public, max-age=30, s-maxage=60, stale-while-revalidate=300";
+
+let activeBannersCache = { banners: null, createdAt: 0 };
 let activeBannersRequest = null;
+let activeBannersCacheGeneration = 0;
 
 function invalidateActiveBannersCache() {
-  activeBannersCache = { banners: null, expiresAt: 0 };
+  activeBannersCache = { banners: null, createdAt: 0 };
+  activeBannersCacheGeneration += 1;
+  activeBannersRequest = null;
+}
+
+function startActiveBannersLoad() {
+  // Reaproveita a mesma Promise quando várias visitas chegam juntas.
+  if (!activeBannersRequest) {
+    const loadGeneration = activeBannersCacheGeneration;
+    const request = bannersService.getActiveBanners()
+      .then((banners) => {
+        if (loadGeneration === activeBannersCacheGeneration) {
+          activeBannersCache = {
+            banners: Array.isArray(banners) ? banners : [],
+            createdAt: Date.now(),
+          };
+        }
+
+        return {
+          banners: Array.isArray(banners) ? banners : [],
+          source: "origin",
+        };
+      })
+      .finally(() => {
+        if (activeBannersRequest === request) {
+          activeBannersRequest = null;
+        }
+      });
+
+    activeBannersRequest = request;
+  }
+
+  return activeBannersRequest;
 }
 
 async function getCachedActiveBanners() {
   const now = Date.now();
-  if (activeBannersCache.banners && activeBannersCache.expiresAt > now) {
-    return activeBannersCache.banners;
+  const cacheAge = now - Number(activeBannersCache.createdAt || 0);
+
+  if (
+    activeBannersCache.createdAt &&
+    cacheAge <= ACTIVE_BANNERS_CACHE_TTL_MS
+  ) {
+    return {
+      banners: activeBannersCache.banners,
+      source: "memory",
+    };
   }
 
-  // Reaproveita a mesma Promise quando várias visitas chegam juntas.
-  if (!activeBannersRequest) {
-    activeBannersRequest = bannersService.getActiveBanners()
-      .then((banners) => {
-        activeBannersCache = {
-          banners,
-          expiresAt: Date.now() + ACTIVE_BANNERS_CACHE_TTL_MS,
-        };
-        return banners;
-      })
-      .finally(() => {
-        activeBannersRequest = null;
+  if (
+    activeBannersCache.createdAt &&
+    cacheAge <= ACTIVE_BANNERS_CACHE_STALE_MS
+  ) {
+    void startActiveBannersLoad().catch((error) => {
+      console.warn("BANNERS ATIVOS: falha ao atualizar cache em segundo plano.", {
+        error: error?.message || String(error),
+        cacheAge,
       });
+    });
+
+    return {
+      banners: activeBannersCache.banners,
+      source: "stale-revalidate",
+    };
   }
 
-  return activeBannersRequest;
+  return startActiveBannersLoad();
 }
 
 export async function listAllBanners(req, res) {
@@ -48,11 +102,13 @@ export async function listAllBanners(req, res) {
 
 export async function listActiveBanners(req, res) {
   try {
-    const banners = await getCachedActiveBanners();
-    res.set("Cache-Control", "public, max-age=60, s-maxage=60");
-    return res.status(200).json({ success: true, banners });
+    const snapshot = await getCachedActiveBanners();
+    res.set("Cache-Control", ACTIVE_BANNERS_CACHE_CONTROL);
+    res.set("X-Ozonteck-Banners-Cache", snapshot.source);
+    return res.status(200).json({ success: true, banners: snapshot.banners });
   } catch (error) {
     console.error("ERRO LISTAR BANNERS ATIVOS:", error);
+    res.set("Cache-Control", "no-store");
     return res.status(500).json({
       success: false,
       message: error.message || "Erro interno ao listar banners ativos",
@@ -346,28 +402,13 @@ export async function trackBannerEvent(req, res) {
       ip_address: (forwardedFor || req.ip || "").slice(0, 45) || null,
     };
 
-    const { error: trackingError } = await supabaseAdmin
-      .from("banner_tracking")
-      .insert(trackingPayload);
+    const trackingResult = await bannersService.recordBannerTrackingEvent(trackingPayload);
 
-    if (trackingError) {
-      console.warn("Erro ao registrar evento de banner:", trackingError.message);
-      return res.status(500).json({
-        success: false,
-        message: "Não foi possível registrar a métrica do banner",
-      });
-    }
-
-    if (event_type === "impression") {
-      const { error } = await supabaseAdmin.rpc("increment_banner_views", {
-        p_banner_id: banner_id,
-      });
-      if (error) console.warn("Erro ao incrementar views do banner:", error.message);
-    } else if (event_type === "click") {
-      const { error } = await supabaseAdmin.rpc("increment_banner_clicks", {
-        p_banner_id: banner_id,
-      });
-      if (error) console.warn("Erro ao incrementar clicks do banner:", error.message);
+    if (trackingResult.counterError) {
+      console.warn(
+        "Erro ao incrementar contador do banner:",
+        trackingResult.counterError.message
+      );
     }
 
     return res.status(200).json({ success: true });
