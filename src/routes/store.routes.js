@@ -49,6 +49,7 @@ import {
   normalizeTimeoutMs,
   withTimeout,
 } from "../utils/upstreamTimeout.js";
+import { buildPublicProductsUrl } from "../utils/publicProductProjection.js";
 
 const router = express.Router();
 const PUBLIC_ORIGIN_TIMEOUT_MS = normalizeTimeoutMs(
@@ -2798,7 +2799,7 @@ async function quoteShippingWithFrenet({ zipCode, items, subtotal }) {
 }
 
 async function fetchProductsTable({ timeoutMs = null } = {}) {
-  const url = `${env.supabaseUrl}/rest/v1/products?select=*`;
+  const url = buildPublicProductsUrl(env.supabaseUrl);
 
   const options = {
     method: "GET",
