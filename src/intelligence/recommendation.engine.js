@@ -1,3 +1,8 @@
+import {
+  getInterestCategoryFamily,
+  normalizeInterestCategory,
+} from "./interestTaxonomy.js";
+
 const PRODUCT_EVENT_TYPES = new Set([
   "product_view",
   "product_detail_view",
@@ -27,39 +32,6 @@ function normalizeToken(value) {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "")
     .trim();
-}
-
-function normalizeCategory(value) {
-  const text = String(value || "")
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-
-  if (!text) return "";
-
-  // Agrupa variações semânticas reais do catálogo. Exemplos:
-  // "masculinos", "Perfumes Masculinos" e "perfume masculino"
-  // passam a representar a mesma preferência interna.
-  if (/\bunissex\b|\bunisex\b/.test(text)) return "perfumes_unissex";
-  if (/\bmasculin/.test(text)) return "perfumes_masculinos";
-  if (/\bfeminin/.test(text)) return "perfumes_femininos";
-  if (/\bcabelo/.test(text) || /\bcapilar/.test(text)) return "cabelos";
-  if (/\bpele\b/.test(text) || /\bskincare\b/.test(text)) return "cuidados_pele";
-
-  return text
-    .replace(/\bperfumes?\b/g, " ")
-    .replace(/\bfragrancias?\b/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .replace(/\s+/g, "_") || normalizeToken(value);
-}
-
-function categoryFamily(categoryToken) {
-  if (String(categoryToken || "").startsWith("perfumes_")) return "perfumes";
-  return String(categoryToken || "");
 }
 
 function toNumber(value, fallback = 0) {
@@ -254,7 +226,7 @@ function normalizeProfileCategoryMap(profile = {}) {
   const map = new Map();
 
   for (const row of rows) {
-    const token = normalizeCategory(row?.name || row?.category || row?.id);
+    const token = normalizeInterestCategory(row?.name || row?.category || row?.id);
     if (!token) continue;
     const ratio = clamp(toNumber(row?.score, 0) / maxScore, 0, 1);
     map.set(token, Math.max(map.get(token) || 0, ratio));
@@ -279,7 +251,7 @@ function categoryCompatibilityPenalty({
   profileCategories,
   intentConfidence,
 }) {
-  const productToken = normalizeCategory(productCategory);
+  const productToken = normalizeInterestCategory(productCategory);
   const directAffinity = productToken ? profileCategories.get(productToken) || 0 : 0;
   if (directAffinity > 0) {
     return { penalty: 0, dominant: getDominantCategory(profileCategories), productToken };
@@ -291,7 +263,8 @@ function categoryCompatibilityPenalty({
   }
 
   const confidenceFactor = clamp(intentConfidence / 100, 0.3, 1);
-  const sameFamily = categoryFamily(productToken) === categoryFamily(dominant.key);
+  const sameFamily =
+    getInterestCategoryFamily(productToken) === getInterestCategoryFamily(dominant.key);
   const basePenalty = sameFamily ? 14 : 18;
   const penalty = basePenalty * dominant.strength * (0.55 + confidenceFactor * 0.45);
 
@@ -410,7 +383,7 @@ export function buildPersonalizedRanking({
     const previouslyViewed = productAffinityRatio > 0;
     const productAffinity = 30 * productAffinityRatio * familiarityMultiplier;
 
-    const canonicalCategory = normalizeCategory(product.category);
+    const canonicalCategory = normalizeInterestCategory(product.category);
     const categoryRatio = profileCategories.get(canonicalCategory) || 0;
     const categoryScore = 34 * categoryRatio;
     const categoryCompatibility = categoryCompatibilityPenalty({
@@ -488,7 +461,7 @@ export function buildPersonalizedRanking({
 
     for (let index = 0; index < remaining.length; index += 1) {
       const candidate = remaining[index];
-      const categoryToken = normalizeCategory(candidate.category) || "semcategoria";
+      const categoryToken = normalizeInterestCategory(candidate.category) || "semcategoria";
       const count = categoryCounts.get(categoryToken) || 0;
       const preferredCategoryRatio = profileCategories.get(categoryToken) || 0;
       const isPreferredCategory = preferredCategoryRatio >= 0.55;
@@ -496,7 +469,7 @@ export function buildPersonalizedRanking({
         ? (count === 0 ? 0 : count === 1 ? 1.25 : 4.5 + (count - 2) * 2.5)
         : (count === 0 ? 0 : count === 1 ? 3 : 8 + (count - 2) * 3);
       const previousCategory = selected.length
-        ? normalizeCategory(selected[selected.length - 1].category)
+        ? normalizeInterestCategory(selected[selected.length - 1].category)
         : "";
       const consecutivePenalty = previousCategory === categoryToken
         ? (isPreferredCategory ? 0.5 : 1.25)
@@ -510,7 +483,7 @@ export function buildPersonalizedRanking({
     }
 
     const [chosen] = remaining.splice(bestIndex, 1);
-    const categoryToken = normalizeCategory(chosen.category) || "semcategoria";
+    const categoryToken = normalizeInterestCategory(chosen.category) || "semcategoria";
     const diversityAdjustment = round(bestAdjusted - chosen.base_score, 2);
     chosen.score = round(clamp(bestAdjusted, 0, 100), 2);
     chosen.components.diversity_adjustment = diversityAdjustment;

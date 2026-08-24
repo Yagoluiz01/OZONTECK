@@ -5,6 +5,7 @@ import { syncPendingMelhorEnvioLabels } from "./services/shipping.service.js";
 import { runExpiredStockReservationCleanup } from "./jobs/releaseExpiredStockReservations.js";
 import { reconcilePendingMercadoPagoPayments } from "./jobs/reconcilePendingMercadoPagoPayments.js";
 import { runLeadRecoveryReadyNotificationSweep } from "./services/leadRecoveryNotification.service.js";
+import { processProductInterestNotifications } from "./jobs/processProductInterestNotifications.js";
 
 // Rede de segurança: um erro não tratado em qualquer parte do código não pode
 // mais derrubar o processo inteiro. Apenas loga o erro e mantém a API no ar.
@@ -82,6 +83,30 @@ const leadRecoveryOrderDelayMinutes = Math.max(
   Number(process.env.LEAD_RECOVERY_ORDER_DELAY_MINUTES || 5)
 );
 
+const productInterestNotificationsEnabled = ["1", "true", "yes", "sim", "on"].includes(
+  String(process.env.PRODUCT_INTEREST_NOTIFICATIONS_ENABLED || "false")
+    .trim()
+    .toLowerCase()
+);
+
+const productInterestNotificationsDryRun = ![
+  "0",
+  "false",
+  "no",
+  "nao",
+  "não",
+  "off",
+].includes(
+  String(process.env.PRODUCT_INTEREST_NOTIFICATIONS_DRY_RUN || "true")
+    .trim()
+    .toLowerCase()
+);
+
+const productInterestNotificationIntervalSeconds = Math.max(
+  30,
+  Number(process.env.PRODUCT_INTEREST_WORKER_INTERVAL_SECONDS || 60)
+);
+
 let syncRunning = false;
 let syncTimer = null;
 let stockCleanupTimer = null;
@@ -94,6 +119,40 @@ let paymentReconcileRunning = false;
 let leadRecoveryNotificationTimer = null;
 let startupLeadRecoveryNotificationTimer = null;
 let leadRecoveryNotificationRunning = false;
+
+let productInterestNotificationTimer = null;
+let startupProductInterestNotificationTimer = null;
+let productInterestNotificationRunning = false;
+
+async function runProductInterestNotificationWorker(trigger = "interval") {
+  if (!productInterestNotificationsEnabled || productInterestNotificationRunning) return;
+  productInterestNotificationRunning = true;
+
+  try {
+    const result = await processProductInterestNotifications({ trigger });
+    if (result?.claimed > 0 || result?.profileRefresh?.refreshed > 0) {
+      console.log(
+        "PRODUCT INTEREST NOTIFICATIONS: " +
+          JSON.stringify({
+            trigger,
+            dryRun: result.dryRun,
+            profilesRefreshed: result.profileRefresh?.refreshed || 0,
+            claimed: result.claimed || 0,
+            completed: result.completed || 0,
+            failed: result.failed || 0,
+          })
+      );
+    }
+  } catch (error) {
+    console.error("PRODUCT INTEREST NOTIFICATIONS ERROR:", {
+      trigger,
+      code: error?.code || null,
+      message: error?.message || String(error),
+    });
+  } finally {
+    productInterestNotificationRunning = false;
+  }
+}
 
 async function runLeadRecoveryNotificationSweep(trigger = "interval") {
   if (!leadRecoveryNotificationsEnabled || leadRecoveryNotificationRunning) return;
@@ -237,6 +296,22 @@ const server = app.listen(PORT, () => {
     console.log("LEAD RECOVERY NOTIFICATIONS: desativado por configuração");
   }
 
+  if (productInterestNotificationsEnabled) {
+    console.log(
+      `PRODUCT INTEREST NOTIFICATIONS: ativado a cada ${productInterestNotificationIntervalSeconds} segundo(s), dry-run=${productInterestNotificationsDryRun}`
+    );
+
+    startupProductInterestNotificationTimer = setTimeout(() => {
+      runProductInterestNotificationWorker("startup");
+    }, 25000);
+
+    productInterestNotificationTimer = setInterval(() => {
+      runProductInterestNotificationWorker("interval");
+    }, productInterestNotificationIntervalSeconds * 1000);
+  } else {
+    console.log("PRODUCT INTEREST NOTIFICATIONS: desativado por configuração");
+  }
+
   if (stockCleanupEnabled) {
     console.log(
       `ORDER STOCK CLEANUP: ativado para rodar a cada ${stockCleanupIntervalMinutes} minuto(s)`
@@ -273,6 +348,8 @@ function clearBackgroundTimers() {
   if (startupPaymentReconcileTimer) clearTimeout(startupPaymentReconcileTimer);
   if (leadRecoveryNotificationTimer) clearInterval(leadRecoveryNotificationTimer);
   if (startupLeadRecoveryNotificationTimer) clearTimeout(startupLeadRecoveryNotificationTimer);
+  if (productInterestNotificationTimer) clearInterval(productInterestNotificationTimer);
+  if (startupProductInterestNotificationTimer) clearTimeout(startupProductInterestNotificationTimer);
 }
 
 let shuttingDown = false;

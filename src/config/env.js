@@ -92,5 +92,21 @@ export const env = {
   smtpFromEmail: process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER || "",
   notificationsEnabled: process.env.NOTIFICATIONS_ENABLED || "false",
   stockNotificationsEnabled: process.env.STOCK_NOTIFICATIONS_ENABLED || "true",
-  stockLowAlertThreshold: Number(process.env.STOCK_LOW_ALERT_THRESHOLD || 5)
+  stockLowAlertThreshold: Number(process.env.STOCK_LOW_ALERT_THRESHOLD || 5),
+
+  // Marketing personalizado é independente das notificações operacionais.
+  // Os padrões impedem envio real até migration, dry-run e consentimento serem validados.
+  productInterestNotificationsEnabled:
+    process.env.PRODUCT_INTEREST_NOTIFICATIONS_ENABLED || "false",
+  productInterestNotificationsDryRun:
+    process.env.PRODUCT_INTEREST_NOTIFICATIONS_DRY_RUN || "true",
+  productInterestConsentConfirmed:
+    process.env.PRODUCT_INTEREST_CONSENT_CONFIRMED || "false",
+  productInterestEmailEnabled:
+    process.env.PRODUCT_INTEREST_EMAIL_ENABLED || "true",
+  productInterestWebPushEnabled:
+    process.env.PRODUCT_INTEREST_WEB_PUSH_ENABLED || "true",
+  productInterestWorkerIntervalSeconds: Number(
+    process.env.PRODUCT_INTEREST_WORKER_INTERVAL_SECONDS || 60
+  ),
 };

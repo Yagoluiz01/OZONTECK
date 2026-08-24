@@ -814,7 +814,7 @@ async function touchLastLogin(customerId) {
   });
 }
 
-async function requireCustomerAuth(req, res, next) {
+export async function requireCustomerAuth(req, res, next) {
   try {
     const authHeader = req.headers.authorization || "";
 
