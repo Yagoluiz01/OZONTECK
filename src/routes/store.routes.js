@@ -50,6 +50,10 @@ import {
   withTimeout,
 } from "../utils/upstreamTimeout.js";
 import { buildPublicProductsUrl } from "../utils/publicProductProjection.js";
+import {
+  buildPublicCatalogPayload,
+  compactPublicProductsForCatalog,
+} from "../utils/publicCatalogView.js";
 
 const router = express.Router();
 const PUBLIC_ORIGIN_TIMEOUT_MS = normalizeTimeoutMs(
@@ -82,8 +86,10 @@ let publicProductsServerCache = {
   createdAt: 0,
   normalizedProducts: [],
   rankedProducts: [],
+  catalogProducts: [],
   searchMap: new Map(),
   listPayload: "",
+  catalogPayload: "",
 };
 let publicProductsLoadPromise = null;
 let activeCategoriesServerCache = {
@@ -2852,23 +2858,28 @@ function startPublicProductsLoad() {
         .map(normalizeProduct)
         .filter((product) => product.id && product.name);
       const rankedProducts = rankStorefrontProducts(normalizedProducts);
+      const catalogProducts = compactPublicProductsForCatalog(rankedProducts);
 
       publicProductsServerCache = {
         createdAt: Date.now(),
         normalizedProducts,
         rankedProducts,
+        catalogProducts,
         searchMap: buildProductSearchMap(normalizedProducts),
         listPayload: JSON.stringify({
           success: true,
           products: rankedProducts,
         }),
+        catalogPayload: buildPublicCatalogPayload(catalogProducts),
       };
 
       return {
         normalizedProducts: publicProductsServerCache.normalizedProducts,
         rankedProducts: publicProductsServerCache.rankedProducts,
+        catalogProducts: publicProductsServerCache.catalogProducts,
         searchMap: publicProductsServerCache.searchMap,
         listPayload: publicProductsServerCache.listPayload,
+        catalogPayload: publicProductsServerCache.catalogPayload,
         source: "origin",
       };
     })().finally(() => {
@@ -2890,8 +2901,10 @@ async function getPublicProductsTableSnapshot() {
     return {
       normalizedProducts: publicProductsServerCache.normalizedProducts,
       rankedProducts: publicProductsServerCache.rankedProducts,
+      catalogProducts: publicProductsServerCache.catalogProducts,
       searchMap: publicProductsServerCache.searchMap,
       listPayload: publicProductsServerCache.listPayload,
+      catalogPayload: publicProductsServerCache.catalogPayload,
       source: "memory",
     };
   }
@@ -2910,8 +2923,10 @@ async function getPublicProductsTableSnapshot() {
     return {
       normalizedProducts: publicProductsServerCache.normalizedProducts,
       rankedProducts: publicProductsServerCache.rankedProducts,
+      catalogProducts: publicProductsServerCache.catalogProducts,
       searchMap: publicProductsServerCache.searchMap,
       listPayload: publicProductsServerCache.listPayload,
+      catalogPayload: publicProductsServerCache.catalogPayload,
       source: "stale-revalidate",
     };
   }
@@ -4310,12 +4325,16 @@ router.get("/products", async (req, res) => {
 
     // Filtro por category_id quando passado na query string
     const categoryId = String(req.query.category_id || "").trim();
+    const catalogView = String(req.query.view || "").trim().toLowerCase() === "catalog";
+    const sourceProducts = catalogView
+      ? snapshot.catalogProducts
+      : snapshot.rankedProducts;
     const products = categoryId
-      ? snapshot.rankedProducts.filter((product) => {
+      ? sourceProducts.filter((product) => {
         const productCategoryId = String(product.category_id || product.categoryId || "").trim();
         return productCategoryId === categoryId;
       })
-      : snapshot.rankedProducts;
+      : sourceProducts;
 
     res.set("Cache-Control", PUBLIC_PRODUCTS_CACHE_CONTROL);
     res.set("X-Ozonteck-Products-Cache", snapshot.source);
@@ -4324,7 +4343,7 @@ router.get("/products", async (req, res) => {
       return res
         .status(200)
         .type("application/json")
-        .send(snapshot.listPayload);
+        .send(catalogView ? snapshot.catalogPayload : snapshot.listPayload);
     }
 
     return res.status(200).json({
