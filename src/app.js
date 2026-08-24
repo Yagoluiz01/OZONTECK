@@ -9,7 +9,6 @@ import crypto from "crypto";
 import compression from "compression";
 import cors from "cors";
 import helmet from "helmet";
-import morgan from "morgan";
 import path from "path";
 import { fileURLToPath } from "url";
 import rateLimit from "express-rate-limit";
@@ -35,6 +34,7 @@ import {
 } from "./middlewares/publicStoreReadLimiter.middleware.js";
 import { isAuthorizedLoadTestRequest } from "./middlewares/loadTestBypass.middleware.js";
 import { publicResponseCacheMiddleware } from "./middlewares/publicResponseCache.middleware.js";
+import { requestLoggerMiddleware } from "./middlewares/requestLogger.middleware.js";
 import adminNotificationsRoutes from "./routes/adminNotifications.routes.js";
 import adminAuditRoutes from "./routes/adminAudit.routes.js";
 import adminAccessRequestsRoutes from "./routes/adminAccessRequests.routes.js";
@@ -314,7 +314,7 @@ app.use(
   })
 );
 
-app.use(morgan("dev"));
+app.use(requestLoggerMiddleware);
 
 // Compacta respostas JSON e texto maiores que 1 KB. O conteúdo recebido pelo
 // cliente continua igual, mas usa menos banda e termina de carregar mais rápido.
