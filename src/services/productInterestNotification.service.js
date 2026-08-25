@@ -601,6 +601,7 @@ async function processCampaignJob(job, config, { client, mailer, pushMailer, now
 
     if (
       config.webPushEnabled &&
+      customer.newsletter_opt_in === true &&
       pushCustomers.has(profile.customer_id) &&
       !suppressed.has(`${profile.customer_id}:web_push`)
     ) {

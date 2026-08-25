@@ -406,9 +406,15 @@ test("rota de inscrição push deriva o cliente do JWT", () => {
   const routes = read("routes/customerMarketingPreferences.routes.js");
 
   assert.match(routes, /router\.post\("\/push\/subscription", requireCustomerAuth/);
+  assert.match(routes, /req\.customer\?\.newsletter_opt_in !== true/);
   assert.match(routes, /customerId: req\.customerAuth\.id/);
   assert.match(routes, /subscription: req\.body\?\.subscription/);
   assert.doesNotMatch(routes, /customerId: req\.body/);
+  assert.ok(
+    routes.indexOf("req.customer?.newsletter_opt_in !== true") <
+      routes.indexOf("const subscription = await saveCustomerMarketingPushSubscription"),
+    "o opt-in deve ser validado antes de salvar a inscrição push"
+  );
 });
 
 test("configuração permanece fechada e em simulação por padrão", async () => {
@@ -468,6 +474,7 @@ test("dry-run reserva e-mail e Web Push separadamente para o mesmo interesse", a
   const campaignId = "22222222-2222-4222-8222-222222222222";
   const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
   const rpcCalls = [];
+  let customerNewsletterOptIn = true;
 
   function resultFor(table, operation) {
     if (operation === "update") return { data: null, error: null };
@@ -521,7 +528,7 @@ test("dry-run reserva e-mail e Web Push separadamente para o mesmo interesse", a
             id: customerId,
             full_name: "Cliente Teste",
             email: "cliente@example.com",
-            newsletter_opt_in: true,
+            newsletter_opt_in: customerNewsletterOptIn,
             account_enabled: true,
           },
         ],
@@ -660,4 +667,29 @@ test("dry-run reserva e-mail e Web Push separadamente para o mesmo interesse", a
   assert.equal(liveResult.jobs[0].sent, 2);
   assert.equal(liveResult.jobs[0].channels.email.sent, 1);
   assert.equal(liveResult.jobs[0].channels.web_push.sent, 1);
+
+  rpcCalls.length = 0;
+  customerNewsletterOptIn = false;
+  const optedOutResult = await runProductInterestNotificationSweep(
+    {
+      trigger: "test_customer_without_marketing_opt_in",
+      config: {
+        enabled: true,
+        dryRun: true,
+        consentConfirmed: false,
+        emailEnabled: true,
+        webPushEnabled: true,
+        recipientLimit: 1,
+        jobLimit: 1,
+        profileRefreshLimit: 1,
+      },
+    },
+    { client: fakeClient, nowMs }
+  );
+
+  const optedOutReservations = rpcCalls.filter(
+    (call) => call.name === "reserve_product_interest_channel_delivery"
+  );
+  assert.equal(optedOutReservations.length, 0);
+  assert.equal(optedOutResult.jobs[0].selected, 0);
 });

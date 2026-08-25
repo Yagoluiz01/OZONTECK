@@ -127,6 +127,15 @@ router.post("/identity", requireCustomerAuth, async (req, res) => {
 
 router.post("/push/subscription", requireCustomerAuth, async (req, res) => {
   try {
+    if (req.customer?.newsletter_opt_in !== true) {
+      return res.status(403).json({
+        success: false,
+        subscribed: false,
+        message:
+          "Ative o recebimento de novidades na sua conta para permitir notificações de lançamentos.",
+      });
+    }
+
     const subscription = await saveCustomerMarketingPushSubscription({
       customerId: req.customerAuth.id,
       subscription: req.body?.subscription,
