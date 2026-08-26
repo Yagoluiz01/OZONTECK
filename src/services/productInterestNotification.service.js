@@ -53,6 +53,22 @@ function getBaseUrl(value) {
   return String(value || "").trim().replace(/\/+$/, "");
 }
 
+function resolvePublicUrl(value, baseUrl = "") {
+  const rawValue = cleanText(value, 1000);
+  if (!rawValue) return "";
+
+  try {
+    const safeBaseUrl = getBaseUrl(baseUrl);
+    const resolved = safeBaseUrl
+      ? new URL(rawValue, `${safeBaseUrl}/`)
+      : new URL(rawValue);
+
+    return ["http:", "https:"].includes(resolved.protocol) ? resolved.toString() : "";
+  } catch {
+    return rawValue.startsWith("/") && !rawValue.startsWith("//") ? rawValue : "";
+  }
+}
+
 export function getProductInterestNotificationConfig(overrides = {}) {
   const emailEnabled =
     overrides.emailEnabled ??
@@ -60,6 +76,24 @@ export function getProductInterestNotificationConfig(overrides = {}) {
   const webPushEnabled =
     overrides.webPushEnabled ??
     isTruthy(process.env.PRODUCT_INTEREST_WEB_PUSH_ENABLED || "true");
+  const storefrontUrl = getBaseUrl(
+    overrides.storefrontUrl || process.env.STORE_FRONTEND_URL || env.frontendUrl
+  );
+  const brandName =
+    cleanText(overrides.brandName || process.env.PRODUCT_INTEREST_BRAND_NAME, 80) ||
+    "levra_perfume";
+  const brandIconUrl = resolvePublicUrl(
+    overrides.brandIconUrl ||
+      process.env.PRODUCT_INTEREST_BRAND_ICON_URL ||
+      "/assets/images/brand/store/icon-192.png",
+    storefrontUrl
+  );
+  const brandBadgeUrl = resolvePublicUrl(
+    overrides.brandBadgeUrl ||
+      process.env.PRODUCT_INTEREST_BRAND_BADGE_URL ||
+      "/assets/images/brand/store/icon-192.png",
+    storefrontUrl
+  );
 
   return {
     enabled:
@@ -182,9 +216,10 @@ export function getProductInterestNotificationConfig(overrides = {}) {
         process.env.PRODUCT_INTEREST_PUBLIC_API_URL ||
         env.apiBaseUrl
     ),
-    storefrontUrl: getBaseUrl(
-      overrides.storefrontUrl || process.env.STORE_FRONTEND_URL || env.frontendUrl
-    ),
+    storefrontUrl,
+    brandName,
+    brandIconUrl,
+    brandBadgeUrl,
     productUrlTemplate: cleanText(
       overrides.productUrlTemplate || process.env.PRODUCT_INTEREST_PRODUCT_URL_TEMPLATE,
       1000
@@ -290,16 +325,50 @@ function formatMoneyBR(value) {
   });
 }
 
-export function buildProductInterestEmail({ customer, product, productUrl, unsubscribeUrl }) {
+export function buildProductInterestEmail({
+  customer,
+  product,
+  productUrl,
+  unsubscribeUrl,
+  brandName,
+  brandLogoUrl,
+  storefrontUrl,
+}) {
+  const safeStorefrontUrl = getBaseUrl(
+    storefrontUrl || process.env.STORE_FRONTEND_URL || env.frontendUrl
+  );
+  const safeBrandName =
+    cleanText(brandName || process.env.PRODUCT_INTEREST_BRAND_NAME, 80) ||
+    "levra_perfume";
+  const safeBrandLogoUrl = resolvePublicUrl(
+    brandLogoUrl ||
+      process.env.PRODUCT_INTEREST_BRAND_ICON_URL ||
+      "/assets/images/brand/store/icon-192.png",
+    safeStorefrontUrl
+  );
   const customerName = cleanText(customer?.full_name, 120).split(/\s+/)[0] || "Cliente";
-  const productName = cleanText(product?.name, 180) || "Nova opção na OZONTECK";
+  const productName =
+    cleanText(product?.name, 180) || `Novidade da ${safeBrandName}`;
   const category = cleanText(product?.category, 120) || "uma categoria que você acompanha";
   const price = formatMoneyBR(product?.price);
-  const imageUrl = cleanText(
+  const imageUrl = resolvePublicUrl(
     product?.image_card_url || product?.image_thumb_url || product?.image_url,
-    1000
+    safeStorefrontUrl
   );
-  const subject = `Novidade na OZONTECK: ${productName}`;
+  const safeProductUrl =
+    resolvePublicUrl(productUrl, safeStorefrontUrl) || cleanText(productUrl, 1000) || "#";
+  const subject = `${productName} chegou na ${safeBrandName}`;
+  const brandHtml = safeBrandLogoUrl
+    ? `<table role="presentation" cellspacing="0" cellpadding="0" style="margin:0 0 22px;"><tr><td style="padding-right:12px;"><img src="${escapeHtml(
+        safeBrandLogoUrl
+      )}" alt="${escapeHtml(
+        safeBrandName
+      )}" width="54" height="54" style="display:block;width:54px;height:54px;border-radius:14px;object-fit:cover;" /></td><td style="font-size:16px;font-weight:700;color:#111827;">${escapeHtml(
+        safeBrandName
+      )}</td></tr></table>`
+    : `<p style="margin:0 0 22px;font-size:16px;font-weight:700;color:#111827;">${escapeHtml(
+        safeBrandName
+      )}</p>`;
   const imageHtml = imageUrl
     ? `<img src="${escapeHtml(imageUrl)}" alt="${escapeHtml(productName)}" width="520" style="display:block;width:100%;max-width:520px;height:auto;margin:0 auto 22px;border-radius:14px;" />`
     : "";
@@ -312,15 +381,19 @@ export function buildProductInterestEmail({ customer, product, productUrl, unsub
       <tr><td align="center">
         <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:620px;background:#ffffff;border:1px solid #e5e7eb;border-radius:16px;overflow:hidden;">
           <tr><td style="padding:28px;">
-            <p style="margin:0 0 8px;font-size:14px;color:#6b7280;">OZONTECK</p>
-            <h1 style="margin:0 0 18px;font-size:24px;line-height:1.3;">Uma novidade para você</h1>
+            ${brandHtml}
+            <h1 style="margin:0 0 18px;font-size:24px;line-height:1.3;">${escapeHtml(
+              productName
+            )} acabou de chegar</h1>
             <p style="margin:0 0 18px;font-size:16px;line-height:1.6;">Olá, ${escapeHtml(customerName)}. Chegou uma novidade em uma categoria que você acompanha.</p>
             ${imageHtml}
             <h2 style="margin:0 0 8px;font-size:21px;line-height:1.35;">${escapeHtml(productName)}</h2>
             <p style="margin:0 0 8px;color:#4b5563;">${escapeHtml(category)}</p>
             <p style="margin:0 0 22px;font-size:20px;font-weight:700;">${escapeHtml(price)}</p>
-            <a href="${escapeHtml(productUrl)}" target="_blank" rel="noopener noreferrer" style="display:inline-block;padding:13px 20px;background:#111827;color:#ffffff;text-decoration:none;border-radius:10px;font-weight:700;">Ver produto</a>
-            <p style="margin:28px 0 0;font-size:12px;line-height:1.6;color:#6b7280;">Você recebeu esta mensagem porque autorizou novidades da OZONTECK. <a href="${escapeHtml(unsubscribeUrl)}" style="color:#374151;">Cancelar novidades por e-mail</a>.</p>
+            <a href="${escapeHtml(safeProductUrl)}" target="_blank" rel="noopener noreferrer" style="display:inline-block;padding:13px 20px;background:#111827;color:#ffffff;text-decoration:none;border-radius:10px;font-weight:700;">Ver produto</a>
+            <p style="margin:28px 0 0;font-size:12px;line-height:1.6;color:#6b7280;">Você recebeu esta mensagem porque autorizou novidades da ${escapeHtml(
+              safeBrandName
+            )}. <a href="${escapeHtml(unsubscribeUrl)}" style="color:#374151;">Cancelar novidades por e-mail</a>.</p>
           </td></tr>
         </table>
       </td></tr>
@@ -330,9 +403,10 @@ export function buildProductInterestEmail({ customer, product, productUrl, unsub
 
   const text = [
     `Olá, ${customerName}.`,
-    "Chegou uma novidade em uma categoria que você acompanha.",
+    `${productName} acabou de chegar na ${safeBrandName}.`,
+    "Uma novidade em uma categoria que você acompanha.",
     `${productName} — ${category} — ${price}`,
-    `Ver produto: ${productUrl}`,
+    `Ver produto: ${safeProductUrl}`,
     `Cancelar novidades por e-mail: ${unsubscribeUrl}`,
   ].join("\n\n");
 
@@ -684,15 +758,19 @@ async function processCampaignJob(job, config, { client, mailer, pushMailer, now
           product,
           productUrl,
           unsubscribeUrl,
+          brandName: config.brandName,
+          brandLogoUrl: config.brandIconUrl,
+          storefrontUrl: config.storefrontUrl,
         });
         sendResult = await mailer({
           to: item.customer.email,
           ...email,
+          fromName: config.brandName,
           headers: {
             "List-Unsubscribe": `<${unsubscribeUrl}>`,
             "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
-            "List-ID": "Novidades OZONTECK <novidades.ozonteck>",
-            "X-OZ-Campaign-ID": campaign.id,
+            "List-ID": "Novidades levra_perfume <novidades.levra-perfume>",
+            "X-Levra-Campaign-ID": campaign.id,
           },
           logLabel: "PRODUCT INTEREST EMAIL",
           redactRecipient: true,
@@ -704,6 +782,10 @@ async function processCampaignJob(job, config, { client, mailer, pushMailer, now
             product,
             productUrl,
             campaignId: campaign.id,
+            brandName: config.brandName,
+            brandIconUrl: config.brandIconUrl,
+            brandBadgeUrl: config.brandBadgeUrl,
+            storefrontUrl: config.storefrontUrl,
           },
           { client }
         );

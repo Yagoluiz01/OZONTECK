@@ -11,6 +11,13 @@ export function getEmailEnvValue(...names) {
   return "";
 }
 
+function cleanEmailHeaderText(value, maxLength = 120) {
+  return String(value || "")
+    .replace(/[\r\n]+/g, " ")
+    .trim()
+    .slice(0, maxLength);
+}
+
 export function isEmailNotificationEnabled() {
   const enabled = getEmailEnvValue(
     "NOTIFICATIONS_ENABLED",
@@ -118,6 +125,7 @@ export async function sendSmtpEmail({
   html,
   headers,
   replyTo,
+  fromName,
   respectGlobalToggle = true,
   logLabel = "BREVO EMAIL",
   redactRecipient = false,
@@ -160,7 +168,10 @@ export async function sendSmtpEmail({
     }
 
     const info = await transporter.sendMail({
-      from: { name: config.fromName, address: config.fromEmail },
+      from: {
+        name: cleanEmailHeaderText(fromName) || config.fromName,
+        address: config.fromEmail,
+      },
       to: safeTo,
       subject,
       text,

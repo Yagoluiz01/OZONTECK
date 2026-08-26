@@ -21,6 +21,26 @@ function cleanText(value, maxLength = 500) {
   return text ? text.slice(0, maxLength) : "";
 }
 
+function getBaseUrl(value) {
+  return cleanText(value, 1000).replace(/\/+$/, "");
+}
+
+function resolvePublicUrl(value, baseUrl = "") {
+  const rawValue = cleanText(value, 1000);
+  if (!rawValue) return "";
+
+  try {
+    const safeBaseUrl = getBaseUrl(baseUrl);
+    const resolved = safeBaseUrl
+      ? new URL(rawValue, `${safeBaseUrl}/`)
+      : new URL(rawValue);
+
+    return ["http:", "https:"].includes(resolved.protocol) ? resolved.toString() : "";
+  } catch {
+    return rawValue.startsWith("/") && !rawValue.startsWith("//") ? rawValue : "";
+  }
+}
+
 function normalizeVapidSubject(value) {
   const subject = String(value || "").trim();
   if (!subject) return "mailto:ozonteck14@gmail.com";
@@ -121,27 +141,51 @@ export function buildProductInterestPushPayload({
   product,
   productUrl,
   campaignId,
+  brandName,
+  brandIconUrl,
+  brandBadgeUrl,
+  storefrontUrl,
 } = {}) {
-  const productName = cleanText(product?.name, 180) || "Nova opção na OZONTECK";
+  const safeStorefrontUrl = getBaseUrl(
+    storefrontUrl || process.env.STORE_FRONTEND_URL || process.env.FRONTEND_URL
+  );
+  const safeBrandName =
+    cleanText(brandName || process.env.PRODUCT_INTEREST_BRAND_NAME, 80) ||
+    "levra_perfume";
+  const productName =
+    cleanText(product?.name, 180) || `Novidade da ${safeBrandName}`;
   const category = cleanText(product?.category, 120);
-  const image = cleanText(
+  const image = resolvePublicUrl(
     product?.image_card_url || product?.image_thumb_url || product?.image_url,
-    1000
+    safeStorefrontUrl
+  );
+  const icon = resolvePublicUrl(
+    brandIconUrl ||
+      process.env.PRODUCT_INTEREST_BRAND_ICON_URL ||
+      "/assets/images/brand/store/icon-192.png",
+    safeStorefrontUrl
+  );
+  const badge = resolvePublicUrl(
+    brandBadgeUrl ||
+      process.env.PRODUCT_INTEREST_BRAND_BADGE_URL ||
+      "/assets/images/brand/store/icon-192.png",
+    safeStorefrontUrl
   );
 
   return {
-    title: `Novidade na OZONTECK: ${productName}`,
+    title: productName,
     body: category
-      ? `${productName} chegou em ${category}. Toque para conhecer.`
-      : `${productName} acabou de chegar. Toque para conhecer.`,
-    url: cleanText(productUrl, 1000) || "/",
-    icon: "/assets/images/icons/icon-192.png",
-    badge: "/assets/images/icons/icon-192.png",
+      ? `Novo em ${category} na ${safeBrandName}. Toque para conhecer ${productName}.`
+      : `${productName} acabou de chegar na ${safeBrandName}. Toque para conhecer.`,
+    url: resolvePublicUrl(productUrl, safeStorefrontUrl) || "/",
+    icon,
+    badge: badge || icon,
     ...(image ? { image } : {}),
     data: {
       type: "product_interest",
       product_id: product?.id || null,
       campaign_id: campaignId || null,
+      brand: safeBrandName,
     },
   };
 }
@@ -238,7 +282,16 @@ export async function deactivateCustomerMarketingPushSubscription(
 }
 
 export async function sendCustomerMarketingPush(
-  { customerId, product, productUrl, campaignId } = {},
+  {
+    customerId,
+    product,
+    productUrl,
+    campaignId,
+    brandName,
+    brandIconUrl,
+    brandBadgeUrl,
+    storefrontUrl,
+  } = {},
   { client = supabaseAdmin, sender = webPush.sendNotification.bind(webPush) } = {}
 ) {
   let vapid;
@@ -272,7 +325,15 @@ export async function sendCustomerMarketingPush(
   }
 
   const payload = JSON.stringify(
-    buildProductInterestPushPayload({ product, productUrl, campaignId })
+    buildProductInterestPushPayload({
+      product,
+      productUrl,
+      campaignId,
+      brandName,
+      brandIconUrl,
+      brandBadgeUrl,
+      storefrontUrl,
+    })
   );
   let sent = 0;
   let failed = 0;

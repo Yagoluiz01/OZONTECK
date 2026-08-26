@@ -190,10 +190,21 @@ test("e-mail explica a novidade sem expor score ou histórico", async () => {
     },
     productUrl: "https://loja.example.com/detalhe-produto.html?id=NOVO",
     unsubscribeUrl: "https://api.example.com/unsubscribe?token=abc",
+    brandName: "levra_perfume",
+    brandLogoUrl: "/assets/images/brand/store/icon-192.png",
+    storefrontUrl: "https://loja.example.com",
   });
 
+  assert.equal(email.subject, "Perfume Masculino Novo chegou na levra_perfume");
+  assert.match(email.html, /Perfume Masculino Novo acabou de chegar/i);
+  assert.match(
+    email.html,
+    /https:\/\/loja\.example\.com\/assets\/images\/brand\/store\/icon-192\.png/
+  );
+  assert.match(email.html, /https:\/\/cdn\.example\.com\/produto\.webp/);
   assert.match(email.html, /categoria que você acompanha/i);
   assert.match(email.html, /Cancelar novidades por e-mail/i);
+  assert.doesNotMatch(email.html, /OZONTECK/i);
   assert.doesNotMatch(email.html, /match_score|category_score|histórico de navegação/i);
 });
 
@@ -213,12 +224,23 @@ test("push mostra somente a novidade e abre o produto", async () => {
     },
     productUrl: "https://loja.example.com/detalhe-produto.html?id=NOVO",
     campaignId: "campaign-1",
+    brandName: "levra_perfume",
+    storefrontUrl: "https://loja.example.com",
   });
 
-  assert.match(payload.title, /Perfume Masculino Novo/i);
+  assert.equal(payload.title, "Perfume Masculino Novo");
   assert.match(payload.body, /Perfumes Masculinos/i);
+  assert.match(payload.body, /levra_perfume/i);
   assert.equal(payload.url, "https://loja.example.com/detalhe-produto.html?id=NOVO");
+  assert.equal(payload.image, "https://cdn.example.com/produto.webp");
+  assert.equal(
+    payload.icon,
+    "https://loja.example.com/assets/images/brand/store/icon-192.png"
+  );
+  assert.equal(payload.badge, payload.icon);
   assert.equal(payload.data.type, "product_interest");
+  assert.equal(payload.data.brand, "levra_perfume");
+  assert.doesNotMatch(JSON.stringify(payload), /OZONTECK/i);
   assert.doesNotMatch(JSON.stringify(payload), /match_score|category_score|histórico/i);
 
   await assert.rejects(
@@ -424,15 +446,29 @@ test("configuração permanece fechada e em simulação por padrão", async () =
   const previousEnabled = process.env.PRODUCT_INTEREST_NOTIFICATIONS_ENABLED;
   const previousDryRun = process.env.PRODUCT_INTEREST_NOTIFICATIONS_DRY_RUN;
   const previousConsent = process.env.PRODUCT_INTEREST_CONSENT_CONFIRMED;
+  const previousBrandName = process.env.PRODUCT_INTEREST_BRAND_NAME;
+  const previousBrandIcon = process.env.PRODUCT_INTEREST_BRAND_ICON_URL;
+  const previousBrandBadge = process.env.PRODUCT_INTEREST_BRAND_BADGE_URL;
 
   delete process.env.PRODUCT_INTEREST_NOTIFICATIONS_ENABLED;
   delete process.env.PRODUCT_INTEREST_NOTIFICATIONS_DRY_RUN;
   delete process.env.PRODUCT_INTEREST_CONSENT_CONFIRMED;
-  const config = getProductInterestNotificationConfig();
+  delete process.env.PRODUCT_INTEREST_BRAND_NAME;
+  delete process.env.PRODUCT_INTEREST_BRAND_ICON_URL;
+  delete process.env.PRODUCT_INTEREST_BRAND_BADGE_URL;
+  const config = getProductInterestNotificationConfig({
+    storefrontUrl: "https://loja.example.com",
+  });
 
   assert.equal(config.enabled, false);
   assert.equal(config.dryRun, true);
   assert.equal(config.consentConfirmed, false);
+  assert.equal(config.brandName, "levra_perfume");
+  assert.equal(
+    config.brandIconUrl,
+    "https://loja.example.com/assets/images/brand/store/icon-192.png"
+  );
+  assert.equal(config.brandBadgeUrl, config.brandIconUrl);
 
   if (previousEnabled === undefined) delete process.env.PRODUCT_INTEREST_NOTIFICATIONS_ENABLED;
   else process.env.PRODUCT_INTEREST_NOTIFICATIONS_ENABLED = previousEnabled;
@@ -440,6 +476,12 @@ test("configuração permanece fechada e em simulação por padrão", async () =
   else process.env.PRODUCT_INTEREST_NOTIFICATIONS_DRY_RUN = previousDryRun;
   if (previousConsent === undefined) delete process.env.PRODUCT_INTEREST_CONSENT_CONFIRMED;
   else process.env.PRODUCT_INTEREST_CONSENT_CONFIRMED = previousConsent;
+  if (previousBrandName === undefined) delete process.env.PRODUCT_INTEREST_BRAND_NAME;
+  else process.env.PRODUCT_INTEREST_BRAND_NAME = previousBrandName;
+  if (previousBrandIcon === undefined) delete process.env.PRODUCT_INTEREST_BRAND_ICON_URL;
+  else process.env.PRODUCT_INTEREST_BRAND_ICON_URL = previousBrandIcon;
+  if (previousBrandBadge === undefined) delete process.env.PRODUCT_INTEREST_BRAND_BADGE_URL;
+  else process.env.PRODUCT_INTEREST_BRAND_BADGE_URL = previousBrandBadge;
 });
 
 test("worker desativado não consulta banco nem reivindica jobs", async () => {
@@ -632,6 +674,8 @@ test("dry-run reserva e-mail e Web Push separadamente para o mesmo interesse", a
   rpcCalls.length = 0;
   let emailCalls = 0;
   let pushCalls = 0;
+  let capturedEmail = null;
+  let capturedPush = null;
   const liveResult = await runProductInterestNotificationSweep(
     {
       trigger: "test_live_email_and_push",
@@ -646,17 +690,24 @@ test("dry-run reserva e-mail e Web Push separadamente para o mesmo interesse", a
         profileRefreshLimit: 1,
         apiPublicUrl: "https://api.example.com",
         storefrontUrl: "https://loja.example.com",
+        brandName: "levra_perfume",
+        brandIconUrl:
+          "https://loja.example.com/assets/images/brand/store/icon-192.png",
+        brandBadgeUrl:
+          "https://loja.example.com/assets/images/brand/store/icon-192.png",
       },
     },
     {
       client: fakeClient,
       nowMs,
-      mailer: async () => {
+      mailer: async (message) => {
         emailCalls += 1;
+        capturedEmail = message;
         return { success: true, messageId: "email-test" };
       },
-      pushMailer: async () => {
+      pushMailer: async (message) => {
         pushCalls += 1;
+        capturedPush = message;
         return { success: true, sentCount: 1, failedCount: 0 };
       },
     }
@@ -664,6 +715,18 @@ test("dry-run reserva e-mail e Web Push separadamente para o mesmo interesse", a
 
   assert.equal(emailCalls, 1);
   assert.equal(pushCalls, 1);
+  assert.equal(capturedEmail.fromName, "levra_perfume");
+  assert.match(capturedEmail.subject, /Perfume Masculino Novo/);
+  assert.equal(
+    capturedEmail.headers["List-ID"],
+    "Novidades levra_perfume <novidades.levra-perfume>"
+  );
+  assert.equal(capturedPush.brandName, "levra_perfume");
+  assert.equal(
+    capturedPush.brandIconUrl,
+    "https://loja.example.com/assets/images/brand/store/icon-192.png"
+  );
+  assert.equal(capturedPush.brandBadgeUrl, capturedPush.brandIconUrl);
   assert.equal(liveResult.jobs[0].sent, 2);
   assert.equal(liveResult.jobs[0].channels.email.sent, 1);
   assert.equal(liveResult.jobs[0].channels.web_push.sent, 1);
