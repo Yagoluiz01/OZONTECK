@@ -191,7 +191,7 @@ export function buildProductInterestPushPayload({
 }
 
 export async function saveCustomerMarketingPushSubscription(
-  { customerId, subscription, userAgent = "" } = {},
+  { customerId, subscription, userAgent = "", marketingConsent = false } = {},
   { client = supabaseAdmin } = {}
 ) {
   const safeCustomerId = cleanText(customerId, 80);
@@ -202,14 +202,25 @@ export async function saveCustomerMarketingPushSubscription(
   }
   const normalized = normalizeSubscription(subscription);
   const now = new Date().toISOString();
-  const { data: suppression, error: suppressionLookupError } = await client
-    .from("customer_marketing_suppressions")
-    .select("customer_id")
-    .eq("customer_id", safeCustomerId)
-    .eq("channel", "web_push")
-    .maybeSingle();
-  if (suppressionLookupError) throw suppressionLookupError;
-  const isSuppressed = Boolean(suppression?.customer_id);
+  let isSuppressed = false;
+
+  if (marketingConsent === true) {
+    const { error: consentError } = await client
+      .from("customer_marketing_suppressions")
+      .delete()
+      .eq("customer_id", safeCustomerId)
+      .eq("channel", "web_push");
+    if (consentError) throw consentError;
+  } else {
+    const { data: suppression, error: suppressionLookupError } = await client
+      .from("customer_marketing_suppressions")
+      .select("customer_id")
+      .eq("customer_id", safeCustomerId)
+      .eq("channel", "web_push")
+      .maybeSingle();
+    if (suppressionLookupError) throw suppressionLookupError;
+    isSuppressed = Boolean(suppression?.customer_id);
+  }
 
   const { data, error } = await client
     .from("customer_marketing_push_subscriptions")

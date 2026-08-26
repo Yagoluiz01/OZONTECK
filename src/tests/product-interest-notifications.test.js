@@ -17,7 +17,9 @@ process.env.WEB_PUSH_CONTACT_EMAIL ||= "push@example.com";
 
 const __filename = fileURLToPath(import.meta.url);
 const root = path.resolve(path.dirname(__filename), "..");
-const workspaceRoot = path.resolve(root, "../..");
+const workspaceRoot = process.env.OZONTECK_WORKSPACE_ROOT
+  ? path.resolve(process.env.OZONTECK_WORKSPACE_ROOT)
+  : path.resolve(root, "../..");
 
 function read(relativePath) {
   return fs.readFileSync(path.join(root, relativePath), "utf8");
@@ -206,6 +208,23 @@ test("e-mail explica a novidade sem expor score ou histórico", async () => {
   assert.match(email.html, /Cancelar novidades por e-mail/i);
   assert.doesNotMatch(email.html, /OZONTECK/i);
   assert.doesNotMatch(email.html, /match_score|category_score|histórico de navegação/i);
+
+  const discoveryEmail = buildProductInterestEmail({
+    customer: { full_name: "Cliente Descoberta" },
+    product: {
+      name: "Perfume Masculino Novo",
+      category: "Perfumes Masculinos",
+      price: 199.9,
+    },
+    productUrl: "https://loja.example.com/produto/novo",
+    unsubscribeUrl: "https://api.example.com/unsubscribe?token=seguro",
+    brandName: "levra_perfume",
+    storefrontUrl: "https://loja.example.com",
+    selectionMode: "discovery",
+  });
+  assert.match(discoveryEmail.html, /ainda estamos conhecendo suas preferências/i);
+  assert.match(discoveryEmail.text, /sugestão de descoberta/i);
+  assert.doesNotMatch(discoveryEmail.html, /categoria que você acompanha/i);
 });
 
 test("push mostra somente a novidade e abre o produto", async () => {
@@ -264,6 +283,91 @@ test("push mostra somente a novidade e abre o produto", async () => {
       }
     ),
     (error) => error?.code === "invalid_web_push_endpoint"
+  );
+});
+
+test("consentimento Push explícito remove apenas a supressão Web Push", async () => {
+  const { saveCustomerMarketingPushSubscription } = await import(
+    "../services/customerMarketingPush.service.js"
+  );
+  const customerId = "11111111-1111-4111-8111-111111111111";
+  const calls = [];
+
+  function builder(table) {
+    return {
+      operation: "select",
+      payload: null,
+      delete() {
+        this.operation = "delete";
+        calls.push({ operation: "delete", table });
+        return this;
+      },
+      upsert(payload) {
+        this.operation = "upsert";
+        this.payload = payload;
+        calls.push({ operation: "upsert", table, payload });
+        return this;
+      },
+      select() {
+        return this;
+      },
+      eq(column, value) {
+        calls.push({ operation: this.operation, table, column, value });
+        return this;
+      },
+      single() {
+        return Promise.resolve({
+          data: {
+            id: "22222222-2222-4222-8222-222222222222",
+            customer_id: customerId,
+            is_active: this.payload?.is_active === true,
+            consented_at: this.payload?.consented_at,
+            last_seen_at: this.payload?.last_seen_at,
+          },
+          error: null,
+        });
+      },
+      then(resolve, reject) {
+        return Promise.resolve({ data: null, error: null }).then(resolve, reject);
+      },
+    };
+  }
+
+  const result = await saveCustomerMarketingPushSubscription(
+    {
+      customerId,
+      marketingConsent: true,
+      subscription: {
+        endpoint: "https://fcm.googleapis.com/fcm/send/test-consent",
+        keys: { p256dh: "A".repeat(50), auth: "B".repeat(20) },
+      },
+    },
+    { client: { from: builder } }
+  );
+
+  assert.equal(result.is_active, true);
+  assert.ok(
+    calls.some(
+      (call) =>
+        call.operation === "delete" &&
+        call.table === "customer_marketing_suppressions"
+    )
+  );
+  assert.ok(
+    calls.some(
+      (call) =>
+        call.operation === "delete" &&
+        call.column === "channel" &&
+        call.value === "web_push"
+    )
+  );
+  assert.ok(
+    calls.some(
+      (call) =>
+        call.operation === "upsert" &&
+        call.table === "customer_marketing_push_subscriptions" &&
+        call.payload?.is_active === true
+    )
   );
 });
 
@@ -421,21 +525,46 @@ test("integração da loja vincula somente visitor e session usando JWT da próp
   assert.match(tracking, /navigator\.serviceWorker\.register\("\/service-worker\.js"\)/);
   assert.match(tracking, /window\.Notification\.permission !== "granted"/);
   assert.match(tracking, /subscription: subscription\.toJSON\(\)/);
+  assert.match(tracking, /requestBody\.marketing_consent = true/);
+  assert.match(tracking, /marketingConsent: true/);
   assert.doesNotMatch(tracking, /customer_id:\s*.*subscription/i);
+});
+
+test("catálogo oferece Push somente por ação explícita e permite adiar", () => {
+  const catalogFeatures = fs.readFileSync(
+    path.join(
+      workspaceRoot,
+      "ozonteck-loja/frontend/assets/js/core/catalogo-lazy-features.js"
+    ),
+    "utf8"
+  );
+
+  assert.match(catalogFeatures, /Receba novidades de produtos/);
+  assert.match(catalogFeatures, /Ativar notificações/);
+  assert.match(catalogFeatures, /requestCustomerMarketingPushPermission/);
+  assert.match(catalogFeatures, /enableButton\.addEventListener\("click"/);
+  assert.match(catalogFeatures, /pushDismissCooldownMs = 7 \* 24 \* 60 \* 60 \* 1000/);
+  assert.match(catalogFeatures, /window\.Notification\.permission === "denied"/);
+  assert.doesNotMatch(catalogFeatures, /Notification\.requestPermission\(/);
 });
 
 test("rota de inscrição push deriva o cliente do JWT", () => {
   const routes = read("routes/customerMarketingPreferences.routes.js");
 
   assert.match(routes, /router\.post\("\/push\/subscription", requireCustomerAuth/);
-  assert.match(routes, /req\.customer\?\.newsletter_opt_in !== true/);
+  assert.match(
+    routes,
+    /req\.customer\?\.newsletter_opt_in !== true && !marketingConsent/
+  );
+  assert.match(routes, /req\.body\?\.marketing_consent === true/);
   assert.match(routes, /customerId: req\.customerAuth\.id/);
   assert.match(routes, /subscription: req\.body\?\.subscription/);
+  assert.match(routes, /marketingConsent,/);
   assert.doesNotMatch(routes, /customerId: req\.body/);
   assert.ok(
-    routes.indexOf("req.customer?.newsletter_opt_in !== true") <
+    routes.indexOf("req.customer?.newsletter_opt_in !== true && !marketingConsent") <
       routes.indexOf("const subscription = await saveCustomerMarketingPushSubscription"),
-    "o opt-in deve ser validado antes de salvar a inscrição push"
+    "o opt-in existente ou o consentimento explícito devem ser validados antes da inscrição"
   );
 });
 
@@ -449,6 +578,11 @@ test("configuração permanece fechada e em simulação por padrão", async () =
   const previousBrandName = process.env.PRODUCT_INTEREST_BRAND_NAME;
   const previousBrandIcon = process.env.PRODUCT_INTEREST_BRAND_ICON_URL;
   const previousBrandBadge = process.env.PRODUCT_INTEREST_BRAND_BADGE_URL;
+  const previousDiscovery = process.env.PRODUCT_INTEREST_DISCOVERY_ENABLED;
+  const previousDiscoveryShare =
+    process.env.PRODUCT_INTEREST_DISCOVERY_SHARE_PERCENT;
+  const previousDiscoveryLimit =
+    process.env.PRODUCT_INTEREST_DISCOVERY_CANDIDATE_LIMIT;
 
   delete process.env.PRODUCT_INTEREST_NOTIFICATIONS_ENABLED;
   delete process.env.PRODUCT_INTEREST_NOTIFICATIONS_DRY_RUN;
@@ -456,6 +590,9 @@ test("configuração permanece fechada e em simulação por padrão", async () =
   delete process.env.PRODUCT_INTEREST_BRAND_NAME;
   delete process.env.PRODUCT_INTEREST_BRAND_ICON_URL;
   delete process.env.PRODUCT_INTEREST_BRAND_BADGE_URL;
+  delete process.env.PRODUCT_INTEREST_DISCOVERY_ENABLED;
+  delete process.env.PRODUCT_INTEREST_DISCOVERY_SHARE_PERCENT;
+  delete process.env.PRODUCT_INTEREST_DISCOVERY_CANDIDATE_LIMIT;
   const config = getProductInterestNotificationConfig({
     storefrontUrl: "https://loja.example.com",
   });
@@ -463,6 +600,9 @@ test("configuração permanece fechada e em simulação por padrão", async () =
   assert.equal(config.enabled, false);
   assert.equal(config.dryRun, true);
   assert.equal(config.consentConfirmed, false);
+  assert.equal(config.discoveryEnabled, true);
+  assert.equal(config.discoverySharePercent, 20);
+  assert.equal(config.discoveryCandidateLimit, 250);
   assert.equal(config.brandName, "levra_perfume");
   assert.equal(
     config.brandIconUrl,
@@ -482,6 +622,18 @@ test("configuração permanece fechada e em simulação por padrão", async () =
   else process.env.PRODUCT_INTEREST_BRAND_ICON_URL = previousBrandIcon;
   if (previousBrandBadge === undefined) delete process.env.PRODUCT_INTEREST_BRAND_BADGE_URL;
   else process.env.PRODUCT_INTEREST_BRAND_BADGE_URL = previousBrandBadge;
+  if (previousDiscovery === undefined) delete process.env.PRODUCT_INTEREST_DISCOVERY_ENABLED;
+  else process.env.PRODUCT_INTEREST_DISCOVERY_ENABLED = previousDiscovery;
+  if (previousDiscoveryShare === undefined) {
+    delete process.env.PRODUCT_INTEREST_DISCOVERY_SHARE_PERCENT;
+  } else {
+    process.env.PRODUCT_INTEREST_DISCOVERY_SHARE_PERCENT = previousDiscoveryShare;
+  }
+  if (previousDiscoveryLimit === undefined) {
+    delete process.env.PRODUCT_INTEREST_DISCOVERY_CANDIDATE_LIMIT;
+  } else {
+    process.env.PRODUCT_INTEREST_DISCOVERY_CANDIDATE_LIMIT = previousDiscoveryLimit;
+  }
 });
 
 test("worker desativado não consulta banco nem reivindica jobs", async () => {
@@ -750,9 +902,217 @@ test("dry-run reserva e-mail e Web Push separadamente para o mesmo interesse", a
     { client: fakeClient, nowMs }
   );
 
-  const optedOutReservations = rpcCalls.filter(
+  const optedOutChannels = rpcCalls
+    .filter((call) => call.name === "reserve_product_interest_channel_delivery")
+    .map((call) => call.args.p_channel);
+  assert.deepEqual(optedOutChannels, ["web_push"]);
+  assert.equal(optedOutResult.jobs[0].selected, 1);
+  assert.equal(optedOutResult.jobs[0].channels.email.selected, 0);
+  assert.equal(optedOutResult.jobs[0].channels.web_push.selected, 1);
+});
+
+test("descoberta notifica sem perfil e para quando um interesse é aprendido", async () => {
+  const { runProductInterestNotificationSweep } = await import(
+    "../services/productInterestNotification.service.js"
+  );
+  const customerId = "11111111-1111-4111-8111-111111111111";
+  const campaignId = "22222222-2222-4222-8222-222222222222";
+  const productId = "33333333-3333-4333-8333-333333333333";
+  const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
+  const rpcCalls = [];
+  let learnedAnotherCategory = false;
+
+  function resultFor(table, builder) {
+    if (builder.operation === "update") return { data: null, error: null };
+    if (table === "customer_visitor_links") return { data: [], error: null };
+    if (table === "product_notification_campaigns") {
+      return {
+        data: {
+          id: campaignId,
+          product_id: productId,
+          campaign_type: "new_product_interest",
+          status: "queued",
+        },
+        error: null,
+      };
+    }
+    if (table === "products") {
+      return {
+        data: {
+          id: productId,
+          name: "Descoberta Masculina",
+          sku: "DESCOBERTA-M",
+          category: "Perfumes Masculinos",
+          price: 99.9,
+          status: "active",
+          stock_quantity: 8,
+          image_url: "https://cdn.example.com/descoberta.webp",
+        },
+        error: null,
+      };
+    }
+    if (table === "customer_interest_profiles") {
+      const targetedQuery = builder.eqFilters.some(
+        ([column]) => column === "category_key"
+      );
+      if (targetedQuery || !learnedAnotherCategory) return { data: [], error: null };
+      return {
+        data: [
+          {
+            customer_id: customerId,
+            category_score: 92,
+            confidence: 88,
+            qualifying_signal_count: 2,
+            last_signal_at: new Date(nowMs - 60_000).toISOString(),
+          },
+        ],
+        error: null,
+      };
+    }
+    if (table === "customers") {
+      if (builder.selectedColumns === "id") {
+        return { data: [{ id: customerId }], error: null };
+      }
+      return {
+        data: [
+          {
+            id: customerId,
+            full_name: "Cliente Descoberta",
+            email: "cliente@example.com",
+            newsletter_opt_in: false,
+            account_enabled: true,
+          },
+        ],
+        error: null,
+      };
+    }
+    if (table === "customer_marketing_push_subscriptions") {
+      return { data: [{ customer_id: customerId }], error: null };
+    }
+    if (table === "customer_marketing_suppressions") return { data: [], error: null };
+    if (table === "customer_notification_deliveries") return { data: [], error: null };
+    return { data: [], error: null };
+  }
+
+  function queryBuilder(table) {
+    return {
+      operation: "select",
+      selectedColumns: "",
+      eqFilters: [],
+      select(columns) {
+        this.operation = "select";
+        this.selectedColumns = columns;
+        return this;
+      },
+      update() {
+        this.operation = "update";
+        return this;
+      },
+      eq(column, value) {
+        this.eqFilters.push([column, value]);
+        return this;
+      },
+      in() {
+        return this;
+      },
+      gte() {
+        return this;
+      },
+      or() {
+        return this;
+      },
+      order() {
+        return this;
+      },
+      limit() {
+        return this;
+      },
+      maybeSingle() {
+        return Promise.resolve(resultFor(table, this));
+      },
+      then(resolve, reject) {
+        return Promise.resolve(resultFor(table, this)).then(resolve, reject);
+      },
+    };
+  }
+
+  const fakeClient = {
+    from(table) {
+      return queryBuilder(table);
+    },
+    async rpc(name, args) {
+      rpcCalls.push({ name, args });
+      if (name === "claim_product_notification_jobs") {
+        return {
+          data: [{ id: 9, campaign_id: campaignId, attempts: 1, max_attempts: 3 }],
+          error: null,
+        };
+      }
+      if (name === "reserve_product_interest_channel_delivery") {
+        return { data: "delivery-discovery", error: null };
+      }
+      return { data: null, error: null };
+    },
+  };
+
+  const discoveryResult = await runProductInterestNotificationSweep(
+    {
+      trigger: "test_discovery_without_profile",
+      config: {
+        enabled: true,
+        dryRun: true,
+        consentConfirmed: false,
+        emailEnabled: false,
+        webPushEnabled: true,
+        discoveryEnabled: true,
+        discoverySharePercent: 20,
+        discoveryCandidateLimit: 25,
+        recipientLimit: 1,
+        jobLimit: 1,
+        profileRefreshLimit: 1,
+      },
+    },
+    { client: fakeClient, nowMs }
+  );
+
+  const discoveryReservation = rpcCalls.find(
     (call) => call.name === "reserve_product_interest_channel_delivery"
   );
-  assert.equal(optedOutReservations.length, 0);
-  assert.equal(optedOutResult.jobs[0].selected, 0);
+  assert.equal(discoveryResult.jobs[0].discovery_candidates, 1);
+  assert.equal(discoveryResult.jobs[0].discovery_recipients, 1);
+  assert.equal(discoveryResult.jobs[0].selected, 1);
+  assert.equal(discoveryResult.jobs[0].simulated, 1);
+  assert.equal(discoveryReservation.args.p_channel, "web_push");
+  assert.equal(discoveryReservation.args.p_match_score, 0);
+  assert.equal(discoveryReservation.args.p_metadata.selection_mode, "discovery");
+
+  rpcCalls.length = 0;
+  learnedAnotherCategory = true;
+  const learnedResult = await runProductInterestNotificationSweep(
+    {
+      trigger: "test_discovery_stops_after_learning",
+      config: {
+        enabled: true,
+        dryRun: true,
+        consentConfirmed: false,
+        emailEnabled: false,
+        webPushEnabled: true,
+        discoveryEnabled: true,
+        discoveryCandidateLimit: 25,
+        recipientLimit: 1,
+        jobLimit: 1,
+        profileRefreshLimit: 1,
+      },
+    },
+    { client: fakeClient, nowMs }
+  );
+
+  assert.equal(
+    rpcCalls.filter(
+      (call) => call.name === "reserve_product_interest_channel_delivery"
+    ).length,
+    0
+  );
+  assert.equal(learnedResult.jobs[0].reason, "no_eligible_audience");
+  assert.equal(learnedResult.jobs[0].selected, 0);
 });

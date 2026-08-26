@@ -127,7 +127,8 @@ router.post("/identity", requireCustomerAuth, async (req, res) => {
 
 router.post("/push/subscription", requireCustomerAuth, async (req, res) => {
   try {
-    if (req.customer?.newsletter_opt_in !== true) {
+    const marketingConsent = req.body?.marketing_consent === true;
+    if (req.customer?.newsletter_opt_in !== true && !marketingConsent) {
       return res.status(403).json({
         success: false,
         subscribed: false,
@@ -140,6 +141,7 @@ router.post("/push/subscription", requireCustomerAuth, async (req, res) => {
       customerId: req.customerAuth.id,
       subscription: req.body?.subscription,
       userAgent: req.get("user-agent") || "",
+      marketingConsent,
     });
 
     const active = subscription?.is_active === true;
@@ -147,6 +149,7 @@ router.post("/push/subscription", requireCustomerAuth, async (req, res) => {
       success: true,
       subscribed: active,
       suppressed: !active,
+      marketingConsentConfirmed: marketingConsent,
       subscription: {
         id: subscription?.id || null,
         active,

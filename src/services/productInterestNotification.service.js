@@ -115,6 +115,23 @@ export function getProductInterestNotificationConfig(overrides = {}) {
       ...(emailEnabled ? ["email"] : []),
       ...(webPushEnabled ? ["web_push"] : []),
     ],
+    discoveryEnabled:
+      overrides.discoveryEnabled ??
+      isTruthy(process.env.PRODUCT_INTEREST_DISCOVERY_ENABLED || "true"),
+    discoverySharePercent: clampInt(
+      overrides.discoverySharePercent ??
+        process.env.PRODUCT_INTEREST_DISCOVERY_SHARE_PERCENT,
+      0,
+      100,
+      20
+    ),
+    discoveryCandidateLimit: clampInt(
+      overrides.discoveryCandidateLimit ??
+        process.env.PRODUCT_INTEREST_DISCOVERY_CANDIDATE_LIMIT,
+      1,
+      500,
+      250
+    ),
     lookbackDays: clampInt(
       overrides.lookbackDays ?? process.env.PRODUCT_INTEREST_LOOKBACK_DAYS,
       1,
@@ -333,6 +350,7 @@ export function buildProductInterestEmail({
   brandName,
   brandLogoUrl,
   storefrontUrl,
+  selectionMode = "interest",
 }) {
   const safeStorefrontUrl = getBaseUrl(
     storefrontUrl || process.env.STORE_FRONTEND_URL || env.frontendUrl
@@ -358,6 +376,10 @@ export function buildProductInterestEmail({
   const safeProductUrl =
     resolvePublicUrl(productUrl, safeStorefrontUrl) || cleanText(productUrl, 1000) || "#";
   const subject = `${productName} chegou na ${safeBrandName}`;
+  const discoveryMode = selectionMode === "discovery";
+  const introduction = discoveryMode
+    ? `Olá, ${customerName}. Como ainda estamos conhecendo suas preferências, selecionamos uma novidade para você descobrir.`
+    : `Olá, ${customerName}. Chegou uma novidade em uma categoria que você acompanha.`;
   const brandHtml = safeBrandLogoUrl
     ? `<table role="presentation" cellspacing="0" cellpadding="0" style="margin:0 0 22px;"><tr><td style="padding-right:12px;"><img src="${escapeHtml(
         safeBrandLogoUrl
@@ -385,7 +407,7 @@ export function buildProductInterestEmail({
             <h1 style="margin:0 0 18px;font-size:24px;line-height:1.3;">${escapeHtml(
               productName
             )} acabou de chegar</h1>
-            <p style="margin:0 0 18px;font-size:16px;line-height:1.6;">Olá, ${escapeHtml(customerName)}. Chegou uma novidade em uma categoria que você acompanha.</p>
+            <p style="margin:0 0 18px;font-size:16px;line-height:1.6;">${escapeHtml(introduction)}</p>
             ${imageHtml}
             <h2 style="margin:0 0 8px;font-size:21px;line-height:1.35;">${escapeHtml(productName)}</h2>
             <p style="margin:0 0 8px;color:#4b5563;">${escapeHtml(category)}</p>
@@ -404,7 +426,9 @@ export function buildProductInterestEmail({
   const text = [
     `Olá, ${customerName}.`,
     `${productName} acabou de chegar na ${safeBrandName}.`,
-    "Uma novidade em uma categoria que você acompanha.",
+    discoveryMode
+      ? "Uma sugestão de descoberta enquanto aprendemos suas preferências."
+      : "Uma novidade em uma categoria que você acompanha.",
     `${productName} — ${category} — ${price}`,
     `Ver produto: ${safeProductUrl}`,
     `Cancelar novidades por e-mail: ${unsubscribeUrl}`,
@@ -523,6 +547,147 @@ function buildFrequencyMap(rows = [], nowMs = Date.now()) {
   return map;
 }
 
+function hasLearnedInterest(profile, config, lookbackFromMs) {
+  const lastSignalMs = Date.parse(String(profile?.last_signal_at || ""));
+  return Boolean(
+    Number(profile?.category_score || 0) >= config.minCategoryScore &&
+      Number(profile?.confidence || 0) >= config.minConfidence &&
+      Number(profile?.qualifying_signal_count || 0) >= config.minQualifyingSignals &&
+      Number.isFinite(lastSignalMs) &&
+      lastSignalMs >= lookbackFromMs
+  );
+}
+
+async function loadDiscoveryCustomerIds(
+  client,
+  config,
+  { targetedCustomerIds = [], lookbackFrom, lookbackFromMs }
+) {
+  if (!config.discoveryEnabled) return [];
+
+  const poolLimit = Math.max(
+    config.recipientLimit,
+    config.discoveryCandidateLimit
+  );
+  const [emailCandidatesResult, pushCandidatesResult] = await Promise.all([
+    config.emailEnabled
+      ? client
+          .from("customers")
+          .select("id")
+          .eq("account_enabled", true)
+          .eq("newsletter_opt_in", true)
+          .limit(poolLimit)
+      : Promise.resolve({ data: [], error: null }),
+    config.webPushEnabled
+      ? client
+          .from("customer_marketing_push_subscriptions")
+          .select("customer_id")
+          .eq("is_active", true)
+          .limit(poolLimit)
+      : Promise.resolve({ data: [], error: null }),
+  ]);
+  if (emailCandidatesResult.error) throw emailCandidatesResult.error;
+  if (pushCandidatesResult.error) throw pushCandidatesResult.error;
+
+  const targeted = new Set(targetedCustomerIds);
+  const poolIds = Array.from(
+    new Set([
+      ...(emailCandidatesResult.data || []).map((row) => row.id),
+      ...(pushCandidatesResult.data || []).map((row) => row.customer_id),
+    ].filter(Boolean))
+  )
+    .filter((customerId) => !targeted.has(customerId))
+    .slice(0, poolLimit);
+
+  if (!poolIds.length) return [];
+
+  const profileLimit = Math.min(5000, Math.max(poolIds.length, poolIds.length * 10));
+  const { data: learnedProfiles, error: learnedProfilesError } = await client
+    .from("customer_interest_profiles")
+    .select("customer_id,category_score,confidence,qualifying_signal_count,last_signal_at")
+    .in("customer_id", poolIds)
+    .gte("last_signal_at", lookbackFrom)
+    .order("last_signal_at", { ascending: false })
+    .limit(profileLimit);
+  if (learnedProfilesError) throw learnedProfilesError;
+
+  const learnedCustomerIds = new Set(
+    (learnedProfiles || [])
+      .filter((profile) => hasLearnedInterest(profile, config, lookbackFromMs))
+      .map((profile) => profile.customer_id)
+      .filter(Boolean)
+  );
+
+  return poolIds.filter((customerId) => !learnedCustomerIds.has(customerId));
+}
+
+function getAvailableDeliveryChannels(
+  customer,
+  config,
+  { suppressed, pushCustomers, frequency }
+) {
+  if (!customer?.id || customer.account_enabled !== true) return [];
+
+  const channels = [];
+  if (
+    config.emailEnabled &&
+    customer.newsletter_opt_in === true &&
+    isValidEmail(customer.email) &&
+    !suppressed.has(`${customer.id}:email`)
+  ) {
+    const counts = frequency.get(`${customer.id}:email`) || { daily: 0, weekly: 0 };
+    if (
+      (config.dailyCap <= 0 || counts.daily < config.dailyCap) &&
+      (config.weeklyCap <= 0 || counts.weekly < config.weeklyCap)
+    ) {
+      channels.push("email");
+    }
+  }
+
+  if (
+    config.webPushEnabled &&
+    pushCustomers.has(customer.id) &&
+    !suppressed.has(`${customer.id}:web_push`)
+  ) {
+    const counts = frequency.get(`${customer.id}:web_push`) || { daily: 0, weekly: 0 };
+    if (
+      (config.dailyCap <= 0 || counts.daily < config.dailyCap) &&
+      (config.weeklyCap <= 0 || counts.weekly < config.weeklyCap)
+    ) {
+      channels.push("web_push");
+    }
+  }
+
+  return channels;
+}
+
+function allocateCampaignRecipients(interestCandidates, discoveryCandidates, config) {
+  const limit = config.recipientLimit;
+  if (!interestCandidates.length) return discoveryCandidates.slice(0, limit);
+  if (!discoveryCandidates.length) return interestCandidates.slice(0, limit);
+  if (limit === 1) return interestCandidates.slice(0, 1);
+
+  const requestedDiscoverySlots =
+    config.discoverySharePercent > 0
+      ? Math.max(1, Math.round((limit * config.discoverySharePercent) / 100))
+      : 0;
+  const discoverySlots = Math.min(limit - 1, requestedDiscoverySlots);
+  const recipients = [
+    ...interestCandidates.slice(0, limit - discoverySlots),
+    ...discoveryCandidates.slice(0, discoverySlots),
+  ];
+  const selectedIds = new Set(recipients.map((item) => item.customer.id));
+
+  for (const candidate of [...interestCandidates, ...discoveryCandidates]) {
+    if (recipients.length >= limit) break;
+    if (selectedIds.has(candidate.customer.id)) continue;
+    recipients.push(candidate);
+    selectedIds.add(candidate.customer.id);
+  }
+
+  return recipients;
+}
+
 async function processCampaignJob(job, config, { client, mailer, pushMailer, nowMs }) {
   const { campaign, product } = await loadCampaignContext(client, job);
   if (!campaign) {
@@ -568,8 +733,12 @@ async function processCampaignJob(job, config, { client, mailer, pushMailer, now
     last_error: null,
   });
 
-  const candidateLimit = Math.min(1000, Math.max(config.recipientLimit, config.recipientLimit * 5));
-  const lookbackFrom = new Date(nowMs - config.lookbackDays * DAY_MS).toISOString();
+  const candidateLimit = Math.min(
+    1000,
+    Math.max(config.recipientLimit, config.recipientLimit * 5)
+  );
+  const lookbackFromMs = nowMs - config.lookbackDays * DAY_MS;
+  const lookbackFrom = new Date(lookbackFromMs).toISOString();
   const { data: profiles, error: profilesError } = await client
     .from("customer_interest_profiles")
     .select(
@@ -588,14 +757,34 @@ async function processCampaignJob(job, config, { client, mailer, pushMailer, now
   const customerIds = Array.from(
     new Set((profiles || []).map((row) => row.customer_id).filter(Boolean))
   );
-  if (!customerIds.length) {
+  const discoveryCustomerIds = await loadDiscoveryCustomerIds(client, config, {
+    targetedCustomerIds: customerIds,
+    lookbackFrom,
+    lookbackFromMs,
+  });
+  const audienceCustomerIds = Array.from(
+    new Set([...customerIds, ...discoveryCustomerIds])
+  );
+
+  if (!audienceCustomerIds.length) {
+    const reason = config.discoveryEnabled
+      ? "no_eligible_audience"
+      : "no_interest_profiles";
     await updateCampaign(client, campaign.id, {
       status: "completed",
-      summary: { reason: "no_interest_profiles", selected: 0, sent: 0, simulated: 0 },
+      summary: {
+        reason,
+        candidates: 0,
+        targeted_candidates: 0,
+        discovery_candidates: 0,
+        selected: 0,
+        sent: 0,
+        simulated: 0,
+      },
       completed_at: new Date(nowMs).toISOString(),
     });
     await completeJob(client, job.id);
-    return { jobId: job.id, selected: 0, sent: 0, simulated: 0 };
+    return { jobId: job.id, reason, selected: 0, sent: 0, simulated: 0 };
   }
 
   const countedDeliveryStatuses = config.dryRun
@@ -610,17 +799,17 @@ async function processCampaignJob(job, config, { client, mailer, pushMailer, now
     client
       .from("customers")
       .select("id,full_name,email,newsletter_opt_in,account_enabled")
-      .in("id", customerIds)
+      .in("id", audienceCustomerIds)
       .eq("account_enabled", true),
     client
       .from("customer_marketing_suppressions")
       .select("customer_id,channel")
-      .in("customer_id", customerIds)
+      .in("customer_id", audienceCustomerIds)
       .in("channel", config.channels),
     client
       .from("customer_notification_deliveries")
       .select("customer_id,channel,created_at,status")
-      .in("customer_id", customerIds)
+      .in("customer_id", audienceCustomerIds)
       .in("channel", config.channels)
       .in("status", countedDeliveryStatuses)
       .gte("created_at", new Date(nowMs - 7 * DAY_MS).toISOString()),
@@ -628,7 +817,7 @@ async function processCampaignJob(job, config, { client, mailer, pushMailer, now
       ? client
           .from("customer_marketing_push_subscriptions")
           .select("customer_id")
-          .in("customer_id", customerIds)
+          .in("customer_id", audienceCustomerIds)
           .eq("is_active", true)
       : Promise.resolve({ data: [], error: null }),
   ]);
@@ -646,7 +835,7 @@ async function processCampaignJob(job, config, { client, mailer, pushMailer, now
   );
   const frequency = buildFrequencyMap(deliveriesResult.data || [], nowMs);
 
-  const selected = [];
+  const interestCandidates = [];
   for (const profile of profiles || []) {
     const customer = customersById.get(profile.customer_id);
     if (!customer) continue;
@@ -654,54 +843,80 @@ async function processCampaignJob(job, config, { client, mailer, pushMailer, now
     const evaluation = evaluateInterestEligibility(profile, config, nowMs);
     if (!evaluation.eligible) continue;
 
-    const channels = [];
-    if (
-      config.emailEnabled &&
-      customer.newsletter_opt_in === true &&
-      isValidEmail(customer.email) &&
-      !suppressed.has(`${profile.customer_id}:email`)
-    ) {
-      const counts = frequency.get(`${profile.customer_id}:email`) || {
-        daily: 0,
-        weekly: 0,
-      };
-      if (
-        (config.dailyCap <= 0 || counts.daily < config.dailyCap) &&
-        (config.weeklyCap <= 0 || counts.weekly < config.weeklyCap)
-      ) {
-        channels.push("email");
-      }
+    const channels = getAvailableDeliveryChannels(customer, config, {
+      suppressed,
+      pushCustomers,
+      frequency,
+    });
+    if (channels.length) {
+      interestCandidates.push({
+        profile,
+        customer,
+        evaluation,
+        channels,
+        selectionMode: "interest",
+      });
     }
-
-    if (
-      config.webPushEnabled &&
-      customer.newsletter_opt_in === true &&
-      pushCustomers.has(profile.customer_id) &&
-      !suppressed.has(`${profile.customer_id}:web_push`)
-    ) {
-      const counts = frequency.get(`${profile.customer_id}:web_push`) || {
-        daily: 0,
-        weekly: 0,
-      };
-      if (
-        (config.dailyCap <= 0 || counts.daily < config.dailyCap) &&
-        (config.weeklyCap <= 0 || counts.weekly < config.weeklyCap)
-      ) {
-        channels.push("web_push");
-      }
-    }
-
-    if (channels.length) selected.push({ profile, customer, evaluation, channels });
   }
 
-  selected.sort(
+  interestCandidates.sort(
     (a, b) =>
       b.evaluation.matchScore - a.evaluation.matchScore ||
       String(a.customer.id).localeCompare(String(b.customer.id))
   );
 
+  const discoveryCandidates = [];
+  for (const customerId of discoveryCustomerIds) {
+    const customer = customersById.get(customerId);
+    if (!customer) continue;
+    const channels = getAvailableDeliveryChannels(customer, config, {
+      suppressed,
+      pushCustomers,
+      frequency,
+    });
+    if (!channels.length) continue;
+
+    discoveryCandidates.push({
+      profile: {
+        customer_id: customerId,
+        category_key: categoryKey,
+        category_score: 0,
+        confidence: 0,
+        qualifying_signal_count: 0,
+        last_signal_at: null,
+        profile_version: "discovery-v1",
+      },
+      customer,
+      evaluation: {
+        eligible: true,
+        matchScore: 0,
+        recencyScore: 0,
+        reasons: ["discovery_until_interest_learned"],
+      },
+      channels,
+      selectionMode: "discovery",
+    });
+  }
+  discoveryCandidates.sort((a, b) =>
+    String(a.customer.id).localeCompare(String(b.customer.id))
+  );
+
+  const recipients = allocateCampaignRecipients(
+    interestCandidates,
+    discoveryCandidates,
+    config
+  );
+
   const summary = {
-    candidates: (profiles || []).length,
+    candidates: (profiles || []).length + discoveryCustomerIds.length,
+    targeted_candidates: (profiles || []).length,
+    discovery_candidates: discoveryCustomerIds.length,
+    targeted_recipients: recipients.filter(
+      (item) => item.selectionMode === "interest"
+    ).length,
+    discovery_recipients: recipients.filter(
+      (item) => item.selectionMode === "discovery"
+    ).length,
     selected: 0,
     simulated: 0,
     sent: 0,
@@ -713,9 +928,10 @@ async function processCampaignJob(job, config, { client, mailer, pushMailer, now
       web_push: { selected: 0, simulated: 0, sent: 0, failed: 0, skipped: 0 },
     },
   };
+  if (!recipients.length) summary.reason = "no_available_channels";
   const productUrl = buildProductUrl(product, config);
 
-  for (const item of selected.slice(0, config.recipientLimit)) {
+  for (const item of recipients) {
     for (const channel of item.channels) {
       const deliveryId = await reserveDelivery(
         client,
@@ -731,6 +947,7 @@ async function processCampaignJob(job, config, { client, mailer, pushMailer, now
             recency_score: item.evaluation.recencyScore,
             qualifying_signal_count: Number(item.profile.qualifying_signal_count),
             profile_version: item.profile.profile_version,
+            selection_mode: item.selectionMode,
             dry_run: config.dryRun,
           },
         },
@@ -761,6 +978,7 @@ async function processCampaignJob(job, config, { client, mailer, pushMailer, now
           brandName: config.brandName,
           brandLogoUrl: config.brandIconUrl,
           storefrontUrl: config.storefrontUrl,
+          selectionMode: item.selectionMode,
         });
         sendResult = await mailer({
           to: item.customer.email,
