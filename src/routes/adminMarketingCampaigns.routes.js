@@ -19,6 +19,9 @@ import {
   updateMarketingAutomationSettings,
   updateMarketingCampaign,
 } from "../services/marketingCampaign.service.js";
+import {
+  triggerInlineMarketingCampaignProcessing,
+} from "../services/marketingCampaignInlineDispatcher.service.js";
 
 const router = express.Router();
 
@@ -164,13 +167,20 @@ router.post(
       const campaign = await publishMarketingCampaign(req.params.id, req.body || {}, {
         actorId: actorId(req),
       });
+      const inlineDispatch =
+        campaign.status === "queued"
+          ? triggerInlineMarketingCampaignProcessing("admin_publish")
+          : { enabled: false, scheduled: false, coalesced: false };
       return res.json({
         success: true,
         campaign,
+        inline_dispatch: inlineDispatch,
         message:
           campaign.status === "scheduled"
             ? "Campanha agendada."
-            : "Campanha colocada na fila.",
+            : inlineDispatch.enabled
+              ? "Campanha colocada na fila e processamento automático iniciado."
+              : "Campanha colocada na fila.",
       });
     } catch (error) {
       return next(error);

@@ -6,6 +6,10 @@ import { runExpiredStockReservationCleanup } from "./jobs/releaseExpiredStockRes
 import { reconcilePendingMercadoPagoPayments } from "./jobs/reconcilePendingMercadoPagoPayments.js";
 import { runLeadRecoveryReadyNotificationSweep } from "./services/leadRecoveryNotification.service.js";
 import { processProductInterestNotifications } from "./jobs/processProductInterestNotifications.js";
+import {
+  getInlineMarketingDispatcherConfig,
+  triggerInlineMarketingCampaignProcessing,
+} from "./services/marketingCampaignInlineDispatcher.service.js";
 
 // Rede de segurança: um erro não tratado em qualquer parte do código não pode
 // mais derrubar o processo inteiro. Apenas loga o erro e mantém a API no ar.
@@ -107,6 +111,8 @@ const productInterestNotificationIntervalSeconds = Math.max(
   Number(process.env.PRODUCT_INTEREST_WORKER_INTERVAL_SECONDS || 60)
 );
 
+const inlineMarketingDispatcherConfig = getInlineMarketingDispatcherConfig();
+
 let syncRunning = false;
 let syncTimer = null;
 let stockCleanupTimer = null;
@@ -123,6 +129,8 @@ let leadRecoveryNotificationRunning = false;
 let productInterestNotificationTimer = null;
 let startupProductInterestNotificationTimer = null;
 let productInterestNotificationRunning = false;
+let inlineMarketingRecoveryTimer = null;
+let startupInlineMarketingRecoveryTimer = null;
 
 async function runProductInterestNotificationWorker(trigger = "interval") {
   if (!productInterestNotificationsEnabled || productInterestNotificationRunning) return;
@@ -312,6 +320,22 @@ const server = app.listen(PORT, () => {
     console.log("PRODUCT INTEREST NOTIFICATIONS: desativado por configuração");
   }
 
+  if (inlineMarketingDispatcherConfig.enabled) {
+    console.log(
+      `MARKETING CAMPAIGN INLINE: ativado; recuperação a cada ${inlineMarketingDispatcherConfig.intervalSeconds} segundo(s)`
+    );
+
+    startupInlineMarketingRecoveryTimer = setTimeout(() => {
+      triggerInlineMarketingCampaignProcessing("startup_recovery");
+    }, 5000);
+
+    inlineMarketingRecoveryTimer = setInterval(() => {
+      triggerInlineMarketingCampaignProcessing("interval_recovery");
+    }, inlineMarketingDispatcherConfig.intervalSeconds * 1000);
+  } else {
+    console.log("MARKETING CAMPAIGN INLINE: desativado por configuração");
+  }
+
   if (stockCleanupEnabled) {
     console.log(
       `ORDER STOCK CLEANUP: ativado para rodar a cada ${stockCleanupIntervalMinutes} minuto(s)`
@@ -350,6 +374,8 @@ function clearBackgroundTimers() {
   if (startupLeadRecoveryNotificationTimer) clearTimeout(startupLeadRecoveryNotificationTimer);
   if (productInterestNotificationTimer) clearInterval(productInterestNotificationTimer);
   if (startupProductInterestNotificationTimer) clearTimeout(startupProductInterestNotificationTimer);
+  if (inlineMarketingRecoveryTimer) clearInterval(inlineMarketingRecoveryTimer);
+  if (startupInlineMarketingRecoveryTimer) clearTimeout(startupInlineMarketingRecoveryTimer);
 }
 
 let shuttingDown = false;

@@ -276,6 +276,94 @@ test("worker permanece fechado por padrão", async () => {
   );
 });
 
+test("disparador interno é opt-in, assíncrono e consolida chamadas concorrentes", async () => {
+  const {
+    getInlineMarketingDispatcherConfig,
+    triggerInlineMarketingCampaignProcessing,
+    waitForInlineMarketingCampaignProcessing,
+  } = await import(
+    "../services/marketingCampaignInlineDispatcher.service.js"
+  );
+
+  assert.equal(getInlineMarketingDispatcherConfig({ enabled: false }).enabled, false);
+
+  let disabledCalls = 0;
+  const disabled = triggerInlineMarketingCampaignProcessing("test_disabled", {
+    config: { enabled: false },
+    runner: async () => {
+      disabledCalls += 1;
+      return { claimed: 0, completed: 0, failed: 0 };
+    },
+  });
+  assert.deepEqual(disabled, {
+    enabled: false,
+    scheduled: false,
+    coalesced: false,
+  });
+  assert.equal(disabledCalls, 0);
+
+  let calls = 0;
+  const runner = async ({ config }) => {
+    calls += 1;
+    assert.equal(config.enabled, true);
+    return { claimed: 0, completed: 0, failed: 0 };
+  };
+
+  const first = triggerInlineMarketingCampaignProcessing("test_publish", {
+    config: { enabled: true },
+    runner,
+  });
+  const second = triggerInlineMarketingCampaignProcessing("test_publish", {
+    config: { enabled: true },
+    runner,
+  });
+
+  assert.deepEqual(first, { enabled: true, scheduled: true, coalesced: false });
+  assert.deepEqual(second, { enabled: true, scheduled: false, coalesced: true });
+
+  await waitForInlineMarketingCampaignProcessing();
+  assert.equal(calls, 1);
+
+  let slowCalls = 0;
+  let signalStarted;
+  let release;
+  const started = new Promise((resolve) => {
+    signalStarted = resolve;
+  });
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const slowRunner = async () => {
+    slowCalls += 1;
+    if (slowCalls === 1) {
+      signalStarted();
+      await gate;
+    }
+    return { claimed: 0, completed: 0, failed: 0 };
+  };
+
+  triggerInlineMarketingCampaignProcessing("test_running", {
+    config: { enabled: true },
+    runner: slowRunner,
+  });
+  await started;
+  const whileRunning = triggerInlineMarketingCampaignProcessing("test_running", {
+    config: { enabled: true },
+    runner: slowRunner,
+  });
+  assert.equal(whileRunning.coalesced, true);
+  release();
+  await waitForInlineMarketingCampaignProcessing();
+  assert.equal(slowCalls, 2);
+
+  const routes = read("routes/adminMarketingCampaigns.routes.js");
+  const server = read("server.js");
+  assert.match(routes, /triggerInlineMarketingCampaignProcessing\("admin_publish"\)/);
+  assert.match(routes, /campaign\.status === "queued"/);
+  assert.match(server, /startup_recovery/);
+  assert.match(server, /interval_recovery/);
+});
+
 test("simulação volta ao rascunho sem reservar destinatários", async () => {
   const { processMarketingCampaignJobs } = await import(
     "../services/marketingCampaignWorker.service.js"
