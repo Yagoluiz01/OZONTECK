@@ -54,6 +54,7 @@ import {
   buildPublicCatalogPayload,
   compactPublicProductsForCatalog,
 } from "../utils/publicCatalogView.js";
+import { recordMarketingOrderAttribution } from "../services/marketingAttribution.service.js";
 
 const router = express.Router();
 const PUBLIC_ORIGIN_TIMEOUT_MS = normalizeTimeoutMs(
@@ -4993,6 +4994,9 @@ router.post("/orders", async (req, res) => {
     const customer = body.customer || {};
     const items = Array.isArray(body.items) ? body.items : [];
     const notes = String(body.notes || "").trim();
+    const marketingAttributionToken = String(
+      body.marketingAttributionToken || body.marketing_attribution_token || ""
+    ).trim();
     const affiliateRef = normalizeAffiliateCode(body.affiliateRef || body.affiliate_ref || "");
     const affiliate = await findActiveAffiliateByRef(affiliateRef);
 
@@ -5240,6 +5244,18 @@ router.post("/orders", async (req, res) => {
         message: "O pedido não foi concluído com segurança.",
         code: "ATOMIC_ORDER_INVALID_RESULT",
       });
+    }
+
+    try {
+      await recordMarketingOrderAttribution({
+        orderId: createdOrder.id,
+        token: marketingAttributionToken,
+      });
+    } catch (attributionError) {
+      console.warn(
+        "MARKETING ATTRIBUTION: não foi possível vincular o clique ao pedido.",
+        attributionError?.message || attributionError
+      );
     }
 
     try {

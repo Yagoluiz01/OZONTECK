@@ -11,7 +11,7 @@ import {
 
 const router = express.Router();
 
-router.use(requireAdminAuth, requirePermission("notifications.read"));
+router.use(requireAdminAuth, requirePermission("notifications.view"));
 
 router.get("/", async (req, res, next) => {
   try {

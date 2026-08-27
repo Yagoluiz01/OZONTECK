@@ -42,6 +42,8 @@ import adminPermissionsRoutes from "./routes/adminPermissions.routes.js";
 import adminPushRoutes from "./routes/adminPush.routes.js";
 import adminStoreThemeRoutes from "./routes/adminStoreTheme.routes.js";
 import storeThemeRoutes from "./routes/storeTheme.routes.js";
+import adminMarketingCampaignsRoutes from "./routes/adminMarketingCampaigns.routes.js";
+import storeMarketingRoutes from "./routes/storeMarketing.routes.js";
 
 import { env } from "./config/env.js";
 import { assertAffiliateSecurityConfiguration } from "./services/affiliateSecurityKey.service.js";
@@ -367,6 +369,7 @@ app.use("/api/store/order-resume", orderResumeRoutes);
 app.use("/api/store", storeThemeRoutes);
 app.use("/api/store/customer/marketing", customerMarketingPreferencesRoutes);
 app.use("/api/store/customer", storeCustomerAccountRoutes);
+app.use("/api/store/marketing", storeMarketingRoutes);
 app.use("/api/store", storeRoutes);
 app.use("/api/integrations/melhor-envio", melhorEnvioWebhookRoutes);
 
@@ -382,6 +385,7 @@ app.use("/api/admin/fiscal", adminFiscalRoutes);
 app.use("/api/admin/affiliates", adminAffiliatesRoutes);
 app.use("/api/admin/notifications", adminNotificationsRoutes);
 app.use("/api/admin/audit", adminAuditRoutes);
+app.use("/api/admin/campaigns", adminMarketingCampaignsRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api", adminAccessRequestsRoutes);
 app.use("/api", adminPermissionsRoutes);
@@ -445,6 +449,9 @@ app.use((err, req, res, next) => {
         : isProduction
           ? "Erro interno no servidor."
           : err.message || "Erro interno no servidor.",
+    ...(statusCode < 500 && /^[a-z0-9_]{3,80}$/i.test(String(err?.code || ""))
+      ? { code: err.code }
+      : {}),
     errorId,
   });
 });

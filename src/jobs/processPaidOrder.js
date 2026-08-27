@@ -6,6 +6,7 @@ import {
 } from "../services/invoice.service.js";
 import { generateAutomaticShippingLabel } from "../services/shipping.service.js";
 import { ensureOrderStockReserved } from "../services/orderStock.service.js";
+import { finalizeMarketingOrderAttribution } from "../services/marketingAttribution.service.js";
 
 function getRequiredEnv(name, value) {
   const normalized = String(value || "").trim();
@@ -285,6 +286,15 @@ export async function processPaidOrder(input) {
     );
     error.statusCode = 409;
     throw error;
+  }
+
+  try {
+    await finalizeMarketingOrderAttribution(order);
+  } catch (attributionError) {
+    console.warn(
+      "MARKETING ATTRIBUTION: não foi possível confirmar a conversão do pedido.",
+      attributionError?.message || attributionError
+    );
   }
 
   const stockReservation = await ensureOrderStockReserved(order.id);

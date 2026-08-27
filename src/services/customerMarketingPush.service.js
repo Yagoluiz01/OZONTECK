@@ -79,8 +79,13 @@ function ensureVapidConfig() {
 
 function normalizeSubscription(subscription = {}) {
   const endpoint = cleanText(subscription?.endpoint, 2048);
-  const p256dh = cleanText(subscription?.keys?.p256dh, 1024);
-  const auth = cleanText(subscription?.keys?.auth, 1024);
+  // O navegador envia `keys`; o worker lê as mesmas chaves nas colunas
+  // protegidas da tabela. Ambos representam a mesma inscrição Web Push.
+  const p256dh = cleanText(
+    subscription?.keys?.p256dh || subscription?.p256dh,
+    1024
+  );
+  const auth = cleanText(subscription?.keys?.auth || subscription?.auth, 1024);
 
   if (!endpoint || !p256dh || !auth) {
     const error = new Error("Inscrição Web Push inválida.");
@@ -196,6 +201,183 @@ export function buildProductInterestPushPayload({
       campaign_id: campaignId || null,
       brand: safeBrandName,
     },
+  };
+}
+
+export function buildMarketingCampaignPushPayload({
+  title,
+  body,
+  url,
+  imageUrl,
+  iconUrl,
+  badgeUrl,
+  campaignId,
+  campaignType,
+  storefrontUrl,
+} = {}) {
+  const safeStorefrontUrl = getBaseUrl(
+    storefrontUrl || process.env.STORE_FRONTEND_URL || process.env.FRONTEND_URL
+  );
+  const icon = resolvePublicUrl(
+    iconUrl ||
+      process.env.PRODUCT_INTEREST_BRAND_ICON_URL ||
+      "/assets/images/brand/store/icon-192.png",
+    safeStorefrontUrl
+  );
+  const badge = resolvePublicUrl(
+    badgeUrl ||
+      process.env.PRODUCT_INTEREST_BRAND_BADGE_URL ||
+      "/assets/images/brand/store/icon-192.png",
+    safeStorefrontUrl
+  );
+  const image = resolvePublicUrl(imageUrl, safeStorefrontUrl);
+
+  return {
+    title: cleanText(title, 120) || "Novidade da Levra",
+    body: cleanText(body, 360) || "Tem novidade esperando por você.",
+    url: resolvePublicUrl(url, safeStorefrontUrl) || safeStorefrontUrl || "/",
+    icon,
+    badge: badge || icon,
+    ...(image ? { image } : {}),
+    data: {
+      type: "marketing_campaign",
+      campaign_id: cleanText(campaignId, 80) || null,
+      campaign_type: cleanText(campaignType, 60) || null,
+    },
+  };
+}
+
+export async function sendMarketingPushSubscription(
+  { subscription, payload, ttlSeconds = 60 * 60 } = {},
+  { client = supabaseAdmin, sender = webPush.sendNotification.bind(webPush) } = {}
+) {
+  let vapid;
+  try {
+    vapid = ensureVapidConfig();
+  } catch (error) {
+    return {
+      success: false,
+      skipped: true,
+      stale: false,
+      reason: "web_push_configuration_invalid",
+      error: cleanText(error?.message, 500),
+    };
+  }
+
+  if (!vapid.configured) {
+    return {
+      success: false,
+      skipped: true,
+      stale: false,
+      reason: vapid.reason,
+    };
+  }
+
+  const subscriptionId = cleanText(subscription?.id, 80);
+  if (!UUID_PATTERN.test(subscriptionId)) {
+    return {
+      success: false,
+      skipped: true,
+      stale: false,
+      reason: "invalid_push_subscription_id",
+    };
+  }
+
+  let normalized;
+  try {
+    normalized = normalizeSubscription(subscription);
+  } catch (error) {
+    return {
+      success: false,
+      skipped: true,
+      stale: false,
+      reason: error?.code || "invalid_web_push_subscription",
+      error: cleanText(error?.message, 500),
+    };
+  }
+
+  const serializedPayload =
+    typeof payload === "string" ? payload : JSON.stringify(payload || {});
+  const now = new Date().toISOString();
+
+  let providerResponse;
+  try {
+    providerResponse = await sender(
+      {
+        endpoint: normalized.endpoint,
+        keys: { p256dh: normalized.p256dh, auth: normalized.auth },
+      },
+      serializedPayload,
+      {
+        TTL: Math.max(60, Math.min(24 * 60 * 60, Number(ttlSeconds) || 3600)),
+        urgency: "normal",
+        vapidDetails: vapid.details,
+      }
+    );
+  } catch (error) {
+    const stale = isGonePushEndpoint(error);
+    const failureReason = cleanText(error?.message || "Falha Web Push", 500);
+    const nextFailCount = stale
+      ? 99
+      : Math.min(98, Number(subscription?.fail_count || 0) + 1);
+
+    const { error: updateError } = await client
+      .from("customer_marketing_push_subscriptions")
+      .update({
+        is_active: stale ? false : true,
+        revoked_at: stale ? now : null,
+        fail_count: nextFailCount,
+        last_error: failureReason,
+        updated_at: now,
+      })
+      .eq("id", subscriptionId);
+
+    if (updateError) {
+      console.error("MARKETING PUSH SUBSCRIPTION UPDATE ERROR:", {
+        subscriptionId,
+        message: updateError.message,
+      });
+    }
+
+    return {
+      success: false,
+      skipped: false,
+      stale,
+      reason: stale ? "stale_push_subscription" : "web_push_send_failed",
+      error: failureReason,
+      providerStatusCode: Number(error?.statusCode || error?.status || 0) || null,
+    };
+  }
+
+  // A aceitação pelo provedor é o fato de entrega mais importante. Uma falha
+  // posterior ao atualizar telemetria não deve transformar esse aceite em
+  // falha nem provocar um segundo envio no retry do job.
+  const { error: updateError } = await client
+    .from("customer_marketing_push_subscriptions")
+    .update({
+      last_sent_at: now,
+      fail_count: 0,
+      last_error: null,
+      updated_at: now,
+    })
+    .eq("id", subscriptionId);
+
+  if (updateError) {
+    console.error("MARKETING PUSH SUBSCRIPTION METRICS UPDATE ERROR:", {
+      subscriptionId,
+      message: updateError.message,
+    });
+  }
+
+  return {
+    success: true,
+    skipped: false,
+    stale: false,
+    reason: null,
+    providerStatusCode: Number(providerResponse?.statusCode || 201),
+    providerMessageId:
+      cleanText(providerResponse?.headers?.location, 500) || null,
+    telemetryUpdated: !updateError,
   };
 }
 
@@ -430,18 +612,6 @@ export async function sendCustomerMarketingPush(
             vapidDetails: vapid.details,
           }
         );
-        sent += 1;
-
-        const now = new Date().toISOString();
-        await client
-          .from("customer_marketing_push_subscriptions")
-          .update({
-            last_sent_at: now,
-            fail_count: 0,
-            last_error: null,
-            updated_at: now,
-          })
-          .eq("id", item.id);
       } catch (pushError) {
         failed += 1;
         const disable = isGonePushEndpoint(pushError);
@@ -456,6 +626,27 @@ export async function sendCustomerMarketingPush(
             updated_at: now,
           })
           .eq("id", item.id);
+        return;
+      }
+
+      sent += 1;
+      const now = new Date().toISOString();
+      try {
+        const { error: metricsError } = await client
+          .from("customer_marketing_push_subscriptions")
+          .update({
+            last_sent_at: now,
+            fail_count: 0,
+            last_error: null,
+            updated_at: now,
+          })
+          .eq("id", item.id);
+        if (metricsError) throw metricsError;
+      } catch (metricsError) {
+        console.error("CUSTOMER MARKETING PUSH METRICS UPDATE ERROR:", {
+          subscriptionId: item.id,
+          message: metricsError?.message || String(metricsError),
+        });
       }
     })
   );

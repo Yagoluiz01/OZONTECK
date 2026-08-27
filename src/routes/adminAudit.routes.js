@@ -18,7 +18,7 @@ router.get("/access", requireAdminAuth, (req, res) => {
   });
 });
 
-router.get("/logs", requireAdminAuth, requirePermission("audit.read"), async (req, res, next) => {
+router.get("/logs", requireAdminAuth, requirePermission("audit.view"), async (req, res, next) => {
   try {
     const data = await getAuditDashboard({
       page: req.query.page,

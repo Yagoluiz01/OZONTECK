@@ -6,7 +6,8 @@
   "main": "src/server.js",
   "scripts": {
     "dev": "nodemon src/server.js",
-    "start": "node src/server.js"
+    "start": "node src/server.js",
+    "start:marketing-worker": "node src/workers/marketingCampaign.worker.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.101.1",

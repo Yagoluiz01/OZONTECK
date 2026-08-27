@@ -18,7 +18,7 @@ import {
 
 const router = express.Router();
 
-router.use(requireAdminAuth, requirePermission("financial.read"));
+router.use(requireAdminAuth, requirePermission("financial.view"));
 
 function ok(res, data = {}, message = "OK") {
   return res.status(200).json({

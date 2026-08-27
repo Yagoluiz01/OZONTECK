@@ -39,6 +39,7 @@ const MODULE_LABELS = {
   financial: "financeiro",
   fiscal: "fiscal",
   marketing_pixels: "pixels de marketing",
+  campaigns: "campanhas",
   notifications: "notificações",
   pricing: "precificação",
   push: "notificações push",
@@ -157,6 +158,7 @@ function getModule(pathname) {
   if (/^\/api\/admin\/financial/.test(pathname)) return "financial";
   if (/^\/api\/admin\/fiscal/.test(pathname)) return "fiscal";
   if (/^\/api\/admin\/marketing-pixels/.test(pathname)) return "marketing_pixels";
+  if (/^\/api\/admin\/campaigns/.test(pathname)) return "campaigns";
   if (/^\/api\/admin\/notifications/.test(pathname)) return "notifications";
   if (/^\/api\/admin\/pricing/.test(pathname)) return "pricing";
   if (/^\/api\/admin\/push/.test(pathname)) return "push";
@@ -213,7 +215,8 @@ function getEntityId(pathname, body) {
   const ignored = new Set([
     "api", "admin", "products", "categories", "orders", "customers", "settings", "shipping",
     "affiliates", "financial", "fiscal", "pricing", "notifications", "push", "store-theme",
-    "marketing-pixels", "affiliate-feed", "affiliate-marketing", "access-requests", "posts", "stories",
+    "marketing-pixels", "campaigns", "promotions", "automation", "analytics", "estimate",
+    "affiliate-feed", "affiliate-marketing", "access-requests", "posts", "stories",
     "approve", "reject", "ban", "unban", "delete", "apply", "sync", "pin", "unpin", "hide",
     "cleanup-expired", "process-paid", "status", "read", "read-all", "payouts", "levels", "palettes",
     "assets", "messages", "trainings", "uploads", "categories", "accounts-payable", "accounts-receivable",
@@ -247,6 +250,11 @@ function getEntityType(moduleName, pathname) {
   if (moduleName === "customers") return "customer";
   if (moduleName === "affiliates") return "affiliate";
   if (moduleName === "pricing") return "product_pricing";
+  if (moduleName === "campaigns") {
+    if (pathname.includes("/promotions")) return "marketing_promotion";
+    if (pathname.includes("/automation")) return "marketing_automation";
+    return "marketing_campaign";
+  }
   if (moduleName === "settings" || moduleName === "store_theme") return "store_settings";
   return moduleName;
 }
