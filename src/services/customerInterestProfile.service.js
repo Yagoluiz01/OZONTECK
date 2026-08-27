@@ -217,6 +217,30 @@ export function buildCustomerInterestProfileRows(
   };
 }
 
+export function buildVisitorInterestProfileRows(
+  events = [],
+  { visitorId, nowMs = Date.now(), learningStartAt = getIntelligenceLearningStartAt() } = {}
+) {
+  const safeVisitorId = cleanIdentifier(visitorId);
+  if (!safeVisitorId) {
+    throw new Error("visitorId inválido para projeção do perfil de interesse.");
+  }
+
+  const projection = buildCustomerInterestProfileRows(events, {
+    customerId: null,
+    nowMs,
+    learningStartAt,
+  });
+
+  return {
+    intent: projection.intent,
+    rows: projection.rows.map(({ customer_id: _customerId, ...row }) => ({
+      ...row,
+      visitor_id: safeVisitorId,
+    })),
+  };
+}
+
 export async function verifyVisitorSession(
   { visitorId, sessionId } = {},
   { client = supabaseAdmin } = {}
@@ -367,6 +391,75 @@ export async function refreshCustomerInterestProfile(
   };
 }
 
+export async function refreshVisitorInterestProfile(
+  visitorId,
+  { client = supabaseAdmin, lookbackDays = 30, nowMs = Date.now() } = {}
+) {
+  const safeVisitorId = cleanIdentifier(visitorId);
+  if (!safeVisitorId) {
+    throw new Error("visitorId inválido para atualização do perfil de interesse.");
+  }
+
+  const { learningStartAt, dateFrom } = getEffectiveDateFrom({ lookbackDays, nowMs });
+  const { data: events, error: eventsError } = await client
+    .from("lead_events")
+    .select("session_id,visitor_id,event_type,page,section,created_at")
+    .eq("visitor_id", safeVisitorId)
+    .in("event_type", INTENT_SIGNAL_EVENT_TYPES)
+    .gte("created_at", dateFrom)
+    .order("created_at", { ascending: false })
+    .limit(5000);
+  if (eventsError) throw eventsError;
+
+  const projection = buildVisitorInterestProfileRows(events || [], {
+    visitorId: safeVisitorId,
+    nowMs,
+    learningStartAt,
+  });
+
+  if (projection.rows.length) {
+    const { error: upsertError } = await client
+      .from("visitor_interest_profiles")
+      .upsert(projection.rows, { onConflict: "visitor_id,category_key" });
+    if (upsertError) throw upsertError;
+  }
+
+  const { data: existing, error: existingError } = await client
+    .from("visitor_interest_profiles")
+    .select("category_key")
+    .eq("visitor_id", safeVisitorId);
+  if (existingError) throw existingError;
+
+  const currentKeys = new Set(projection.rows.map((row) => row.category_key));
+  const staleKeys = (existing || [])
+    .map((row) => row.category_key)
+    .filter((key) => key && !currentKeys.has(key));
+  if (staleKeys.length) {
+    const { error: deleteError } = await client
+      .from("visitor_interest_profiles")
+      .delete()
+      .eq("visitor_id", safeVisitorId)
+      .in("category_key", staleKeys);
+    if (deleteError) throw deleteError;
+  }
+
+  const now = new Date(nowMs).toISOString();
+  const { error: touchError } = await client
+    .from("customer_marketing_push_subscriptions")
+    .update({ profile_refreshed_at: now, updated_at: now })
+    .eq("visitor_id", safeVisitorId)
+    .eq("is_active", true);
+  if (touchError) throw touchError;
+
+  return {
+    visitorId: safeVisitorId,
+    categories: projection.rows.length,
+    events: Array.isArray(events) ? events.length : 0,
+    confidence: projection.intent.confidence,
+    profileVersion: projection.intent.version,
+  };
+}
+
 export async function refreshCustomerInterestProfilesBatch(
   {
     limit = 25,
@@ -407,6 +500,67 @@ export async function refreshCustomerInterestProfilesBatch(
       result.failed += 1;
       result.failures.push({
         customerId,
+        code: refreshError?.code || null,
+        message: refreshError?.message || String(refreshError),
+      });
+    }
+  }
+
+  return result;
+}
+
+export async function refreshVisitorInterestProfilesBatch(
+  {
+    limit = 25,
+    minRefreshMinutes = 30,
+    lookbackDays = 30,
+    nowMs = Date.now(),
+  } = {},
+  { client = supabaseAdmin } = {}
+) {
+  const safeLimit = clamp(Math.trunc(Number(limit) || 25), 1, 100);
+  const cutoff = new Date(
+    nowMs - Math.max(1, Number(minRefreshMinutes) || 30) * 60 * 1000
+  ).toISOString();
+
+  let subscriptionsQuery = client
+    .from("customer_marketing_push_subscriptions")
+    .select("customer_id,visitor_id,last_seen_at,profile_refreshed_at")
+    .eq("is_active", true);
+  if (typeof subscriptionsQuery.is === "function") {
+    subscriptionsQuery = subscriptionsQuery.is("customer_id", null);
+  }
+  if (typeof subscriptionsQuery.not === "function") {
+    subscriptionsQuery = subscriptionsQuery.not("visitor_id", "is", null);
+  }
+  const { data: subscriptions, error } = await subscriptionsQuery
+    .or(`profile_refreshed_at.is.null,profile_refreshed_at.lt.${cutoff}`)
+    .order("last_seen_at", { ascending: false })
+    .limit(safeLimit * 3);
+  if (error) throw error;
+
+  const visitorIds = Array.from(
+    new Set(
+      (subscriptions || [])
+        .filter((row) => !row?.customer_id)
+        .map((row) => cleanIdentifier(row?.visitor_id))
+        .filter(Boolean)
+    )
+  ).slice(0, safeLimit);
+
+  const result = { checked: visitorIds.length, refreshed: 0, failed: 0, failures: [] };
+  for (const currentVisitorId of visitorIds) {
+    try {
+      await refreshVisitorInterestProfile(currentVisitorId, {
+        client,
+        lookbackDays,
+        nowMs,
+      });
+      result.refreshed += 1;
+    } catch (refreshError) {
+      result.failed += 1;
+      result.failures.push({
+        visitorId: currentVisitorId,
         code: refreshError?.code || null,
         message: refreshError?.message || String(refreshError),
       });

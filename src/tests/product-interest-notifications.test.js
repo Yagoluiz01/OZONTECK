@@ -286,6 +286,22 @@ test("push mostra somente a novidade e abre o produto", async () => {
   );
 });
 
+test("URL padrão da novidade abre a página real de detalhe da loja", async () => {
+  const {
+    buildProductUrl,
+    getProductInterestNotificationConfig,
+  } = await import("../services/productInterestNotification.service.js");
+  const config = getProductInterestNotificationConfig({
+    storefrontUrl: "https://loja.example.com",
+    productUrlTemplate: "",
+  });
+
+  assert.equal(
+    buildProductUrl({ id: "produto-1", sku: "VIP Girl" }, config),
+    "https://loja.example.com/pages-html/loja/detalhe-produto.html?id=VIP%20Girl"
+  );
+});
+
 test("consentimento Push explícito remove apenas a supressão Web Push", async () => {
   const { saveCustomerMarketingPushSubscription } = await import(
     "../services/customerMarketingPush.service.js"
@@ -326,6 +342,9 @@ test("consentimento Push explícito remove apenas a supressão Web Push", async 
           },
           error: null,
         });
+      },
+      maybeSingle() {
+        return Promise.resolve({ data: null, error: null });
       },
       then(resolve, reject) {
         return Promise.resolve({ data: null, error: null }).then(resolve, reject);
@@ -527,6 +546,19 @@ test("integração da loja vincula somente visitor e session usando JWT da próp
   assert.match(tracking, /subscription: subscription\.toJSON\(\)/);
   assert.match(tracking, /requestBody\.marketing_consent = true/);
   assert.match(tracking, /marketingConsent: true/);
+  assert.match(tracking, /visitor_id: visitorId/);
+  assert.match(tracking, /session_id: sessionId/);
+  assert.match(tracking, /if \(token\) headers\.Authorization/);
+  assert.match(tracking, /getMarketingPushConsentMarker/);
+  const pushSyncSource = tracking.slice(
+    tracking.indexOf("async function syncCustomerMarketingPushSubscription"),
+    tracking.indexOf("async function requestCustomerMarketingPushPermission")
+  );
+  assert.doesNotMatch(pushSyncSource, /if \(!token\) return false/);
+  assert.doesNotMatch(
+    pushSyncSource,
+    /sessionStorage\.getItem\(CUSTOMER_PUSH_SYNC_KEY\)[\s\S]{0,120}return true/
+  );
   assert.doesNotMatch(tracking, /customer_id:\s*.*subscription/i);
 });
 
@@ -545,27 +577,29 @@ test("catálogo oferece Push somente por ação explícita e permite adiar", () 
   assert.match(catalogFeatures, /enableButton\.addEventListener\("click"/);
   assert.match(catalogFeatures, /pushDismissCooldownMs = 7 \* 24 \* 60 \* 60 \* 1000/);
   assert.match(catalogFeatures, /window\.Notification\.permission === "denied"/);
+  assert.match(catalogFeatures, /getVisitorPushConsentMarker/);
+  assert.match(catalogFeatures, /localStorage\.removeItem\(pushConsentKey\)/);
+  assert.doesNotMatch(catalogFeatures, /if \(!token\) return false/);
   assert.doesNotMatch(catalogFeatures, /Notification\.requestPermission\(/);
 });
 
-test("rota de inscrição push deriva o cliente do JWT", () => {
+test("rota de inscrição push aceita visitante verificado e nunca confia em customer_id do corpo", () => {
   const routes = read("routes/customerMarketingPreferences.routes.js");
 
-  assert.match(routes, /router\.post\("\/push\/subscription", requireCustomerAuth/);
+  assert.match(routes, /router\.post\("\/push\/subscription", optionalCustomerAuth/);
+  assert.match(routes, /verifyVisitorSession\(\{ visitorId, sessionId \}\)/);
+  assert.match(routes, /if \(!req\.customerAuth && !marketingConsent\)/);
   assert.match(
     routes,
-    /req\.customer\?\.newsletter_opt_in !== true && !marketingConsent/
+    /req\.customer\?\.newsletter_opt_in !== true &&\s*!marketingConsent/
   );
   assert.match(routes, /req\.body\?\.marketing_consent === true/);
-  assert.match(routes, /customerId: req\.customerAuth\.id/);
+  assert.match(routes, /customerId: req\.customerAuth\?\.id \|\| null/);
+  assert.match(routes, /visitorId,/);
+  assert.match(routes, /sessionId,/);
   assert.match(routes, /subscription: req\.body\?\.subscription/);
   assert.match(routes, /marketingConsent,/);
   assert.doesNotMatch(routes, /customerId: req\.body/);
-  assert.ok(
-    routes.indexOf("req.customer?.newsletter_opt_in !== true && !marketingConsent") <
-      routes.indexOf("const subscription = await saveCustomerMarketingPushSubscription"),
-    "o opt-in existente ou o consentimento explícito devem ser validados antes da inscrição"
-  );
 });
 
 test("configuração permanece fechada e em simulação por padrão", async () => {
@@ -791,6 +825,9 @@ test("dry-run reserva e-mail e Web Push separadamente para o mesmo interesse", a
       if (name === "reserve_product_interest_channel_delivery") {
         return { data: `delivery-${args.p_channel}`, error: null };
       }
+      if (name === "reserve_product_interest_recipient_delivery") {
+        return { data: "delivery-web_push", error: null };
+      }
       return { data: null, error: null };
     },
   };
@@ -813,7 +850,12 @@ test("dry-run reserva e-mail e Web Push separadamente para o mesmo interesse", a
   );
 
   const reservedChannels = rpcCalls
-    .filter((call) => call.name === "reserve_product_interest_channel_delivery")
+    .filter((call) =>
+      [
+        "reserve_product_interest_channel_delivery",
+        "reserve_product_interest_recipient_delivery",
+      ].includes(call.name)
+    )
     .map((call) => call.args.p_channel)
     .sort();
 
@@ -903,7 +945,12 @@ test("dry-run reserva e-mail e Web Push separadamente para o mesmo interesse", a
   );
 
   const optedOutChannels = rpcCalls
-    .filter((call) => call.name === "reserve_product_interest_channel_delivery")
+    .filter((call) =>
+      [
+        "reserve_product_interest_channel_delivery",
+        "reserve_product_interest_recipient_delivery",
+      ].includes(call.name)
+    )
     .map((call) => call.args.p_channel);
   assert.deepEqual(optedOutChannels, ["web_push"]);
   assert.equal(optedOutResult.jobs[0].selected, 1);
@@ -1051,6 +1098,9 @@ test("descoberta notifica sem perfil e para quando um interesse é aprendido", a
       if (name === "reserve_product_interest_channel_delivery") {
         return { data: "delivery-discovery", error: null };
       }
+      if (name === "reserve_product_interest_recipient_delivery") {
+        return { data: "delivery-discovery", error: null };
+      }
       return { data: null, error: null };
     },
   };
@@ -1076,7 +1126,7 @@ test("descoberta notifica sem perfil e para quando um interesse é aprendido", a
   );
 
   const discoveryReservation = rpcCalls.find(
-    (call) => call.name === "reserve_product_interest_channel_delivery"
+    (call) => call.name === "reserve_product_interest_recipient_delivery"
   );
   assert.equal(discoveryResult.jobs[0].discovery_candidates, 1);
   assert.equal(discoveryResult.jobs[0].discovery_recipients, 1);
@@ -1109,10 +1159,303 @@ test("descoberta notifica sem perfil e para quando um interesse é aprendido", a
 
   assert.equal(
     rpcCalls.filter(
-      (call) => call.name === "reserve_product_interest_channel_delivery"
+      (call) => call.name === "reserve_product_interest_recipient_delivery"
     ).length,
     0
   );
   assert.equal(learnedResult.jobs[0].reason, "no_eligible_audience");
   assert.equal(learnedResult.jobs[0].selected, 0);
+});
+
+test("perfil pseudônimo usa o mesmo aprendizado sem criar conta de cliente", async () => {
+  const { buildVisitorInterestProfileRows } = await import(
+    "../services/customerInterestProfile.service.js"
+  );
+  const nowMs = Date.parse("2026-08-26T18:00:00.000Z");
+  const projection = buildVisitorInterestProfileRows(
+    [
+      event({ type: "product_detail_view", createdAt: new Date(nowMs - 60_000).toISOString() }),
+      event({ type: "add_to_cart", createdAt: new Date(nowMs - 30_000).toISOString() }),
+    ],
+    { visitorId: "visitor-anonimo-1", nowMs, learningStartAt: "2026-01-01T00:00:00.000Z" }
+  );
+
+  assert.equal(projection.rows[0].visitor_id, "visitor-anonimo-1");
+  assert.equal(projection.rows[0].category_key, "perfumes_masculinos");
+  assert.equal(projection.rows[0].customer_id, undefined);
+  assert.ok(projection.rows[0].qualifying_signal_count >= 1);
+});
+
+test("inscrição anônima preserva o dono autenticado de um endpoint existente", async () => {
+  const { saveCustomerMarketingPushSubscription } = await import(
+    "../services/customerMarketingPush.service.js"
+  );
+  const customerId = "11111111-1111-4111-8111-111111111111";
+  let savedPayload = null;
+
+  function builder(table) {
+    return {
+      payload: null,
+      select() {
+        return this;
+      },
+      delete() {
+        return this;
+      },
+      eq() {
+        return this;
+      },
+      upsert(payload) {
+        this.payload = payload;
+        savedPayload = payload;
+        return this;
+      },
+      maybeSingle() {
+        if (table === "customer_marketing_push_subscriptions") {
+          return Promise.resolve({
+            data: {
+              id: "22222222-2222-4222-8222-222222222222",
+              customer_id: customerId,
+              visitor_id: "visitor-antigo",
+              p256dh: "A".repeat(50),
+              auth: "B".repeat(20),
+            },
+            error: null,
+          });
+        }
+        return Promise.resolve({ data: null, error: null });
+      },
+      single() {
+        return Promise.resolve({
+          data: {
+            id: "22222222-2222-4222-8222-222222222222",
+            ...this.payload,
+          },
+          error: null,
+        });
+      },
+      then(resolve, reject) {
+        return Promise.resolve({ data: null, error: null }).then(resolve, reject);
+      },
+    };
+  }
+
+  await saveCustomerMarketingPushSubscription(
+    {
+      visitorId: "visitor-novo",
+      sessionId: "session-nova",
+      marketingConsent: true,
+      subscription: {
+        endpoint: "https://fcm.googleapis.com/fcm/send/anonymous-owner-test",
+        keys: { p256dh: "A".repeat(50), auth: "B".repeat(20) },
+      },
+    },
+    { client: { from: builder } }
+  );
+
+  assert.equal(savedPayload.customer_id, customerId);
+  assert.equal(savedPayload.visitor_id, "visitor-novo");
+  assert.equal(savedPayload.last_session_id, "session-nova");
+});
+
+test("endpoint existente não pode ser assumido com chaves Push diferentes", async () => {
+  const { saveCustomerMarketingPushSubscription } = await import(
+    "../services/customerMarketingPush.service.js"
+  );
+  const client = {
+    from() {
+      return {
+        select() { return this; },
+        eq() { return this; },
+        maybeSingle() {
+          return Promise.resolve({
+            data: {
+              id: "22222222-2222-4222-8222-222222222222",
+              customer_id: null,
+              visitor_id: "visitor-original",
+              p256dh: "C".repeat(50),
+              auth: "D".repeat(20),
+            },
+            error: null,
+          });
+        },
+      };
+    },
+  };
+
+  await assert.rejects(
+    saveCustomerMarketingPushSubscription(
+      {
+        visitorId: "visitor-atacante",
+        sessionId: "session-atacante",
+        marketingConsent: true,
+        subscription: {
+          endpoint: "https://fcm.googleapis.com/fcm/send/ownership-mismatch",
+          keys: { p256dh: "A".repeat(50), auth: "B".repeat(20) },
+        },
+      },
+      { client }
+    ),
+    (error) =>
+      error?.statusCode === 409 &&
+      error?.code === "web_push_subscription_ownership_mismatch"
+  );
+});
+
+test("Web Push percorre toda a audiência e restringe categorias após aprendizado", async () => {
+  const {
+    getProductInterestNotificationConfig,
+    processWebPushAudience,
+  } = await import("../services/productInterestNotification.service.js");
+  const nowMs = Date.parse("2026-08-26T18:00:00.000Z");
+  const subscriptions = Array.from({ length: 12 }, (_, index) => ({
+    id: `00000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+    customer_id: null,
+    visitor_id: `visitor-${String(index + 1).padStart(2, "0")}`,
+    last_seen_at: new Date(nowMs - index * 1000).toISOString(),
+    profile_refreshed_at: new Date(nowMs - 60_000).toISOString(),
+  }));
+  let learnedAnotherCategory = false;
+  const reservations = [];
+
+  function resultFor(table, builder) {
+    if (builder.operation === "update") return { data: null, error: null };
+    if (table === "customer_marketing_push_subscriptions") {
+      const cursor = builder.gtFilters.find(([column]) => column === "id")?.[1] || "";
+      return {
+        data: subscriptions
+          .filter((row) => !cursor || row.id > cursor)
+          .slice(0, builder.limitValue || subscriptions.length),
+        error: null,
+      };
+    }
+    if (table === "visitor_interest_profiles") {
+      if (!learnedAnotherCategory) return { data: [], error: null };
+      const requested = new Set(builder.inFilters.find(([column]) => column === "visitor_id")?.[1] || []);
+      return {
+        data: subscriptions
+          .filter((row) => requested.has(row.visitor_id))
+          .map((row) => ({
+            visitor_id: row.visitor_id,
+            category_key: "perfumes_femininos",
+            category_score: 90,
+            confidence: 90,
+            qualifying_signal_count: 2,
+            last_signal_at: new Date(nowMs - 60_000).toISOString(),
+            profile_version: "intent-test",
+          })),
+        error: null,
+      };
+    }
+    return { data: [], error: null };
+  }
+
+  function queryBuilder(table) {
+    return {
+      operation: "select",
+      gtFilters: [],
+      inFilters: [],
+      limitValue: 0,
+      select() {
+        this.operation = "select";
+        return this;
+      },
+      update() {
+        this.operation = "update";
+        return this;
+      },
+      eq() {
+        return this;
+      },
+      gte() {
+        return this;
+      },
+      order() {
+        return this;
+      },
+      gt(column, value) {
+        this.gtFilters.push([column, value]);
+        return this;
+      },
+      in(column, values) {
+        this.inFilters.push([column, values]);
+        return this;
+      },
+      limit(value) {
+        this.limitValue = value;
+        return this;
+      },
+      then(resolve, reject) {
+        return Promise.resolve(resultFor(table, this)).then(resolve, reject);
+      },
+    };
+  }
+
+  const client = {
+    from(table) {
+      return queryBuilder(table);
+    },
+    async rpc(name, args) {
+      assert.equal(name, "reserve_product_interest_recipient_delivery");
+      reservations.push(args);
+      return { data: `delivery-${reservations.length}`, error: null };
+    },
+  };
+  const config = getProductInterestNotificationConfig({
+    enabled: true,
+    dryRun: true,
+    emailEnabled: false,
+    webPushEnabled: true,
+    discoveryEnabled: true,
+    recipientLimit: 1,
+    pushAudiencePageSize: 10,
+  });
+  const context = {
+    campaign: { id: "22222222-2222-4222-8222-222222222222" },
+    product: {
+      id: "33333333-3333-4333-8333-333333333333",
+      name: "Perfume Masculino Novo",
+      category: "Perfumes Masculinos",
+    },
+    categoryKey: "perfumes_masculinos",
+    productUrl: "https://loja.example.com/pages-html/loja/detalhe-produto.html?id=produto",
+    config,
+    nowMs,
+  };
+
+  const discovery = await processWebPushAudience(context, {
+    client,
+    pushMailer: async () => assert.fail("dry-run não envia Push"),
+  });
+  assert.equal(discovery.selected, 12);
+  assert.equal(discovery.discovery_recipients, 12);
+  assert.equal(reservations.length, 12);
+  assert.ok(reservations.every((item) => item.p_customer_id === null));
+  assert.ok(reservations.every((item) => item.p_recipient_key.startsWith("visitor:")));
+
+  learnedAnotherCategory = true;
+  reservations.length = 0;
+  const learned = await processWebPushAudience(context, {
+    client,
+    pushMailer: async () => assert.fail("categoria incompatível não envia Push"),
+  });
+  assert.equal(learned.targeted_candidates, 12);
+  assert.equal(learned.selected, 0);
+  assert.equal(reservations.length, 0);
+});
+
+test("migration anônima mantém RLS e deduplica por destinatário pseudônimo", () => {
+  const sql = read("sql/20260826-anonymous-product-interest-push.sql");
+
+  assert.match(sql, /alter column customer_id drop not null/i);
+  assert.match(sql, /create table if not exists public\.visitor_interest_profiles/i);
+  assert.match(sql, /alter table public\.visitor_interest_profiles enable row level security/i);
+  assert.match(
+    sql,
+    /revoke all on table public\.visitor_interest_profiles from public, anon, authenticated/i
+  );
+  assert.match(sql, /unique \(campaign_id, recipient_key, channel\)/i);
+  assert.match(sql, /pg_advisory_xact_lock/i);
+  assert.match(sql, /reserve_product_interest_recipient_delivery/i);
+  assert.match(sql, /customer_id is not null or visitor_id is not null/i);
 });

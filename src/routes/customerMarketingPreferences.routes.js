@@ -1,10 +1,15 @@
 import express from "express";
 import rateLimit from "express-rate-limit";
 
-import { requireCustomerAuth } from "./storeCustomerAccount.routes.js";
+import {
+  optionalCustomerAuth,
+  requireCustomerAuth,
+} from "./storeCustomerAccount.routes.js";
 import {
   linkCustomerVisitor,
   refreshCustomerInterestProfile,
+  refreshVisitorInterestProfile,
+  verifyVisitorSession,
 } from "../services/customerInterestProfile.service.js";
 import {
   suppressCustomerProductMarketing,
@@ -125,10 +130,33 @@ router.post("/identity", requireCustomerAuth, async (req, res) => {
   }
 });
 
-router.post("/push/subscription", requireCustomerAuth, async (req, res) => {
+router.post("/push/subscription", optionalCustomerAuth, async (req, res) => {
   try {
+    const visitorId = cleanIdentifier(req.body?.visitor_id || req.body?.visitorId);
+    const sessionId = cleanIdentifier(req.body?.session_id || req.body?.sessionId);
     const marketingConsent = req.body?.marketing_consent === true;
-    if (req.customer?.newsletter_opt_in !== true && !marketingConsent) {
+    const visitorSessionIsValid = await verifyVisitorSession({ visitorId, sessionId });
+    if (!visitorSessionIsValid) {
+      return res.status(400).json({
+        success: false,
+        subscribed: false,
+        message: "A sessão de navegação é inválida ou ainda não foi registrada.",
+      });
+    }
+
+    if (!req.customerAuth && !marketingConsent) {
+      return res.status(403).json({
+        success: false,
+        subscribed: false,
+        message: "Confirme a ativação das notificações neste navegador.",
+      });
+    }
+
+    if (
+      req.customerAuth &&
+      req.customer?.newsletter_opt_in !== true &&
+      !marketingConsent
+    ) {
       return res.status(403).json({
         success: false,
         subscribed: false,
@@ -137,12 +165,40 @@ router.post("/push/subscription", requireCustomerAuth, async (req, res) => {
       });
     }
 
+    if (req.customerAuth) {
+      await linkCustomerVisitor({
+        customerId: req.customerAuth.id,
+        visitorId,
+        sessionId,
+        source: "push_subscription",
+      });
+    }
+
     const subscription = await saveCustomerMarketingPushSubscription({
-      customerId: req.customerAuth.id,
+      customerId: req.customerAuth?.id || null,
+      visitorId,
+      sessionId,
       subscription: req.body?.subscription,
       userAgent: req.get("user-agent") || "",
       marketingConsent,
     });
+
+    let profileStatus = "updated";
+    try {
+      if (req.customerAuth) {
+        await refreshCustomerInterestProfile(req.customerAuth.id);
+      } else {
+        await refreshVisitorInterestProfile(visitorId);
+      }
+    } catch (profileError) {
+      profileStatus = "pending";
+      console.error("MARKETING PUSH PROFILE REFRESH ERROR:", {
+        customerId: req.customerAuth?.id || null,
+        visitorId,
+        code: profileError?.code || null,
+        message: profileError?.message || String(profileError),
+      });
+    }
 
     const active = subscription?.is_active === true;
     return res.status(200).json({
@@ -150,6 +206,8 @@ router.post("/push/subscription", requireCustomerAuth, async (req, res) => {
       subscribed: active,
       suppressed: !active,
       marketingConsentConfirmed: marketingConsent,
+      owner: req.customerAuth ? "customer" : "visitor",
+      profileStatus,
       subscription: {
         id: subscription?.id || null,
         active,
@@ -172,10 +230,24 @@ router.post("/push/subscription", requireCustomerAuth, async (req, res) => {
   }
 });
 
-router.delete("/push/subscription", requireCustomerAuth, async (req, res) => {
+router.delete("/push/subscription", optionalCustomerAuth, async (req, res) => {
   try {
+    const visitorId = cleanIdentifier(req.body?.visitor_id || req.body?.visitorId);
+    const sessionId = cleanIdentifier(req.body?.session_id || req.body?.sessionId);
+    if (!req.customerAuth) {
+      const visitorSessionIsValid = await verifyVisitorSession({ visitorId, sessionId });
+      if (!visitorSessionIsValid) {
+        return res.status(400).json({
+          success: false,
+          subscribed: true,
+          message: "A sessão de navegação é inválida.",
+        });
+      }
+    }
+
     await deactivateCustomerMarketingPushSubscription({
-      customerId: req.customerAuth.id,
+      customerId: req.customerAuth?.id || null,
+      visitorId,
       endpoint: req.body?.endpoint,
     });
 

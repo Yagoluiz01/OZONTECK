@@ -128,6 +128,15 @@ function endpointHash(endpoint) {
   return crypto.createHash("sha256").update(endpoint).digest("hex");
 }
 
+export function buildMarketingPushRecipientKey({ customerId, visitorId } = {}) {
+  const safeCustomerId = cleanText(customerId, 80);
+  if (UUID_PATTERN.test(safeCustomerId)) return `customer:${safeCustomerId.toLowerCase()}`;
+
+  const safeVisitorId = cleanText(visitorId, 180);
+  if (!safeVisitorId) return "";
+  return `visitor:${crypto.createHash("sha256").update(safeVisitorId).digest("hex")}`;
+}
+
 function isGonePushEndpoint(error) {
   const statusCode = Number(error?.statusCode || error?.status || 0);
   return statusCode === 404 || statusCode === 410;
@@ -191,31 +200,65 @@ export function buildProductInterestPushPayload({
 }
 
 export async function saveCustomerMarketingPushSubscription(
-  { customerId, subscription, userAgent = "", marketingConsent = false } = {},
+  {
+    customerId,
+    visitorId,
+    sessionId,
+    subscription,
+    userAgent = "",
+    marketingConsent = false,
+  } = {},
   { client = supabaseAdmin } = {}
 ) {
   const safeCustomerId = cleanText(customerId, 80);
-  if (!UUID_PATTERN.test(safeCustomerId)) {
-    const error = new Error("Cliente inválido para inscrição Web Push.");
+  const customerIsValid = UUID_PATTERN.test(safeCustomerId);
+  const safeVisitorId = cleanText(visitorId, 180);
+  const safeSessionId = cleanText(sessionId, 180);
+  if (!customerIsValid && !safeVisitorId) {
+    const error = new Error("Visitante ou cliente inválido para inscrição Web Push.");
     error.statusCode = 400;
     throw error;
   }
   const normalized = normalizeSubscription(subscription);
+  const normalizedEndpointHash = endpointHash(normalized.endpoint);
   const now = new Date().toISOString();
+  const { data: existing, error: existingError } = await client
+    .from("customer_marketing_push_subscriptions")
+    .select("id,customer_id,visitor_id,p256dh,auth")
+    .eq("endpoint_hash", normalizedEndpointHash)
+    .maybeSingle();
+  if (existingError) throw existingError;
+  if (
+    existing?.id &&
+    (existing.p256dh !== normalized.p256dh || existing.auth !== normalized.auth)
+  ) {
+    const error = new Error("A inscrição Web Push não corresponde a este navegador.");
+    error.statusCode = 409;
+    error.code = "web_push_subscription_ownership_mismatch";
+    throw error;
+  }
+
+  // Um POST anônimo jamais remove o vínculo autenticado já existente.
+  const ownerCustomerId = customerIsValid
+    ? safeCustomerId
+    : UUID_PATTERN.test(cleanText(existing?.customer_id, 80))
+      ? cleanText(existing.customer_id, 80)
+      : null;
+  const ownerVisitorId = safeVisitorId || cleanText(existing?.visitor_id, 180) || null;
   let isSuppressed = false;
 
-  if (marketingConsent === true) {
+  if (marketingConsent === true && customerIsValid) {
     const { error: consentError } = await client
       .from("customer_marketing_suppressions")
       .delete()
-      .eq("customer_id", safeCustomerId)
+      .eq("customer_id", ownerCustomerId)
       .eq("channel", "web_push");
     if (consentError) throw consentError;
-  } else {
+  } else if (ownerCustomerId) {
     const { data: suppression, error: suppressionLookupError } = await client
       .from("customer_marketing_suppressions")
       .select("customer_id")
-      .eq("customer_id", safeCustomerId)
+      .eq("customer_id", ownerCustomerId)
       .eq("channel", "web_push")
       .maybeSingle();
     if (suppressionLookupError) throw suppressionLookupError;
@@ -226,9 +269,11 @@ export async function saveCustomerMarketingPushSubscription(
     .from("customer_marketing_push_subscriptions")
     .upsert(
       {
-        customer_id: safeCustomerId,
+        customer_id: ownerCustomerId,
+        visitor_id: ownerVisitorId,
+        last_session_id: safeSessionId || null,
         endpoint: normalized.endpoint,
-        endpoint_hash: endpointHash(normalized.endpoint),
+        endpoint_hash: normalizedEndpointHash,
         p256dh: normalized.p256dh,
         auth: normalized.auth,
         user_agent: cleanText(userAgent, 500) || null,
@@ -242,7 +287,7 @@ export async function saveCustomerMarketingPushSubscription(
       },
       { onConflict: "endpoint_hash" }
     )
-    .select("id,customer_id,is_active,consented_at,last_seen_at")
+    .select("id,customer_id,visitor_id,is_active,consented_at,last_seen_at")
     .single();
 
   if (error) throw error;
@@ -251,19 +296,21 @@ export async function saveCustomerMarketingPushSubscription(
 }
 
 export async function deactivateCustomerMarketingPushSubscription(
-  { customerId, endpoint, reason = "customer_unsubscribe" } = {},
+  { customerId, visitorId, endpoint, reason = "customer_unsubscribe" } = {},
   { client = supabaseAdmin } = {}
 ) {
   const safeCustomerId = cleanText(customerId, 80);
+  const customerIsValid = UUID_PATTERN.test(safeCustomerId);
+  const safeVisitorId = cleanText(visitorId, 180);
   const safeEndpoint = cleanText(endpoint, 2048);
-  if (!UUID_PATTERN.test(safeCustomerId) || !safeEndpoint) {
-    const error = new Error("Cliente e endpoint são obrigatórios.");
+  if ((!customerIsValid && !safeVisitorId) || !safeEndpoint) {
+    const error = new Error("Visitante ou cliente e endpoint são obrigatórios.");
     error.statusCode = 400;
     throw error;
   }
 
   const now = new Date().toISOString();
-  const { error } = await client
+  let deactivateQuery = client
     .from("customer_marketing_push_subscriptions")
     .update({
       is_active: false,
@@ -271,30 +318,41 @@ export async function deactivateCustomerMarketingPushSubscription(
       last_error: cleanText(reason, 500) || "customer_unsubscribe",
       updated_at: now,
     })
-    .eq("customer_id", safeCustomerId)
     .eq("endpoint_hash", endpointHash(safeEndpoint));
+  deactivateQuery = customerIsValid
+    ? deactivateQuery.eq("customer_id", safeCustomerId)
+    : deactivateQuery.eq("visitor_id", safeVisitorId);
+  const { error } = await deactivateQuery;
   if (error) throw error;
 
-  const { error: suppressionError } = await client
-    .from("customer_marketing_suppressions")
-    .upsert(
-      {
-        customer_id: safeCustomerId,
-        channel: "web_push",
-        reason: cleanText(reason, 120) || "customer_unsubscribe",
-        suppressed_at: now,
-        updated_at: now,
-      },
-      { onConflict: "customer_id,channel" }
-    );
-  if (suppressionError) throw suppressionError;
+  if (customerIsValid) {
+    const { error: suppressionError } = await client
+      .from("customer_marketing_suppressions")
+      .upsert(
+        {
+          customer_id: safeCustomerId,
+          channel: "web_push",
+          reason: cleanText(reason, 120) || "customer_unsubscribe",
+          suppressed_at: now,
+          updated_at: now,
+        },
+        { onConflict: "customer_id,channel" }
+      );
+    if (suppressionError) throw suppressionError;
+  }
 
-  return { customerId: safeCustomerId, channel: "web_push", suppressed: true };
+  return {
+    customerId: customerIsValid ? safeCustomerId : null,
+    visitorId: safeVisitorId || null,
+    channel: "web_push",
+    suppressed: true,
+  };
 }
 
 export async function sendCustomerMarketingPush(
   {
     customerId,
+    visitorId,
     product,
     productUrl,
     campaignId,
@@ -322,13 +380,21 @@ export async function sendCustomerMarketingPush(
   }
 
   const safeCustomerId = cleanText(customerId, 80);
-  const { data: subscriptions, error } = await client
+  const customerIsValid = UUID_PATTERN.test(safeCustomerId);
+  const safeVisitorId = cleanText(visitorId, 180);
+  if (!customerIsValid && !safeVisitorId) {
+    return { success: false, skipped: true, reason: "invalid_push_recipient" };
+  }
+
+  let subscriptionQuery = client
     .from("customer_marketing_push_subscriptions")
     .select("id,endpoint,p256dh,auth,fail_count")
-    .eq("customer_id", safeCustomerId)
     .eq("is_active", true)
-    .order("last_seen_at", { ascending: false })
-    .limit(10);
+    .order("last_seen_at", { ascending: false });
+  subscriptionQuery = customerIsValid
+    ? subscriptionQuery.eq("customer_id", safeCustomerId)
+    : subscriptionQuery.eq("visitor_id", safeVisitorId).is("customer_id", null);
+  const { data: subscriptions, error } = await subscriptionQuery.limit(10);
   if (error) throw error;
 
   if (!subscriptions?.length) {

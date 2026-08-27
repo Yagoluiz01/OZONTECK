@@ -6,8 +6,13 @@ import { normalizeInterestCategory } from "../intelligence/interestTaxonomy.js";
 import {
   evaluateInterestEligibility,
   refreshCustomerInterestProfilesBatch,
+  refreshVisitorInterestProfile,
+  refreshVisitorInterestProfilesBatch,
 } from "./customerInterestProfile.service.js";
-import { sendCustomerMarketingPush } from "./customerMarketingPush.service.js";
+import {
+  buildMarketingPushRecipientKey,
+  sendCustomerMarketingPush,
+} from "./customerMarketingPush.service.js";
 import { sendSmtpEmail } from "./emailTransport.service.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -181,6 +186,27 @@ export function getProductInterestNotificationConfig(overrides = {}) {
       50,
       2
     ),
+    webPushDailyCap: clampInt(
+      overrides.webPushDailyCap ?? process.env.PRODUCT_INTEREST_WEB_PUSH_DAILY_CAP,
+      0,
+      100,
+      0
+    ),
+    webPushWeeklyCap: clampInt(
+      overrides.webPushWeeklyCap ?? process.env.PRODUCT_INTEREST_WEB_PUSH_WEEKLY_CAP,
+      0,
+      500,
+      0
+    ),
+    webPushRespectDeliveryWindow:
+      overrides.webPushRespectDeliveryWindow ??
+      isTruthy(process.env.PRODUCT_INTEREST_WEB_PUSH_RESPECT_DELIVERY_WINDOW || "false"),
+    pushAudiencePageSize: clampInt(
+      overrides.pushAudiencePageSize ?? process.env.PRODUCT_INTEREST_PUSH_PAGE_SIZE,
+      10,
+      500,
+      100
+    ),
     recipientLimit: clampInt(
       overrides.recipientLimit ?? process.env.PRODUCT_INTEREST_BATCH_LIMIT,
       1,
@@ -317,7 +343,7 @@ export async function suppressCustomerProductMarketing(
   return { customerId: decoded.customer_id, channel: "email", suppressed: true };
 }
 
-function buildProductUrl(product, config) {
+export function buildProductUrl(product, config) {
   const identifier = encodeURIComponent(product?.slug || product?.sku || product?.id || "");
   if (config.productUrlTemplate) {
     return config.productUrlTemplate
@@ -325,7 +351,7 @@ function buildProductUrl(product, config) {
       .replaceAll("{productSlug}", identifier)
       .replaceAll("{productSku}", encodeURIComponent(product?.sku || ""));
   }
-  return `${config.storefrontUrl}/detalhe-produto.html?id=${identifier}`;
+  return `${config.storefrontUrl}/pages-html/loja/detalhe-produto.html?id=${identifier}`;
 }
 
 function buildUnsubscribeUrl(customerId, config) {
@@ -461,6 +487,19 @@ async function completeJob(client, jobId) {
   if (error) throw error;
 }
 
+async function renewJobLease(client, jobId, workerId) {
+  if (!jobId || !workerId) return;
+
+  const now = new Date().toISOString();
+  const { error } = await client
+    .from("product_notification_jobs")
+    .update({ locked_at: now, updated_at: now })
+    .eq("id", jobId)
+    .eq("status", "processing")
+    .eq("locked_by", workerId);
+  if (error) throw error;
+}
+
 async function failJob(client, job, error) {
   const attempts = Number(job?.attempts || 0);
   const maxAttempts = Number(job?.max_attempts || 3);
@@ -503,6 +542,370 @@ async function reserveDelivery(client, payload, config) {
   if (error) throw error;
   if (typeof data === "string") return data;
   return data?.id || data?.delivery_id || null;
+}
+
+async function reserveRecipientDelivery(client, payload, config) {
+  const { data, error } = await client.rpc(
+    "reserve_product_interest_recipient_delivery",
+    {
+      p_campaign_id: payload.campaign_id,
+      p_recipient_key: payload.recipient_key,
+      p_customer_id: payload.customer_id || null,
+      p_visitor_id: payload.visitor_id || null,
+      p_push_subscription_id: payload.push_subscription_id || null,
+      p_channel: payload.channel,
+      p_category_key: payload.category_key,
+      p_match_score: payload.match_score,
+      p_metadata: payload.metadata || {},
+      p_daily_cap: config.webPushDailyCap,
+      p_weekly_cap: config.webPushWeeklyCap,
+      p_dry_run: config.dryRun,
+    }
+  );
+  if (error) throw error;
+  if (typeof data === "string") return data;
+  return data?.id || data?.delivery_id || null;
+}
+
+function createPushAudienceSummary() {
+  return {
+    candidates: 0,
+    targeted_candidates: 0,
+    discovery_candidates: 0,
+    targeted_recipients: 0,
+    discovery_recipients: 0,
+    selected: 0,
+    simulated: 0,
+    sent: 0,
+    failed: 0,
+    skipped: 0,
+    duplicates: 0,
+    channels: {
+      web_push: { selected: 0, simulated: 0, sent: 0, failed: 0, skipped: 0 },
+    },
+  };
+}
+
+function mergeCampaignSummaries(base, addition) {
+  const merged = { ...base };
+  for (const key of [
+    "candidates",
+    "targeted_candidates",
+    "discovery_candidates",
+    "targeted_recipients",
+    "discovery_recipients",
+    "selected",
+    "simulated",
+    "sent",
+    "failed",
+    "skipped",
+    "duplicates",
+  ]) {
+    merged[key] = Number(base?.[key] || 0) + Number(addition?.[key] || 0);
+  }
+
+  merged.channels = {
+    ...(base?.channels || {}),
+    ...(addition?.channels || {}),
+  };
+  if (merged.selected > 0) delete merged.reason;
+  return merged;
+}
+
+function appendRowsByKey(map, rows, keyName) {
+  for (const row of rows || []) {
+    const key = cleanText(row?.[keyName], 180);
+    if (!key) continue;
+    const current = map.get(key) || [];
+    current.push(row);
+    map.set(key, current);
+  }
+}
+
+async function loadActivePushSubscriptionPage(client, pageSize, cursor) {
+  let query = client
+    .from("customer_marketing_push_subscriptions")
+    .select("id,customer_id,visitor_id,last_seen_at,profile_refreshed_at")
+    .eq("is_active", true)
+    .order("id", { ascending: true });
+
+  const supportsCursor = typeof query.gt === "function";
+  if (cursor && supportsCursor) query = query.gt("id", cursor);
+  const { data, error } = await query.limit(pageSize);
+  if (error) throw error;
+
+  return {
+    rows: Array.isArray(data) ? data : [],
+    supportsCursor,
+  };
+}
+
+export async function processWebPushAudience(
+  {
+    campaign,
+    product,
+    categoryKey,
+    productUrl,
+    config,
+    nowMs,
+    jobId = null,
+    workerId = null,
+  },
+  { client, pushMailer }
+) {
+  const summary = createPushAudienceSummary();
+  const lookbackFromMs = nowMs - config.lookbackDays * DAY_MS;
+  const lookbackFrom = new Date(lookbackFromMs).toISOString();
+  const refreshCutoffMs =
+    nowMs - Math.max(1, Number(config.profileRefreshMinutes) || 30) * 60 * 1000;
+  const seenRecipients = new Set();
+  let cursor = "";
+  let lastLeaseRenewalMs = Date.now();
+
+  const renewLeaseWhenDue = async () => {
+    if (!jobId || !workerId || Date.now() - lastLeaseRenewalMs < 60_000) return;
+    await renewJobLease(client, jobId, workerId);
+    lastLeaseRenewalMs = Date.now();
+  };
+
+  while (true) {
+    await renewLeaseWhenDue();
+    const page = await loadActivePushSubscriptionPage(
+      client,
+      config.pushAudiencePageSize,
+      cursor
+    );
+    if (!page.rows.length) break;
+
+    const groups = new Map();
+    for (const subscription of page.rows) {
+      const customerId = cleanText(subscription?.customer_id, 80);
+      const visitorId = cleanText(subscription?.visitor_id, 180);
+      const recipientKey = buildMarketingPushRecipientKey({ customerId, visitorId });
+      if (!recipientKey || seenRecipients.has(recipientKey)) continue;
+
+      const current = groups.get(recipientKey) || {
+        recipientKey,
+        customerId: customerId || null,
+        visitorId: customerId ? null : visitorId || null,
+        representativeSubscriptionId: subscription?.id || null,
+        profileRefreshedAt: subscription?.profile_refreshed_at || null,
+      };
+      groups.set(recipientKey, current);
+    }
+
+    const recipients = Array.from(groups.values());
+    const customerIds = recipients.map((item) => item.customerId).filter(Boolean);
+    const visitorIds = recipients.map((item) => item.visitorId).filter(Boolean);
+
+    // Garante que um visitante com sinais antigos não seja tratado como descoberta
+    // apenas porque o refresh periódico ainda não chegou até ele.
+    for (const item of recipients) {
+      await renewLeaseWhenDue();
+      if (!item.visitorId) continue;
+      const refreshedMs = Date.parse(String(item.profileRefreshedAt || ""));
+      if (Number.isFinite(refreshedMs) && refreshedMs >= refreshCutoffMs) continue;
+      await refreshVisitorInterestProfile(item.visitorId, {
+        client,
+        lookbackDays: config.lookbackDays,
+        nowMs,
+      });
+    }
+
+    const [customersResult, customerProfilesResult, visitorProfilesResult, suppressionsResult] =
+      await Promise.all([
+        customerIds.length
+          ? client
+              .from("customers")
+              .select("id,account_enabled")
+              .in("id", customerIds)
+          : Promise.resolve({ data: [], error: null }),
+        customerIds.length
+          ? client
+              .from("customer_interest_profiles")
+              .select(
+                "customer_id,category_key,category_score,confidence,qualifying_signal_count,last_signal_at,profile_version"
+              )
+              .in("customer_id", customerIds)
+              .gte("last_signal_at", lookbackFrom)
+              .limit(Math.min(5000, Math.max(100, customerIds.length * 20)))
+          : Promise.resolve({ data: [], error: null }),
+        visitorIds.length
+          ? client
+              .from("visitor_interest_profiles")
+              .select(
+                "visitor_id,category_key,category_score,confidence,qualifying_signal_count,last_signal_at,profile_version"
+              )
+              .in("visitor_id", visitorIds)
+              .gte("last_signal_at", lookbackFrom)
+              .limit(Math.min(5000, Math.max(100, visitorIds.length * 20)))
+          : Promise.resolve({ data: [], error: null }),
+        customerIds.length
+          ? client
+              .from("customer_marketing_suppressions")
+              .select("customer_id")
+              .in("customer_id", customerIds)
+              .eq("channel", "web_push")
+          : Promise.resolve({ data: [], error: null }),
+      ]);
+    if (customersResult.error) throw customersResult.error;
+    if (customerProfilesResult.error) throw customerProfilesResult.error;
+    if (visitorProfilesResult.error) throw visitorProfilesResult.error;
+    if (suppressionsResult.error) throw suppressionsResult.error;
+
+    const enabledCustomers = new Set(
+      (customersResult.data || [])
+        .filter((row) => row?.account_enabled === true)
+        .map((row) => row.id)
+    );
+    const suppressedCustomers = new Set(
+      (suppressionsResult.data || []).map((row) => row.customer_id).filter(Boolean)
+    );
+    const customerProfiles = new Map();
+    const visitorProfiles = new Map();
+    appendRowsByKey(customerProfiles, customerProfilesResult.data, "customer_id");
+    appendRowsByKey(visitorProfiles, visitorProfilesResult.data, "visitor_id");
+
+    for (const recipient of recipients) {
+      await renewLeaseWhenDue();
+      seenRecipients.add(recipient.recipientKey);
+      if (
+        recipient.customerId &&
+        (!enabledCustomers.has(recipient.customerId) ||
+          suppressedCustomers.has(recipient.customerId))
+      ) {
+        continue;
+      }
+
+      const profiles = recipient.customerId
+        ? customerProfiles.get(recipient.customerId) || []
+        : visitorProfiles.get(recipient.visitorId) || [];
+      const learnedProfiles = profiles.filter((profile) =>
+        hasLearnedInterest(profile, config, lookbackFromMs)
+      );
+      const matchingProfile = learnedProfiles.find(
+        (profile) => profile.category_key === categoryKey
+      );
+
+      let selectionMode = "discovery";
+      let evaluation = {
+        eligible: true,
+        matchScore: 0,
+        recencyScore: 0,
+        reasons: ["discovery_until_interest_learned"],
+      };
+      let profile = {
+        category_score: 0,
+        confidence: 0,
+        qualifying_signal_count: 0,
+        profile_version: "discovery-v2",
+      };
+
+      if (learnedProfiles.length) {
+        summary.targeted_candidates += 1;
+        if (!matchingProfile) continue;
+        evaluation = evaluateInterestEligibility(matchingProfile, config, nowMs);
+        if (!evaluation.eligible) continue;
+        profile = matchingProfile;
+        selectionMode = "interest";
+        summary.targeted_recipients += 1;
+      } else {
+        summary.discovery_candidates += 1;
+        if (!config.discoveryEnabled) continue;
+        summary.discovery_recipients += 1;
+      }
+
+      summary.candidates += 1;
+      const deliveryId = await reserveRecipientDelivery(
+        client,
+        {
+          campaign_id: campaign.id,
+          recipient_key: recipient.recipientKey,
+          customer_id: recipient.customerId,
+          visitor_id: recipient.visitorId,
+          push_subscription_id: recipient.representativeSubscriptionId,
+          channel: "web_push",
+          category_key: categoryKey,
+          match_score: evaluation.matchScore,
+          metadata: {
+            category_score: Number(profile.category_score || 0),
+            confidence: Number(profile.confidence || 0),
+            recency_score: evaluation.recencyScore,
+            qualifying_signal_count: Number(profile.qualifying_signal_count || 0),
+            profile_version: profile.profile_version,
+            selection_mode: selectionMode,
+            recipient_type: recipient.customerId ? "customer" : "visitor",
+            dry_run: config.dryRun,
+          },
+        },
+        config
+      );
+
+      if (!deliveryId) {
+        summary.duplicates += 1;
+        continue;
+      }
+
+      summary.selected += 1;
+      summary.channels.web_push.selected += 1;
+      if (config.dryRun) {
+        summary.simulated += 1;
+        summary.channels.web_push.simulated += 1;
+        continue;
+      }
+
+      const sendResult = await pushMailer(
+        {
+          customerId: recipient.customerId,
+          visitorId: recipient.visitorId,
+          product,
+          productUrl,
+          campaignId: campaign.id,
+          brandName: config.brandName,
+          brandIconUrl: config.brandIconUrl,
+          brandBadgeUrl: config.brandBadgeUrl,
+          storefrontUrl: config.storefrontUrl,
+        },
+        { client }
+      );
+      await renewLeaseWhenDue();
+      const sent = sendResult?.success === true;
+      const skipped = !sent && sendResult?.skipped === true;
+      const { error: deliveryUpdateError } = await client
+        .from("customer_notification_deliveries")
+        .update({
+          status: sent ? "sent" : skipped ? "skipped" : "failed",
+          provider_message_id:
+            cleanText(sendResult?.messageId || sendResult?.providerMessageId, 500) || null,
+          failure_reason: sent
+            ? null
+            : cleanText(sendResult?.reason || sendResult?.error, 1000) || "send_failed",
+          sent_at: sent ? new Date().toISOString() : null,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", deliveryId);
+      if (deliveryUpdateError) throw deliveryUpdateError;
+
+      if (sent) {
+        summary.sent += 1;
+        summary.channels.web_push.sent += 1;
+      } else if (skipped) {
+        summary.skipped += 1;
+        summary.channels.web_push.skipped += 1;
+      } else {
+        summary.failed += 1;
+        summary.channels.web_push.failed += 1;
+      }
+    }
+
+    const lastId = cleanText(page.rows[page.rows.length - 1]?.id, 80);
+    if (!page.supportsCursor || page.rows.length < config.pushAudiencePageSize || !lastId) {
+      break;
+    }
+    cursor = lastId;
+  }
+
+  return summary;
 }
 
 async function loadCampaignContext(client, job) {
@@ -733,6 +1136,46 @@ async function processCampaignJob(job, config, { client, mailer, pushMailer, now
     last_error: null,
   });
 
+  const productUrl = buildProductUrl(product, config);
+  const pushSummary = config.webPushEnabled
+    ? await processWebPushAudience(
+        {
+          campaign,
+          product,
+          categoryKey,
+          productUrl,
+          config,
+          nowMs,
+          jobId: job.id,
+          workerId: WORKER_ID,
+        },
+        { client, pushMailer }
+      )
+    : createPushAudienceSummary();
+
+  if (!config.emailEnabled) {
+    if (!pushSummary.selected) {
+      pushSummary.reason = config.discoveryEnabled
+        ? "no_eligible_audience"
+        : "no_interest_profiles";
+    }
+    await updateCampaign(client, campaign.id, {
+      status: "completed",
+      summary: pushSummary,
+      completed_at: new Date().toISOString(),
+    });
+    await completeJob(client, job.id);
+    return { jobId: job.id, campaignId: campaign.id, categoryKey, ...pushSummary };
+  }
+
+  // O caminho legado abaixo continua responsável apenas pelo e-mail. Web Push
+  // usa a audiência por visitante/cliente acima e nunca é cortado por batch.
+  config = {
+    ...config,
+    webPushEnabled: false,
+    channels: ["email"],
+  };
+
   const candidateLimit = Math.min(
     1000,
     Math.max(config.recipientLimit, config.recipientLimit * 5)
@@ -770,21 +1213,38 @@ async function processCampaignJob(job, config, { client, mailer, pushMailer, now
     const reason = config.discoveryEnabled
       ? "no_eligible_audience"
       : "no_interest_profiles";
-    await updateCampaign(client, campaign.id, {
-      status: "completed",
-      summary: {
+    const completedSummary = mergeCampaignSummaries(
+      {
         reason,
         candidates: 0,
         targeted_candidates: 0,
         discovery_candidates: 0,
+        targeted_recipients: 0,
+        discovery_recipients: 0,
         selected: 0,
         sent: 0,
         simulated: 0,
+        failed: 0,
+        skipped: 0,
+        duplicates: 0,
+        channels: {
+          email: { selected: 0, simulated: 0, sent: 0, failed: 0, skipped: 0 },
+        },
       },
+      pushSummary
+    );
+    await updateCampaign(client, campaign.id, {
+      status: "completed",
+      summary: completedSummary,
       completed_at: new Date(nowMs).toISOString(),
     });
     await completeJob(client, job.id);
-    return { jobId: job.id, reason, selected: 0, sent: 0, simulated: 0 };
+    return {
+      jobId: job.id,
+      campaignId: campaign.id,
+      categoryKey,
+      ...completedSummary,
+    };
   }
 
   const countedDeliveryStatuses = config.dryRun
@@ -929,8 +1389,6 @@ async function processCampaignJob(job, config, { client, mailer, pushMailer, now
     },
   };
   if (!recipients.length) summary.reason = "no_available_channels";
-  const productUrl = buildProductUrl(product, config);
-
   for (const item of recipients) {
     for (const channel of item.channels) {
       const deliveryId = await reserveDelivery(
@@ -1039,13 +1497,19 @@ async function processCampaignJob(job, config, { client, mailer, pushMailer, now
     }
   }
 
+  const completedSummary = mergeCampaignSummaries(summary, pushSummary);
   await updateCampaign(client, campaign.id, {
     status: "completed",
-    summary,
+    summary: completedSummary,
     completed_at: new Date().toISOString(),
   });
   await completeJob(client, job.id);
-  return { jobId: job.id, campaignId: campaign.id, categoryKey, ...summary };
+  return {
+    jobId: job.id,
+    campaignId: campaign.id,
+    categoryKey,
+    ...completedSummary,
+  };
 }
 
 export async function runProductInterestNotificationSweep(
@@ -1063,15 +1527,22 @@ export async function runProductInterestNotificationSweep(
     return { skipped: true, reason: "no_delivery_channels_enabled", trigger };
   }
 
-  const profileRefresh = await refreshCustomerInterestProfilesBatch(
-    {
-      limit: config.profileRefreshLimit,
-      minRefreshMinutes: config.profileRefreshMinutes,
-      lookbackDays: config.lookbackDays,
-      nowMs,
-    },
-    { client }
-  );
+  const refreshOptions = {
+    limit: config.profileRefreshLimit,
+    minRefreshMinutes: config.profileRefreshMinutes,
+    lookbackDays: config.lookbackDays,
+    nowMs,
+  };
+  const [customerProfileRefresh, visitorProfileRefresh] = await Promise.all([
+    refreshCustomerInterestProfilesBatch(refreshOptions, { client }),
+    config.webPushEnabled
+      ? refreshVisitorInterestProfilesBatch(refreshOptions, { client })
+      : Promise.resolve({ checked: 0, refreshed: 0, failed: 0, failures: [] }),
+  ]);
+  const profileRefresh = {
+    customers: customerProfileRefresh,
+    visitors: visitorProfileRefresh,
+  };
 
   if (!config.dryRun && !config.consentConfirmed) {
     return {
@@ -1082,7 +1553,13 @@ export async function runProductInterestNotificationSweep(
     };
   }
   if (!config.dryRun && !isWithinProductInterestDeliveryWindow(config, new Date(nowMs))) {
-    return { skipped: true, reason: "outside_delivery_window", trigger, profileRefresh };
+    const canSendPushOutsideWindow =
+      config.webPushEnabled &&
+      !config.webPushRespectDeliveryWindow &&
+      !config.emailEnabled;
+    if (!canSendPushOutsideWindow) {
+      return { skipped: true, reason: "outside_delivery_window", trigger, profileRefresh };
+    }
   }
   if (!config.dryRun && (!config.apiPublicUrl || !config.storefrontUrl)) {
     return { skipped: true, reason: "public_urls_not_configured", trigger, profileRefresh };

@@ -873,6 +873,17 @@ export async function requireCustomerAuth(req, res, next) {
   }
 }
 
+export async function optionalCustomerAuth(req, res, next) {
+  const authHeader = String(req.headers.authorization || "").trim();
+  if (!authHeader) {
+    req.customerAuth = null;
+    req.customer = null;
+    return next();
+  }
+
+  return requireCustomerAuth(req, res, next);
+}
+
 function isPaidOrder(order) {
   const status = String(order?.payment_status || "").toLowerCase();
   return ["paid", "approved", "pago", "aprovado"].includes(status);
