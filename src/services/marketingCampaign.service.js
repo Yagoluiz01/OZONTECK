@@ -26,6 +26,8 @@ const PROMOTION_STATUSES = new Set([
   "expired",
   "cancelled",
 ]);
+export const PURGE_MARKETING_CAMPAIGNS_CONFIRMATION =
+  "EXCLUIR TODAS AS CAMPANHAS";
 
 function isTruthy(value) {
   return ["1", "true", "yes", "on"].includes(
@@ -479,6 +481,26 @@ export async function deleteMarketingCampaign(
     );
   }
   return deleteResult.data;
+}
+
+export async function purgeMarketingCampaignData(
+  input = {},
+  { client = supabaseAdmin } = {}
+) {
+  const confirmation = cleanText(input.confirmation, 80);
+  if (confirmation !== PURGE_MARKETING_CAMPAIGNS_CONFIRMATION) {
+    throw fail(
+      `Digite exatamente ${PURGE_MARKETING_CAMPAIGNS_CONFIRMATION} para confirmar.`,
+      400,
+      "invalid_campaign_purge_confirmation"
+    );
+  }
+
+  const result = await client.rpc("purge_marketing_campaign_data", {
+    p_confirmation: confirmation,
+  });
+  if (result.error) throw result.error;
+  return result.data || {};
 }
 
 export async function listMarketingCampaigns(

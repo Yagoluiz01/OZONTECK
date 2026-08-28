@@ -553,3 +553,36 @@ test("exclusão de campanha preserva todo histórico operacional", () => {
   assert.match(service, /campaign_has_history/);
   assert.match(service, /\.delete\(\)[\s\S]*\.eq\("status", "draft"\)/);
 });
+
+test("limpeza total de campanhas é explícita, atômica e restrita à API", () => {
+  const route = read("routes/adminMarketingCampaigns.routes.js");
+  const service = read("services/marketingCampaign.service.js");
+  const migration = read("sql/20260828-purge-marketing-campaign-data.sql");
+  const verification = read("sql/20260828-purge-marketing-campaign-data-verification.sql");
+
+  assert.match(
+    route,
+    /router\.delete\([\s\S]*?"\/"[\s\S]*?campaigns\.manage[\s\S]*?campaigns\.publish[\s\S]*?purgeMarketingCampaignData/
+  );
+  assert.match(service, /EXCLUIR TODAS AS CAMPANHAS/);
+  assert.match(service, /client\.rpc\("purge_marketing_campaign_data"/);
+  assert.match(migration, /security invoker/i);
+  assert.match(migration, /set search_path = ''/i);
+  assert.match(migration, /lock table public\.marketing_campaigns/i);
+  assert.match(migration, /delete from public\.marketing_order_attributions[\s\S]*delete from public\.marketing_campaigns/i);
+  assert.match(migration, /revoke all on function[\s\S]*from public/i);
+  assert.match(migration, /from anon/i);
+  assert.match(migration, /from authenticated/i);
+  assert.match(migration, /grant execute on function[\s\S]*to service_role/i);
+  for (const preserved of [
+    "public.customers",
+    "public.products",
+    "public.customer_marketing_push_subscriptions",
+    "public.customer_interest_profiles",
+    "public.visitor_interest_profiles",
+  ]) {
+    assert.doesNotMatch(migration, new RegExp(`delete from ${preserved.replace(".", "\\.")}`, "i"));
+  }
+  assert.match(verification, /service_role_allowed/);
+  assert.match(verification, /authenticated_blocked/);
+});

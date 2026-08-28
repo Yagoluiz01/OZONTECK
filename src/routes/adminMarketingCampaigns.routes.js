@@ -17,6 +17,7 @@ import {
   listMarketingPromotions,
   pauseMarketingCampaign,
   publishMarketingCampaign,
+  purgeMarketingCampaignData,
   updateMarketingAutomationSettings,
   updateMarketingCampaign,
 } from "../services/marketingCampaign.service.js";
@@ -146,6 +147,24 @@ router.post("/", requirePermission("campaigns.manage"), async (req, res, next) =
     return next(error);
   }
 });
+
+router.delete(
+  "/",
+  requirePermission("campaigns.manage"),
+  requirePermission("campaigns.publish"),
+  async (req, res, next) => {
+    try {
+      const deleted = await purgeMarketingCampaignData(req.body || {});
+      return res.json({
+        success: true,
+        deleted,
+        message: `${Number(deleted.campaigns || 0)} campanha(s) e seus dados operacionais foram excluídos.`,
+      });
+    } catch (error) {
+      return next(error);
+    }
+  }
+);
 
 router.post(
   "/:id/estimate",
