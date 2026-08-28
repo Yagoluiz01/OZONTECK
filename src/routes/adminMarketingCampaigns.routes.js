@@ -6,6 +6,7 @@ import {
   cancelMarketingCampaign,
   createMarketingCampaign,
   createMarketingPromotion,
+  deleteMarketingCampaign,
   estimateMarketingCampaignAudience,
   getMarketingAutomationSettings,
   getMarketingCampaign,
@@ -249,6 +250,23 @@ router.patch(
         actorId: actorId(req),
       });
       return res.json({ success: true, campaign, message: "Campanha atualizada." });
+    } catch (error) {
+      return next(error);
+    }
+  }
+);
+
+router.delete(
+  "/:id",
+  requirePermission("campaigns.manage"),
+  async (req, res, next) => {
+    try {
+      const campaign = await deleteMarketingCampaign(req.params.id);
+      return res.json({
+        success: true,
+        campaign,
+        message: "Rascunho excluído permanentemente.",
+      });
     } catch (error) {
       return next(error);
     }

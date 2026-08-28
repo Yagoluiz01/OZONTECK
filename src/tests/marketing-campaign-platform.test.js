@@ -539,3 +539,17 @@ test("rotas administrativas exigem RBAC e cliques não aceitam redirecionamento 
   assert.match(campaignService, /MARKETING_AUTOMATION_REAL_SEND_ENABLED/);
   assert.match(campaignService, /save_marketing_campaign_draft/);
 });
+
+test("exclusão de campanha preserva todo histórico operacional", () => {
+  const route = read("routes/adminMarketingCampaigns.routes.js");
+  const service = read("services/marketingCampaign.service.js");
+
+  assert.match(route, /router\.delete\([\s\S]*requirePermission\("campaigns\.manage"\)/);
+  assert.match(service, /export async function deleteMarketingCampaign/);
+  assert.match(service, /campaign\.status !== "draft"/);
+  assert.match(service, /campaign\.published_at/);
+  assert.match(service, /campaign\.last_simulated_at/);
+  assert.match(service, /from\("marketing_campaign_jobs"\)/);
+  assert.match(service, /campaign_has_history/);
+  assert.match(service, /\.delete\(\)[\s\S]*\.eq\("status", "draft"\)/);
+});

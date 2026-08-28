@@ -420,6 +420,67 @@ export async function getMarketingCampaign(
   };
 }
 
+export async function deleteMarketingCampaign(
+  campaignId,
+  { client = supabaseAdmin } = {}
+) {
+  const id = normalizeUuid(campaignId, "Campanha");
+  const campaignResult = await client
+    .from("marketing_campaigns")
+    .select("id,name,status,published_at,last_simulated_at")
+    .eq("id", id)
+    .maybeSingle();
+  if (campaignResult.error) throw campaignResult.error;
+  if (!campaignResult.data) {
+    throw fail("Campanha não encontrada.", 404, "campaign_not_found");
+  }
+
+  const campaign = campaignResult.data;
+  if (
+    campaign.status !== "draft" ||
+    campaign.published_at ||
+    campaign.last_simulated_at
+  ) {
+    throw fail(
+      "Somente um rascunho que nunca foi processado pode ser excluído. Campanhas com histórico devem ser preservadas.",
+      409,
+      "campaign_has_history"
+    );
+  }
+
+  const historyResult = await client
+    .from("marketing_campaign_jobs")
+    .select("id", { count: "exact", head: true })
+    .eq("campaign_id", id);
+  if (historyResult.error) throw historyResult.error;
+  if (Number(historyResult.count || 0) > 0) {
+    throw fail(
+      "Esta campanha já possui histórico de processamento e não pode ser excluída.",
+      409,
+      "campaign_has_history"
+    );
+  }
+
+  const deleteResult = await client
+    .from("marketing_campaigns")
+    .delete()
+    .eq("id", id)
+    .eq("status", "draft")
+    .is("published_at", null)
+    .is("last_simulated_at", null)
+    .select("id,name")
+    .maybeSingle();
+  if (deleteResult.error) throw deleteResult.error;
+  if (!deleteResult.data) {
+    throw fail(
+      "O estado da campanha mudou. Recarregue antes de excluir.",
+      409,
+      "campaign_state_conflict"
+    );
+  }
+  return deleteResult.data;
+}
+
 export async function listMarketingCampaigns(
   filters = {},
   { client = supabaseAdmin } = {}
